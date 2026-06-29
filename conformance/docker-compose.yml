@@ -1,0 +1,29 @@
+# Conformance harness: a real lukk instance the JS clients are tested against.
+# This is how we guarantee the TS contract never drifts from the PHP source.
+#
+# fixture/ is a minimal Laravel app that installs lukk (+ its 2FA and passkey
+# libraries), publishes config + all three migration groups, wires the `lukk-jwt`
+# guard, and seeds a plain user (user@example.com) plus a confirmed-2FA user
+# (2fa@example.com), both with password `password`. See fixture/build.sh.
+#
+#   docker compose -f conformance/docker-compose.yml up -d --build
+#   pnpm --filter lukk-core test:conformance
+#   # the other delivery mode:
+#   LUKK_COOKIE_MODE=true docker compose -f conformance/docker-compose.yml up -d --build
+#   LUKK_COOKIE_MODE=true pnpm --filter lukk-core test:conformance
+
+services:
+  lukk-api:
+    build:
+      context: ./fixture
+      args:
+        # false = BFF/body mode (default); true = direct/cookie mode.
+        LUKK_COOKIE_MODE: ${LUKK_COOKIE_MODE:-false}
+    ports:
+      - '8000:8000'
+    # Waits until the /up route responds before tests start.
+    healthcheck:
+      test: ['CMD', 'curl', '-fsS', 'http://localhost:8000/up']
+      interval: 3s
+      timeout: 2s
+      retries: 20

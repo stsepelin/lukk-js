@@ -1,0 +1,55 @@
+{
+  "name": "lukk-nuxt",
+  "version": "0.0.0",
+  "description": "Nuxt module for lukk (first-party Laravel JWT auth) — SSR / SPA / SSG, BFF or direct.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/stsepelin/lukk-js.git",
+    "directory": "packages/nuxt"
+  },
+  "keywords": [
+    "nuxt",
+    "nuxt-module",
+    "lukk",
+    "jwt",
+    "auth",
+    "laravel",
+    "passkey",
+    "2fa"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/types.d.mts",
+      "import": "./dist/module.mjs"
+    }
+  },
+  "main": "./dist/module.mjs",
+  "types": "./dist/types.d.mts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "prepack": "nuxt-module-build build",
+    "build": "nuxt-module-build build",
+    "dev": "nuxi dev playground",
+    "dev:prepare": "nuxt-module-build build --stub && nuxi prepare playground",
+    "typecheck": "nuxi typecheck playground",
+    "test": "vitest run --coverage"
+  },
+  "dependencies": {
+    "@nuxt/kit": "^3.13.0",
+    "defu": "^6.1.4",
+    "lukk-core": "workspace:*"
+  },
+  "devDependencies": {
+    "@nuxt/module-builder": "^0.8.4",
+    "@nuxt/schema": "^3.13.0",
+    "@vitest/coverage-v8": "2.1.9",
+    "nuxt": "^3.13.0",
+    "vitest": "^2.0.0",
+    "vue": "^3.5.39",
+    "vue-tsc": "^3.3.5"
+  }
+}

@@ -1,0 +1,35 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    name: lint · typecheck · test (100% coverage) · build
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm lint
+
+      # Build core first (lukk-nuxt depends on it), the module, and prepare the
+      # playground so its .nuxt types exist for the Nuxt typecheck.
+      - run: pnpm --filter lukk-core build
+      - run: pnpm --filter lukk-nuxt build
+      - run: pnpm --filter lukk-nuxt exec nuxi prepare playground
+
+      - run: pnpm typecheck
+      # Both packages' `test` enforces the 100% coverage threshold (vitest --coverage).
+      - run: pnpm test
+      - run: pnpm build

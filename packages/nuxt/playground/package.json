@@ -1,0 +1,14 @@
+{
+  "name": "lukk-nuxt-playground",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "nuxi dev",
+    "build": "nuxi build",
+    "generate": "nuxi generate"
+  },
+  "devDependencies": {
+    "nuxt": "^3.13.0"
+  }
+}

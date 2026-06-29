@@ -1,0 +1,50 @@
+name: conformance
+
+# Runs the JS clients against a REAL lukk instance, so the TypeScript contract
+# can never silently drift from the PHP source. Both delivery modes are covered.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cookie_mode: ['false', 'true']
+    name: lukk-core vs real lukk (cookie_mode=${{ matrix.cookie_mode }})
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite, mbstring, bcmath
+          tools: composer
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter lukk-core build
+
+      # Generate the Laravel host app with lukk installed (composer pulls lukk/lukk).
+      - name: Build the lukk fixture
+        env:
+          LUKK_COOKIE_MODE: ${{ matrix.cookie_mode }}
+        run: bash conformance/fixture/build.sh "$RUNNER_TEMP/lukk-fixture"
+
+      # Boot it, wait for /up, then run the conformance flows against it.
+      - name: Run conformance flows
+        env:
+          LUKK_URL: http://127.0.0.1:8000/auth
+          LUKK_COOKIE_MODE: ${{ matrix.cookie_mode }}
+        run: |
+          (cd "$RUNNER_TEMP/lukk-fixture" && php artisan serve --host=127.0.0.1 --port=8000 &)
+          for i in $(seq 1 20); do curl -fsS http://127.0.0.1:8000/up >/dev/null 2>&1 && break; sleep 1; done
+          pnpm --filter lukk-core test:conformance

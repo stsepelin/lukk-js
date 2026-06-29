@@ -1,0 +1,44 @@
+{
+  "name": "lukk-core",
+  "version": "0.0.0",
+  "description": "Framework-agnostic client core for lukk (Laravel JWT auth): contract types, auth client, WebAuthn helpers.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/stsepelin/lukk-js.git",
+    "directory": "packages/core"
+  },
+  "keywords": [
+    "lukk",
+    "jwt",
+    "auth",
+    "laravel",
+    "webauthn",
+    "passkey"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs"
+    }
+  },
+  "main": "./dist/index.mjs",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "unbuild",
+    "stub": "unbuild --stub",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --coverage",
+    "test:conformance": "vitest run --config vitest.conformance.config.ts"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^2.1.9",
+    "unbuild": "^2.0.0",
+    "vitest": "^2.0.0"
+  }
+}

@@ -1,0 +1,2 @@
+# Never copy a locally-generated Laravel app into the build context.
+app/

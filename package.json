@@ -1,0 +1,27 @@
+{
+  "name": "lukk-js",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "JavaScript/TypeScript clients for lukk (first-party Laravel JWT auth)",
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "pnpm -r --filter \"./packages/*\" build",
+    "test": "pnpm -r --filter \"./packages/*\" test",
+    "test:conformance": "pnpm -r --filter \"./packages/*\" test:conformance",
+    "typecheck": "pnpm -r --filter \"./packages/*\" typecheck",
+    "lint": "eslint .",
+    "dev": "pnpm --filter lukk-nuxt dev",
+    "changeset": "changeset",
+    "release": "pnpm build && changeset publish"
+  },
+  "devDependencies": {
+    "@changesets/cli": "^2.27.0",
+    "@nuxt/eslint-config": "^1.16.0",
+    "eslint": "^9.0.0",
+    "typescript": "^5.6.0"
+  }
+}
