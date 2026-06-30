@@ -36,7 +36,8 @@
     "dev": "nuxi dev playground",
     "dev:prepare": "nuxt-module-build build --stub && nuxi prepare playground",
     "typecheck": "nuxi typecheck playground",
-    "test": "vitest run --coverage"
+    "test": "vitest run --coverage",
+    "test:integration": "vitest run --config vitest.integration.config.ts"
   },
   "dependencies": {
     "@nuxt/kit": "^3.13.0",
@@ -47,6 +48,7 @@
     "@nuxt/module-builder": "^0.8.4",
     "@nuxt/schema": "^3.13.0",
     "@vitest/coverage-v8": "2.1.9",
+    "h3": "^1.15.11",
     "nuxt": "^3.13.0",
     "vitest": "^2.0.0",
     "vue": "^3.5.39",

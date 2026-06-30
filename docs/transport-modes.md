@@ -101,10 +101,28 @@ The proxy above authenticates the lukk **`/auth`** routes. Your **own** API (and
    ```
 
 > [!NOTE]
-> Make your Laravel API return JSON `401`s for `api/*` (send `Accept: application/json` /
-> configure exception rendering) — otherwise its default `unauthenticated()` redirect to a
-> `login` route surfaces a confusing 500 through the proxy. The BFF proxy itself is mounted
-> at the exported `LUKK_BFF_PREFIX` (`/api/_lukk`); keep your routes clear of it.
+> **Clean JSON errors out of the box.** The app proxy sets `Accept: application/json` on
+> forwarded requests (`api.forceJson`, default `true`), so Laravel's `expectsJson()` is true
+> and unauthenticated / validation failures render as `401`/`422` **JSON** — no `bootstrap/app.php`
+> change needed. (Without it, Laravel's default `redirectGuestsTo(fn () => route('login'))`
+> makes `Authenticate` eagerly resolve `route('login')` *inside the middleware* → a confusing
+> 500; note that `shouldRenderJsonWhen` alone does **not** fix this — it runs after the
+> middleware already threw.) Opt out with `api: { forceJson: false }` only if a route under
+> `path` legitimately serves non-JSON — then you must handle it Laravel-side
+> (`redirectGuestsTo(fn () => null)`, or stamp `Accept` yourself).
+>
+> The BFF proxy itself is mounted at the exported `LUKK_BFF_PREFIX` (`/api/_lukk`); keep your
+> routes clear of it.
+
+> [!NOTE]
+> **Uploads & downloads.** The proxy streams both request and response bodies and forwards
+> `Content-Type`/`Content-Disposition`, so `multipart/form-data` uploads and file downloads
+> work. `forceJson` only sets the request **`Accept`** (the *response* format) — independent
+> of the upload body — so validation errors and protected downloads still render clean JSON.
+> Most download endpoints ignore `Accept` and return the file regardless; if a route under
+> `path` content-negotiates a non-JSON success on `Accept` (rare), set `forceJson: false`
+> for the mount. (All proxied responses are `Cache-Control: no-store`, and `Content-Length`
+> is dropped — chunked transfer, so a progress bar won't show the total.)
 
 <a name="direct"></a>
 ## Direct Mode

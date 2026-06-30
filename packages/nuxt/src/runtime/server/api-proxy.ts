@@ -1,4 +1,4 @@
-import { defineEventHandler, getRequestIP, proxyRequest, setResponseStatus } from 'h3'
+import { defineEventHandler, getRequestHeader, getRequestIP, proxyRequest, setResponseStatus } from 'h3'
 import { useRuntimeConfig } from '#imports'
 import { LUKK_BFF_PREFIX } from '../shared'
 import { isForeignOrigin, resolveTarget } from './proxy-utils'
@@ -33,7 +33,7 @@ const SPOOFABLE_FORWARDING = {
  * is set); and `/api/_lukk/**` is never proxied here.
  */
 export default defineEventHandler(async (event) => {
-  const { apiPath, apiTarget } = useRuntimeConfig(event).lukk as { apiPath: string, apiTarget: string }
+  const { apiPath, apiTarget, apiForceJson } = useRuntimeConfig(event).lukk as { apiPath: string, apiTarget: string, apiForceJson: boolean }
 
   if (isForeignOrigin(event)) {
     setResponseStatus(event, 403)
@@ -69,9 +69,15 @@ export default defineEventHandler(async (event) => {
   // spoofable forwarding headers, and stamp a trusted client IP. `streamRequest`
   // pipes the body through instead of buffering it (large uploads stay cheap).
   const access = await getLukkAccessToken(event)
+  // Force `Accept: application/json` so the JSON API content-negotiates correctly:
+  // Laravel's `expectsJson()` is then true, yielding clean 401/422 JSON instead of
+  // eagerly resolving `route('login')` (a 500 when there's no `login` route). Opt out
+  // to forward the browser's Accept (for a route under `path` that serves non-JSON).
+  const accept = apiForceJson ? 'application/json' : (getRequestHeader(event, 'accept') ?? '')
   return proxyRequest(event, base + query, {
     streamRequest: true,
     headers: {
+      'accept': accept,
       'cookie': '',
       'authorization': access ? `Bearer ${access}` : '',
       'x-forwarded-for': getRequestIP(event, { xForwardedFor: false }) ?? '',
