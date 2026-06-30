@@ -65,7 +65,7 @@ On success, the token is persisted and the [user is loaded](#user) — `loggedIn
 <a name="user"></a>
 ## The Current User
 
-`user` is a reactive ref, populated from your [`user.endpoint`](configuration.md#user-endpoint). lukk issues the token; your app owns the user, so lukk-js fetches it from your backend with the access token attached:
+`user` is a reactive ref, populated from your [`user.endpoint`](configuration.md#user-endpoint). lukk issues the token; your app owns the user, so lukk-js fetches it from your backend. In **direct** mode the access token is attached as a `Bearer`; in **bff** mode the browser has no token, so `user.endpoint` must be a same-origin path authenticated server-side (the [app-API proxy](transport-modes.md#bff) or your own route via `getLukkAccessToken(event)`):
 
 ```vue
 <template>

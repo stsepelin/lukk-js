@@ -18,7 +18,8 @@ Everything is configured under the `lukk` key in `nuxt.config.ts`:
 |---|---|---|---|
 | `baseURL` | `string` | `''` | Your lukk auth URL, including the route prefix. |
 | `mode` | `'bff' \| 'direct'` | `'bff'` | Transport mode — see [Transport Modes](transport-modes.md). |
-| `user.endpoint` | `string` | `''` | Your app's authenticated user route. |
+| `user.endpoint` | `string` | `''` | Your app's authenticated user route (per-mode — see [`user.endpoint`](#user-endpoint)). |
+| `api.path` / `api.target` | `string` | `''` | BFF-only app-API proxy — see [`api`](#api). |
 | `session.password` | `string` | env | BFF sealed-session secret (≥ 32 chars). |
 | `confirmationHeader` | `string` | `'X-Lukk-Confirmation'` | Header carrying the step-up token. |
 | `storage` | `string` | `'cookie'` | BFF token storage backend. |
@@ -69,9 +70,21 @@ This is the single switch that changes the transport. Your component code does n
 user: { endpoint: '/api/me' }
 ```
 
-A route on **your** backend that returns the authenticated user. lukk-js calls it with the access token attached to populate `useLukkAuth().user`. A path is resolved against the app origin; an absolute URL is used as-is. Unset, `user` stays `null`.
+A route on **your** backend that returns the authenticated user, used to populate `useLukkAuth().user` (unset → `user` stays `null`). It is **mode-dependent**:
 
-See [Authentication → The Current User](authentication.md#user).
+- **`direct`** — a path or absolute URL; the access token is attached as a `Bearer` header.
+- **`bff`** — the browser has no token, so this **must be a same-origin path authenticated server-side**: a path under the [`api`](#api) proxy (e.g. `/api/me`), or your own route using `getLukkAccessToken(event)`. No header is attached client-side.
+
+See [Authentication → The Current User](authentication.md#user) and [Transport Modes → Authenticating your own API](transport-modes.md#bff).
+
+<a name="api"></a>
+## `api` (BFF app-API proxy)
+
+```ts
+api: { path: '/api', target: 'https://api.example.com' }
+```
+
+BFF-only and opt-in. Forwards `${path}/**` to the **fixed** `target` (your Laravel API), injecting the access token server-side — so the browser authenticates to your own API without ever holding a token. `target` is never derived from the request (SSRF-safe); non-GET requests with a foreign `Origin` are rejected (CSRF); the inbound `Cookie`/`Authorization` are stripped; and `/api/_lukk/**` is never proxied. See [Transport Modes](transport-modes.md#bff).
 
 <a name="session-password"></a>
 ## `session.password`

@@ -42,6 +42,18 @@ if (isTwoFactorChallenge(result)) {
 The hooks are the only thing a binding wires up — *where* tokens live (memory, a sealed
 cookie, a server session) is the binding's call; the core just speaks to lukk.
 
+## Security model
+
+- The access token is an **opaque bearer** to the core — it is never decoded or verified
+  client-side. All JWT validation (signature, pinned `alg`, `iss`/`aud`/`exp`/`nbf`) is
+  lukk's, server-side. The core only carries the token in `Authorization: Bearer …`
+  (RFC 6750), never in a URL/query.
+- **Credentials are origin-scoped:** the bearer, the `X-Lukk-Confirmation` header, and
+  `credentials: 'include'` are attached only to a same-origin-as-`baseURL` target — never
+  to an absolute, cross-origin URL.
+- **Refresh is single-flighted**, so a burst of 401s never replays a rotated refresh token
+  into lukk's reuse detection. See the [Architecture & security model](https://github.com/stsepelin/lukk-js/blob/main/docs/architecture.md).
+
 ## Documentation
 
 See [Using lukk-core](https://github.com/stsepelin/lukk-js/blob/main/docs/core.md) for the

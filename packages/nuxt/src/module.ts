@@ -3,11 +3,15 @@ import {
   addPlugin,
   addRouteMiddleware,
   addServerHandler,
+  addServerImportsDir,
   createResolver,
   defineNuxtModule,
 } from '@nuxt/kit'
 import { defu } from 'defu'
 import type { LukkMode } from 'lukk-core'
+import { LUKK_BFF_PREFIX } from './runtime/shared'
+
+export { LUKK_BFF_PREFIX, LUKK_SESSION_COOKIE } from './runtime/shared'
 
 export interface ModuleOptions {
   /** lukk base URL incl. the route prefix, e.g. `https://api.example.com/auth`. */
@@ -28,8 +32,11 @@ export interface ModuleOptions {
   storage: string
   /**
    * Your app's authenticated user endpoint (lukk issues the token; your app owns
-   * the user resource). Fetched with the access token to populate
-   * `useLukkAuth().user`. An absolute URL, or a path resolved against the app.
+   * the user resource), fetched to populate `useLukkAuth().user`.
+   *  - direct: an absolute URL or path; the access token is attached as a Bearer.
+   *  - bff: MUST be a **same-origin path authenticated server-side** — the app-API
+   *    proxy (`api` below), or your own route using `getLukkAccessToken(event)`.
+   *    The browser holds no token to attach.
    */
   user: { endpoint: string }
   /**
@@ -37,6 +44,14 @@ export interface ModuleOptions {
    * Prefer setting it via the `NUXT_LUKK_SESSION_PASSWORD` env var.
    */
   session: { password: string }
+  /**
+   * BFF only, optional: proxy your own app API so it's authenticated out of the
+   * box. Requests to `${path}/**` are forwarded to the FIXED `target` (your
+   * Laravel API) with the access token injected server-side — the browser never
+   * holds a token. `target` is never derived from the request (SSRF-safe).
+   * @example { path: '/api', target: 'https://api.example.com' }
+   */
+  api: { path: string, target: string }
 }
 
 export default defineNuxtModule<ModuleOptions>({
@@ -52,9 +67,12 @@ export default defineNuxtModule<ModuleOptions>({
     storage: 'cookie',
     user: { endpoint: '' },
     session: { password: '' },
+    api: { path: '', target: '' },
   },
   setup(options, nuxt) {
     const resolver = createResolver(import.meta.url)
+    // Normalize the app-proxy mount once (a trailing slash would make `/api//**`).
+    const apiPath = options.api.path.replace(/\/$/, '')
 
     if (!options.baseURL) {
       console.warn('[lukk-nuxt] `baseURL` is not set — point it at your lukk auth URL.')
@@ -76,13 +94,23 @@ export default defineNuxtModule<ModuleOptions>({
       },
     )
 
-    // Server-only config (the real lukk URL + storage choice for the BFF proxy).
+    // Server-only config (the real lukk URL + storage choice for the BFF proxy,
+    // plus the optional app-API proxy target — fixed here, never request-derived).
     nuxt.options.runtimeConfig.lukk = defu(nuxt.options.runtimeConfig.lukk,
-      { baseURL: options.baseURL, storage: options.storage, sessionPassword: options.session.password },
+      {
+        baseURL: options.baseURL,
+        storage: options.storage,
+        sessionPassword: options.session.password,
+        apiPath,
+        apiTarget: options.api.target,
+      },
     )
 
     // Auto-imported composables: useLukkAuth, useLukkTwoFactor, useLukkPasskeys, ...
     addImportsDir(resolver.resolve('./runtime/composables'))
+
+    // Server-side helpers for your own routes: getLukkAccessToken(event), useLukkSession(event).
+    addServerImportsDir(resolver.resolve('./runtime/server/utils'))
 
     // Route guards: `lukk-auth` (require login) and `lukk-guest` (bounce authed users).
     addRouteMiddleware({ name: 'lukk-auth', path: resolver.resolve('./runtime/middleware/auth') })
@@ -95,7 +123,12 @@ export default defineNuxtModule<ModuleOptions>({
 
     // BFF mode: the same-origin Nitro proxy that holds tokens server-side.
     if (options.mode === 'bff') {
-      addServerHandler({ route: '/api/_lukk/**', handler: resolver.resolve('./runtime/server/bff') })
+      addServerHandler({ route: `${LUKK_BFF_PREFIX}/**`, handler: resolver.resolve('./runtime/server/bff') })
+
+      // Optional: proxy the app's own API so it's authenticated out of the box.
+      if (apiPath && options.api.target) {
+        addServerHandler({ route: `${apiPath}/**`, handler: resolver.resolve('./runtime/server/api-proxy') })
+      }
     }
   },
 })

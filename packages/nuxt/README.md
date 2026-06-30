@@ -62,13 +62,39 @@ definePageMeta({ middleware: 'lukk-auth' })
 </script>
 ```
 
+## BFF: authenticating your own API
+
+In `bff` mode the browser holds no token, so your own API (and `user.endpoint`) must
+be authenticated server-side. Proxy it through lukk-nuxt:
+
+```ts
+lukk: { mode: 'bff', api: { path: '/api', target: 'https://api.example.com' } }
+```
+
+Now `$fetch('/api/...')` is authenticated with the bearer injected server-side — or
+read the token yourself in a Nitro route via `getLukkAccessToken(event)`. Full guide:
+[Authenticating your own API](https://github.com/stsepelin/lukk-js/blob/main/docs/transport-modes.md#bff).
+
+## Security
+
+No token in the browser (BFF), a `__Host-`-prefixed sealed session, origin-scoped
+credentials, and CSRF + SSRF guards on both proxies. See the
+[Architecture & security model](https://github.com/stsepelin/lukk-js/blob/main/docs/architecture.md).
+
+> [!NOTE]
+> **Stateless-API consumers:** make your Laravel app return JSON `401`s for `api/*`
+> (the client sends `Accept: application/json`; also configure exception rendering
+> for those paths). Otherwise Laravel's default `unauthenticated()` redirects to a
+> `login` route and the proxy surfaces a confusing 500. App-side, not a lukk bug.
+
 ## Options
 
 | Key | Default | Description |
 |---|---|---|
 | `baseURL` | `''` | Your lukk auth URL incl. the route prefix. |
 | `mode` | `'bff'` | `'bff'` or `'direct'`. |
-| `user.endpoint` | `''` | Your app's authenticated user route. |
+| `user.endpoint` | `''` | Authenticated user route. **bff:** a same-origin proxied path; **direct:** URL/path with the bearer attached. |
+| `api.path` / `api.target` | `''` | BFF-only: proxy `${path}/**` → fixed `target`, injecting the bearer server-side. |
 | `confirmationHeader` | `'X-Lukk-Confirmation'` | Header carrying the step-up token. |
 | `session.password` | env `NUXT_LUKK_SESSION_PASSWORD` | BFF sealed-session secret (≥ 32 chars). |
 
