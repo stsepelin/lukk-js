@@ -19,7 +19,12 @@ interface FakeNuxt { options: { runtimeConfig: { public: Record<string, unknown>
 function setup(overrides: Record<string, unknown>): FakeNuxt {
   const nuxt: FakeNuxt = { options: { runtimeConfig: { public: {} } } }
   const mod = lukkModule as unknown as { defaults: Record<string, unknown>, setup: (o: unknown, n: FakeNuxt) => void }
-  mod.setup({ ...mod.defaults, ...overrides }, nuxt)
+  const opts: Record<string, unknown> = { ...mod.defaults, ...overrides }
+  // Model Nuxt's deep-merge of nested option objects (so e.g. api.forceJson defaults apply).
+  for (const k of ['api', 'user', 'session']) {
+    if (overrides[k]) opts[k] = { ...(mod.defaults[k] as object), ...(overrides[k] as object) }
+  }
+  mod.setup(opts, nuxt)
   return nuxt
 }
 
@@ -54,9 +59,15 @@ describe('lukk-nuxt module', () => {
     // bff proxy + app proxy
     expect(kit.addServerHandler).toHaveBeenCalledTimes(2)
     expect(kit.addServerHandler).toHaveBeenCalledWith(expect.objectContaining({ route: '/api/**' }))
-    const cfg = nuxt.options.runtimeConfig.lukk as { apiTarget: string, apiPath: string }
+    const cfg = nuxt.options.runtimeConfig.lukk as { apiTarget: string, apiPath: string, apiForceJson: boolean }
     expect(cfg.apiTarget).toBe('https://laravel.test')
     expect(cfg.apiPath).toBe('/api')
+    expect(cfg.apiForceJson).toBe(true) // default
+  })
+
+  it('passes through api.forceJson when set to false', () => {
+    const nuxt = setup({ baseURL: 'https://api/auth', mode: 'bff', api: { path: '/api', target: 'https://laravel.test', forceJson: false } })
+    expect((nuxt.options.runtimeConfig.lukk as { apiForceJson: boolean }).apiForceJson).toBe(false)
   })
 
   it('does not register the app-API proxy without api config (bff)', () => {

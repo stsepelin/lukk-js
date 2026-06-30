@@ -37,7 +37,7 @@ function ev(o: { path: string, method?: string, headers?: Record<string, string>
 const run = (e: ReturnType<typeof ev>) => (handler as unknown as (e: unknown) => Promise<unknown>)(e)
 const sameOrigin = { origin: 'https://app.test', host: 'app.test' }
 
-beforeEach(() => { __test.runtimeConfig.lukk = { apiPath: '/api', apiTarget: 'https://laravel.test' } as unknown as Record<string, unknown> })
+beforeEach(() => { __test.runtimeConfig.lukk = { apiPath: '/api', apiTarget: 'https://laravel.test', apiForceJson: true } as unknown as Record<string, unknown> })
 afterEach(() => { __test.reset(); vi.clearAllMocks() })
 
 describe('app-API proxy', () => {
@@ -50,6 +50,7 @@ describe('app-API proxy', () => {
       expect.objectContaining({
         streamRequest: true,
         headers: expect.objectContaining({
+          'accept': 'application/json', // force JSON so Laravel renders clean 401/422
           'cookie': '',
           'authorization': 'Bearer tok',
           'x-forwarded-for': '203.0.113.7', // trusted connection IP, not the spoofed 9.9.9.9
@@ -59,6 +60,28 @@ describe('app-API proxy', () => {
         }),
       }),
     )
+  })
+
+  it('forwards the browser Accept when forceJson is disabled', async () => {
+    __test.runtimeConfig.lukk = { apiPath: '/api', apiTarget: 'https://laravel.test', apiForceJson: false } as unknown as Record<string, unknown>
+    getAccess.mockResolvedValue('tok')
+    await run(ev({ path: '/api/report.pdf', headers: { accept: 'application/pdf' } }))
+    expect(proxyRequest).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ headers: expect.objectContaining({ accept: 'application/pdf' }) }))
+  })
+
+  it('sends an empty Accept when forceJson is off and the browser sent none', async () => {
+    __test.runtimeConfig.lukk = { apiPath: '/api', apiTarget: 'https://laravel.test', apiForceJson: false } as unknown as Record<string, unknown>
+    getAccess.mockResolvedValue('tok')
+    await run(ev({ path: '/api/x' }))
+    expect(proxyRequest).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ headers: expect.objectContaining({ accept: '' }) }))
+  })
+
+  it('streams uploads without clobbering the multipart Content-Type', async () => {
+    getAccess.mockResolvedValue('tok')
+    await run(ev({ path: '/api/upload', method: 'POST', headers: { ...sameOrigin, 'content-type': 'multipart/form-data; boundary=xyz' } }))
+    const opts = (proxyRequest.mock.calls[0] as unknown[])[2] as { streamRequest?: boolean, headers?: Record<string, string> }
+    expect(opts.streamRequest).toBe(true) // body streamed, not buffered
+    expect(opts.headers).not.toHaveProperty('content-type') // forwarded by h3, not overridden
   })
 
   it('strips upstream Set-Cookie and marks the response non-cacheable', async () => {

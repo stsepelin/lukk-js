@@ -50,8 +50,14 @@ export interface ModuleOptions {
    * Laravel API) with the access token injected server-side — the browser never
    * holds a token. `target` is never derived from the request (SSRF-safe).
    * @example { path: '/api', target: 'https://api.example.com' }
+   *
+   * `forceJson` (default `true`) sets `Accept: application/json` on forwarded
+   * requests, so a JSON API renders clean `401`/`422` JSON for unauthenticated /
+   * validation errors instead of Laravel's default guest-redirect (which 500s
+   * behind a proxy). Set `false` to forward the browser's `Accept` instead — only
+   * if a route under `path` legitimately serves a non-JSON response.
    */
-  api: { path: string, target: string }
+  api: { path: string, target: string, forceJson: boolean }
 }
 
 export default defineNuxtModule<ModuleOptions>({
@@ -67,7 +73,7 @@ export default defineNuxtModule<ModuleOptions>({
     storage: 'cookie',
     user: { endpoint: '' },
     session: { password: '' },
-    api: { path: '', target: '' },
+    api: { path: '', target: '', forceJson: true },
   },
   setup(options, nuxt) {
     const resolver = createResolver(import.meta.url)
@@ -103,6 +109,7 @@ export default defineNuxtModule<ModuleOptions>({
         sessionPassword: options.session.password,
         apiPath,
         apiTarget: options.api.target,
+        apiForceJson: options.api.forceJson,
       },
     )
 

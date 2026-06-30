@@ -95,6 +95,7 @@ credentials, and CSRF + SSRF guards on both proxies. See the
 | `mode` | `'bff'` | `'bff'` or `'direct'`. |
 | `user.endpoint` | `''` | Authenticated user route. **bff:** a same-origin proxied path; **direct:** URL/path with the bearer attached. |
 | `api.path` / `api.target` | `''` | BFF-only: proxy `${path}/**` → fixed `target`, injecting the bearer server-side. |
+| `api.forceJson` | `true` | Force `Accept: application/json` on proxied requests → clean JSON `401`/`422` from Laravel. |
 | `confirmationHeader` | `'X-Lukk-Confirmation'` | Header carrying the step-up token. |
 | `session.password` | env `NUXT_LUKK_SESSION_PASSWORD` | BFF sealed-session secret (≥ 32 chars). |
 
