@@ -1,6 +1,6 @@
 {
   "name": "lukk-nuxt",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Nuxt module for lukk (first-party Laravel JWT auth) — SSR / SPA / SSG, BFF or direct.",
   "type": "module",
   "license": "MIT",
