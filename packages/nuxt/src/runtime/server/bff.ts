@@ -39,8 +39,7 @@ export default defineEventHandler(async (event) => {
     cookie: { sameSite: 'strict', secure: true, httpOnly: true, path: '/' },
   })
 
-  // Resolve + contain the upstream URL: it must stay same-origin as lukk and under
-  // its base path. Defeats traversal / authority-smuggling (`..`, `%2e%2e`, `//`, `@`).
+  // Resolve + contain the upstream URL to same-origin-under-base (defeats traversal / authority-smuggling).
   const subpath = event.path.slice(LUKK_BFF_PREFIX.length).split('?')[0] || '/'
   const target = resolveTarget(baseURL, subpath)
   if (!target) {
