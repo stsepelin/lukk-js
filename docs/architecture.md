@@ -58,7 +58,7 @@ When a request returns `401`, the client calls `refresh` once and retries the or
 
 - **No token in `localStorage`, ever.** BFF keeps every token (access, refresh, *and* confirmation) server-side in a sealed cookie; direct mode keeps the access token in memory and the refresh token in lukk's `__Host-` cookie.
 - **BFF strips credentials from responses.** The proxy replaces a token- or confirmation-bearing body with `{ ok: true }` before it reaches the browser — the browser only ever holds the opaque session cookie.
-- **BFF is CSRF-hardened.** The sealed session cookie is `SameSite=Strict; Secure; HttpOnly`, and the proxy rejects any state-changing request with a foreign `Origin`. The proxied subpath is contained to lukk's base URL (no traversal / SSRF).
+- **BFF is CSRF-hardened.** The sealed session cookie is `__Host-lukk-session` (`SameSite=Strict; Secure; HttpOnly; Path=/`, no `Domain` — the `__Host-` prefix the browser enforces), and the proxy rejects any state-changing request with a foreign `Origin`. The proxied subpath is contained to lukk's base URL (no traversal / SSRF).
 - **Credentials are origin-scoped.** The client attaches the bearer / confirmation header (and cookies) only to same-origin-as-`baseURL` targets, never to an absolute cross-origin URL.
 - **Refresh tokens are opaque** to lukk-js — it never inspects or stores them beyond handing them back to lukk.
 

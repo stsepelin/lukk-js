@@ -50,7 +50,7 @@ The proxy also **holds the step-up confirmation token server-side** (it strips i
 - Clean SSR: the server already has the session, so authenticated pages render on the first paint.
 - No CORS — the browser only talks to your own origin.
 
-**The CSRF trade-off.** Moving tokens server-side trades XSS-exfiltration risk for CSRF risk: the proxy is authenticated by the ambient session cookie. lukk-nuxt closes this — the session cookie is set `SameSite=Strict; Secure; HttpOnly`, **and** the proxy rejects any state-changing request whose `Origin` doesn't match your app (a `403`). You don't need to add your own CSRF layer for `/api/_lukk/**`.
+**The CSRF trade-off.** Moving tokens server-side trades XSS-exfiltration risk for CSRF risk: the proxy is authenticated by the ambient session cookie. lukk-nuxt closes this — the session cookie is `__Host-lukk-session` (`SameSite=Strict; Secure; HttpOnly; Path=/`, no `Domain`), **and** the proxy rejects any state-changing request whose `Origin` doesn't match your app (a `403`). You don't need to add your own CSRF layer for `/api/_lukk/**`.
 
 **What it needs**
 
@@ -60,6 +60,51 @@ The proxy also **holds the step-up confirmation token server-side** (it strips i
 
 > [!NOTE]
 > **Throttling & `grace_seconds`.** Every user's auth traffic egresses from the BFF server's IP, so lukk's *per-IP* refresh/login throttles collapse onto one address — raise them for a BFF deployment (and forward `X-Forwarded-For` to lukk if it sits behind your proxy). Keep lukk's `grace_seconds > 0` (its default 30s): the proxy single-flights refresh, but a zero grace window turns any concurrent refresh into a full-family revocation.
+
+### Authenticating your own API in BFF
+
+The proxy above authenticates the lukk **`/auth`** routes. Your **own** API (and
+`user.endpoint`) gets no token automatically — the browser has none. Two supported ways:
+
+1. **The app-API proxy** (recommended) — forward `${path}/**` to a fixed Laravel `target`,
+   injecting the bearer server-side:
+
+   ```ts
+   lukk: {
+     mode: 'bff',
+     api: { path: '/api', target: 'https://api.example.com' },
+     user: { endpoint: '/api/me' }, // same-origin → authenticated by the proxy
+   }
+   ```
+
+   `$fetch('/api/...')` from the browser is now authenticated, the token never leaving the
+   server. SSRF-safe (fixed target), CSRF-checked, strips the inbound cookie/authorization
+   **and any browser-spoofable `X-Forwarded-*` headers** (stamping a trusted client IP so
+   Laravel's per-IP throttling/logging can't be poisoned), strips upstream `Set-Cookie`,
+   marks responses non-cacheable, streams the body, and never proxies `/api/_lukk/**`.
+
+   > [!NOTE]
+   > The trusted IP is the connection peer. If Nitro itself sits behind a load balancer /
+   > CDN, that's the LB's IP — configure your trust chain (or have your edge set the real
+   > `X-Forwarded-For`) if Laravel needs the true client IP.
+
+2. **Your own server route** — read the token with the auto-imported read-only helper
+   `getLukkAccessToken(event)` (it never sets a cookie, so it's safe on unauthenticated
+   requests):
+
+   ```ts
+   export default defineEventHandler(async (event) => {
+     const token = await getLukkAccessToken(event)
+     if (!token) throw createError({ statusCode: 401 })
+     return $fetch('https://api.example.com/me', { headers: { Authorization: `Bearer ${token}` } })
+   })
+   ```
+
+> [!NOTE]
+> Make your Laravel API return JSON `401`s for `api/*` (send `Accept: application/json` /
+> configure exception rendering) — otherwise its default `unauthenticated()` redirect to a
+> `login` route surfaces a confusing 500 through the proxy. The BFF proxy itself is mounted
+> at the exported `LUKK_BFF_PREFIX` (`/api/_lukk`); keep your routes clear of it.
 
 <a name="direct"></a>
 ## Direct Mode

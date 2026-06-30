@@ -1,6 +1,8 @@
 import { isTokenPair } from 'lukk-core'
 import { defineEventHandler, getRequestHeader, readRawBody, setResponseStatus, useSession } from 'h3'
 import { useRuntimeConfig } from '#imports'
+import { LUKK_BFF_PREFIX, LUKK_SESSION_COOKIE } from '../shared'
+import { isForeignOrigin, resolveTarget } from './proxy-utils'
 
 interface TokenSession {
   access?: string
@@ -24,28 +26,22 @@ export default defineEventHandler(async (event) => {
   const { baseURL, sessionPassword } = useRuntimeConfig(event).lukk as { baseURL: string, sessionPassword: string }
   const method = event.method
 
-  // CSRF: a state-changing request whose Origin doesn't match this host is rejected.
-  // The proxy is same-origin by definition; cross-site forms/fetches carry the
-  // session cookie but a foreign Origin, so this closes the CSRF hole the sealed
-  // cookie alone doesn't.
-  if (method !== 'GET' && method !== 'HEAD') {
-    const origin = getRequestHeader(event, 'origin')
-    const host = getRequestHeader(event, 'host')
-    if (origin && originHost(origin) !== host) {
-      setResponseStatus(event, 403)
-      return { message: 'Cross-origin request rejected.' }
-    }
+  // CSRF: reject a state-changing request riding the session cookie from a foreign origin.
+  if (isForeignOrigin(event)) {
+    setResponseStatus(event, 403)
+    return { message: 'Cross-origin request rejected.' }
   }
 
   const session = await useSession<TokenSession>(event, {
     password: sessionPassword,
-    name: 'lukk-session',
+    name: LUKK_SESSION_COOKIE,
+    // `__Host-`-compatible: Secure + Path=/ + no Domain (the prefix enforces these).
     cookie: { sameSite: 'strict', secure: true, httpOnly: true, path: '/' },
   })
 
   // Resolve + contain the upstream URL: it must stay same-origin as lukk and under
   // its base path. Defeats traversal / authority-smuggling (`..`, `%2e%2e`, `//`, `@`).
-  const subpath = event.path.replace(/^\/api\/_lukk/, '').split('?')[0] || '/'
+  const subpath = event.path.slice(LUKK_BFF_PREFIX.length).split('?')[0] || '/'
   const target = resolveTarget(baseURL, subpath)
   if (!target) {
     setResponseStatus(event, 400)
@@ -100,11 +96,13 @@ export default defineEventHandler(async (event) => {
 
 /** Single-flight the server-side refresh per session, returning the new token pair. */
 function refreshOnce(session: { id?: string, data: TokenSession }, baseURL: string): Promise<TokenSession | null> {
-  const key = session.id ?? ''
-  const existing = inflightRefresh.get(key)
+  const id = session.id
+  // No id → don't key the map (an empty key would collapse distinct sessions).
+  if (!id) return rawRefresh(session.data.refresh!, baseURL)
+  const existing = inflightRefresh.get(id)
   if (existing) return existing
-  const run = rawRefresh(session.data.refresh!, baseURL).finally(() => inflightRefresh.delete(key))
-  inflightRefresh.set(key, run)
+  const run = rawRefresh(session.data.refresh!, baseURL).finally(() => inflightRefresh.delete(id))
+  inflightRefresh.set(id, run)
   return run
 }
 
@@ -118,30 +116,6 @@ async function rawRefresh(refreshToken: string, baseURL: string): Promise<TokenS
   if (!res.ok) return null
   const pair = await res.json() as { access_token: string, refresh_token?: string }
   return { access: pair.access_token, refresh: pair.refresh_token ?? refreshToken }
-}
-
-/**
- * Build the upstream URL and assert it stays under lukk's base (same origin AND
- * path prefix). The origin is baked into `prefix`, so a cross-origin or traversal
- * target — including encoded `%2e%2e`, which `new URL` normalizes — fails the one
- * `startsWith` check. Defeats SSRF / authority-smuggling.
- */
-function resolveTarget(base: string, subpath: string): string | null {
-  try {
-    const b = new URL(base)
-    const prefix = `${b.origin}${b.pathname.replace(/\/$/, '')}/`
-    const target = new URL(`${base.replace(/\/$/, '')}/${subpath.replace(/^\//, '')}`)
-    if (!`${target.origin}${target.pathname}/`.startsWith(prefix)) return null
-    return target.toString()
-  }
-  catch {
-    return null
-  }
-}
-
-function originHost(origin: string): string | null {
-  try { return new URL(origin).host }
-  catch { return null }
 }
 
 function isConfirmation(value: unknown): value is { confirmation_token: string } {

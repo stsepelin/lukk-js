@@ -80,8 +80,14 @@ export function useLukkAuth() {
 
   /**
    * Load the current user from the app's own endpoint (lukk issues the token;
-   * the app owns the user resource). Resolves against the app origin, with the
-   * access token attached in direct mode.
+   * the app owns the user resource).
+   *  - direct: the access token is attached as a Bearer header.
+   *  - bff: the browser has no token, so `user.endpoint` MUST be a same-origin
+   *    path authenticated server-side (the app-API proxy, or your own route using
+   *    `getLukkAccessToken(event)`) — no header is attached here.
+   *
+   * On error, only a 401/403 logs the user out; a transient 5xx/network failure
+   * leaves the current `user` intact (don't bounce a logged-in user to /login).
    */
   async function fetchUser(): Promise<void> {
     if (!cfg.userEndpoint) return

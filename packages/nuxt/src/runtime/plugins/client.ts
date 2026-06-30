@@ -2,6 +2,7 @@ import { createLukkClient, type LukkClient } from 'lukk-core'
 // #imports is resolved by Nuxt at build time
 import { defineNuxtPlugin, useRuntimeConfig, useState } from '#imports'
 import { ACCESS_KEY, CONFIRMATION_KEY } from '../keys'
+import { LUKK_BFF_PREFIX } from '../shared'
 
 /**
  * Provides `$lukk` — the core client, wired for the configured transport.
@@ -15,7 +16,7 @@ export default defineNuxtPlugin(() => {
     confirmationHeader: string
   }
 
-  const baseURL = cfg.mode === 'direct' ? cfg.baseURL : '/api/_lukk'
+  const baseURL = cfg.mode === 'direct' ? cfg.baseURL : LUKK_BFF_PREFIX
 
   // Access-token holder. Written ONLY on the client (guarded below) so it never
   // lands in the serialized SSR payload — in BFF mode it stays null (the proxy
