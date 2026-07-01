@@ -19,13 +19,13 @@ The shipped surface (auth composables, `useLukkFetch`, `useLukkForm`, the BFF pr
 
 ## Client / auth
 
-- **Custom login fields** — widen the `login()` / `twoFactorChallenge()` request types in `lukk-core`
-  so consumers can add fields (`{ email, password, remember, captcha }`) without a `TS` cast. The
-  runtime already spreads the payload; only the closed `LoginCredentials` type blocks it. The backend
-  already supports custom/replaced credential fields via `Lukk::authenticateUsing(Request)`, and
-  registration is app-owned (build it with `useLukkForm`). Non-breaking type widening + a
-  "Custom login fields" docs section. Replacing the credential field entirely (email → username) at
-  the client is a larger design call (it trades away the email/password guardrail).
+- **Replace the credential field** — adding extra login fields **shipped** (`login()` /
+  `twoFactorChallenge()` accept `LoginInput = LoginCredentials & Record<string, unknown>`; see
+  [Authentication → Custom login fields](docs/authentication.md#login)). Still open: a first-class,
+  typed way to send a **different** credential field (e.g. `username`/`phone` instead of `email`). The
+  backend already supports it via `Lukk::authenticateUsing(Request)`, so today you pass
+  `{ email: usernameValue, password }` or a custom object; a typed client seam is a larger design call
+  (it trades away the `email`/`password` guardrail).
 
 ## Forms — Inertia-parity Tier 3
 

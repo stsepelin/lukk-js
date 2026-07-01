@@ -30,6 +30,27 @@ describe('createLukkClient', () => {
     expect(init?.method).toBe('POST')
   })
 
+  it('passes extra login fields through to the request body (custom authenticateUsing)', async () => {
+    const fetch = vi.fn(async () => json({ access_token: 'a', expires_in: 900, refresh_token: 'r' }))
+    const client = createLukkClient({ baseURL: 'https://x/auth', fetch })
+
+    // `remember`/`captcha` typecheck without a cast (LoginInput) and reach Laravel.
+    await client.login({ email: 'e', password: 'p', remember: true, captcha: 'tok' })
+
+    const body = JSON.parse((fetch.mock.calls[0]![1] as RequestInit).body as string)
+    expect(body).toEqual({ email: 'e', password: 'p', remember: true, captcha: 'tok' })
+  })
+
+  it('passes extra fields through the 2FA challenge body', async () => {
+    const fetch = vi.fn(async () => json({ access_token: 'a', expires_in: 900, refresh_token: 'r' }))
+    const client = createLukkClient({ baseURL: 'https://x/auth', fetch })
+
+    await client.twoFactorChallenge({ challenge_token: 'c', code: '123456', device_name: 'phone' })
+
+    const body = JSON.parse((fetch.mock.calls[0]![1] as RequestInit).body as string)
+    expect(body).toMatchObject({ challenge_token: 'c', code: '123456', device_name: 'phone' })
+  })
+
   it('returns a 2FA challenge instead of tokens', async () => {
     const fetch = vi.fn(async () => json({ two_factor: true, challenge_token: 'c' }))
     const client = createLukkClient({ baseURL: 'https://x/auth', fetch })

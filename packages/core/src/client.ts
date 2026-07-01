@@ -1,6 +1,6 @@
 import type {
   ConfirmationToken,
-  LoginCredentials,
+  LoginInput,
   LoginResult,
   LukkError,
   PasskeyLoginOptions,
@@ -8,7 +8,7 @@ import type {
   PublicKeyCredentialCreationOptionsJSON,
   RecoveryCodeCount,
   TokenPair,
-  TwoFactorChallengeInput,
+  TwoFactorInput,
   TwoFactorEnrollment,
 } from './types'
 
@@ -104,8 +104,8 @@ export function createLukkClient(hooks: LukkClientHooks) {
     request,
 
     // --- session ---
-    login: (c: LoginCredentials) => request<LoginResult>('/login', json(c)).then(commit),
-    twoFactorChallenge: (i: TwoFactorChallengeInput) => request<TokenPair>('/two-factor-challenge', json(i)).then(commit),
+    login: (c: LoginInput) => request<LoginResult>('/login', json(c)).then(commit),
+    twoFactorChallenge: (i: TwoFactorInput) => request<TokenPair>('/two-factor-challenge', json(i)).then(commit),
     /** Direct mode passes the refresh token; cookie/BFF mode relies on the cookie. */
     refreshTokens: (refresh_token?: string) => request<TokenPair>('/refresh', json(refresh_token ? { refresh_token } : {}), false),
     /** Silently restore a session on app load (returns null when there's no valid refresh). */

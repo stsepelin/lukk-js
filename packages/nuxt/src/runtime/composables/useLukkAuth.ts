@@ -1,4 +1,4 @@
-import { isTwoFactorChallenge, type LoginCredentials, type LoginResult } from 'lukk-core'
+import { isTwoFactorChallenge, type LoginInput, type LoginResult } from 'lukk-core'
 import { computed, useNuxtApp, useRuntimeConfig, useState } from '#imports'
 import { ACCESS_KEY, CHALLENGE_KEY, CONFIRMATION_KEY, CONFIRMED_KEY, USER_KEY } from '../keys'
 import { useLukkFetch } from './useLukkFetch'
@@ -39,7 +39,7 @@ export function useLukkAuth() {
    * `verifyTwoFactor` / `verifyRecoveryCode`. Otherwise the token is persisted
    * and the user loaded.
    */
-  async function login(credentials: LoginCredentials): Promise<LoginResult> {
+  async function login(credentials: LoginInput): Promise<LoginResult> {
     const result = await $lukk.login(credentials)
     if (isTwoFactorChallenge(result)) {
       challenge.value = result.challenge_token
