@@ -29,18 +29,15 @@ The shipped surface (auth composables, `useLukkFetch`, `useLukkForm`, the BFF pr
 
 ## Forms — Inertia-parity Tier 3
 
-Beyond the near-`useForm` parity already shipped in [`useLukkForm`](docs/forms.md):
+Beyond the near-`useForm` parity already shipped in [`useLukkForm`](docs/forms.md) — which now
+also includes `form.nestedErrors` (dotted `422` keys expanded onto a nested shape) and a
+`rememberKey` option (persist `data` across SPA navigation):
 
 - **Upload progress** (`form.progress`) — **blocked by the platform:** `fetch`/`ofetch` can't stream
   request-upload progress in the browser (Inertia uses `XHR`/axios). Would mean abandoning the
   `useLukkFetch` transport for uploads. Unlikely to ship.
 - **Laravel Precognition** — real-time server-side validation (`validate()`, `touch()`,
   `valid`/`invalid`, `validating`). A sizeable feature of its own; only if there's demand.
-- **Form state history-remember** — persist form state across SPA history (Inertia's `remember`). The
-  Nuxt-native equivalent is `useState`-keyed state — a different paradigm. Low priority.
-- **Nested-error auto-mapping** — a helper to bind Laravel's dotted `422` keys (`address.street`,
-  `items.0.name`) onto a nested `form.data`. Today `form.errors` is a flat map keyed by the dotted
-  path (see [Forms → Validation Errors](docs/forms.md#errors)).
 
 ## Maintenance
 

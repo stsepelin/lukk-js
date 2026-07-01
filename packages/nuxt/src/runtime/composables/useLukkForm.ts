@@ -1,6 +1,6 @@
 import type { FetchOptions } from 'ofetch'
 import type { LukkError } from 'lukk-core'
-import { computed, reactive, ref, shallowRef } from '#imports'
+import { computed, reactive, ref, shallowRef, useState } from '#imports'
 import { useLukkFetch } from './useLukkFetch'
 
 type FormFields = Record<string, unknown>
@@ -22,6 +22,15 @@ export type LukkFormSubmitOptions<R = unknown> = Omit<FetchOptions, 'method' | '
 export interface UseLukkFormOptions {
   /** How long `recentlySuccessful` stays true after a successful submit (ms, default 2000). */
   recentlySuccessfulMs?: number
+  /**
+   * Persist `data` across SPA navigation, keyed by this id (backed by Nuxt `useState`) — so a
+   * half-filled form survives a route change and back. The reset/`isDirty` baseline is not
+   * remembered; `isDirty` compares the restored data against the original `initial`.
+   *
+   * For **plain** drafts only: the state is serialized into the SSR payload, so don't remember
+   * `File`/`Blob` fields (not serializable) or sensitive values (the draft ships in the HTML).
+   */
+  rememberKey?: string
 }
 
 /** The reactive form returned by {@link useLukkForm}. Every mutator returns the form for chaining. */
@@ -30,6 +39,8 @@ export interface LukkForm<T extends FormFields> {
   data: T
   /** First validation message per field, from the last `422`. */
   errors: FormErrors<T>
+  /** `errors` with Laravel's dotted keys (`address.street`) expanded into a nested object. */
+  nestedErrors: Record<string, unknown>
   /** True while a submit is in flight. */
   processing: boolean
   /** True after the last submit succeeded (reset at the next submit). */
@@ -127,7 +138,11 @@ export function useLukkForm<T extends FormFields>(initial: T, options: UseLukkFo
   const api = useLukkFetch()
   const recentlySuccessfulMs = options.recentlySuccessfulMs ?? 2000
 
-  const data = reactive(cloneData(initial)) as T
+  // `rememberKey` backs `data` with Nuxt `useState` so it survives SPA navigation; otherwise
+  // it's a plain per-instance reactive. Either way it's the live, editable field object.
+  const data = options.rememberKey
+    ? useState<T>(options.rememberKey, () => cloneData(initial) as T).value
+    : reactive(cloneData(initial)) as T
   // A plain-object deep clone of the live data (File/Blob by reference).
   const snapshot = (): FormFields => cloneData(data) as FormFields
   // The reset/`isDirty` baseline — a shallowRef so `.value` stays a plain object while
@@ -142,6 +157,29 @@ export function useLukkForm<T extends FormFields>(initial: T, options: UseLukkFo
   // Structural (JSON) comparison — fine for the plain data this form is meant to hold. Note it
   // does not diff `File`/`Blob` fields (both serialize to `{}`); track those out of band.
   const isDirty = computed(() => JSON.stringify(data) !== JSON.stringify(baseline.value))
+  // Expand Laravel's dotted keys (`address.street`, `items.0.name`) into a nested object so a
+  // nested `data` shape can bind errors as `form.nestedErrors.address?.street`.
+  const nestedErrors = computed<Record<string, unknown>>(() => {
+    // Null-prototype nodes so a hostile server key (`__proto__.x`, `constructor.x`) in the
+    // 422 bag can't reach Object.prototype — it lands as a harmless own key instead.
+    const out: Record<string, unknown> = Object.create(null)
+    for (const [path, message] of Object.entries(errors.value)) {
+      const segments = path.split('.')
+      let node = out
+      segments.forEach((segment, i) => {
+        if (i === segments.length - 1) {
+          node[segment] = message
+        }
+        else {
+          // Descend, but if a shallower key already put a *message* here (Laravel can emit
+          // both `items` and `items.0.name`), replace it with a node — never index a string.
+          const next = node[segment]
+          node = (next !== null && typeof next === 'object' ? next : (node[segment] = Object.create(null))) as Record<string, unknown>
+        }
+      })
+    }
+    return out
+  })
 
   let transformFn: ((data: T) => Record<string, unknown>) | null = null
   let recentlyTimer: ReturnType<typeof setTimeout> | undefined
@@ -286,6 +324,7 @@ export function useLukkForm<T extends FormFields>(initial: T, options: UseLukkFo
   const form = reactive({
     data,
     errors,
+    nestedErrors,
     processing,
     wasSuccessful,
     recentlySuccessful,
