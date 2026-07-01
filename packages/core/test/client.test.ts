@@ -1,5 +1,13 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createLukkClient } from '../src/client'
+import { createLukkClient, lukkError } from '../src/client'
+
+describe('lukkError', () => {
+  it('shapes a Laravel error, and falls back to statusText / omits errors without a body', () => {
+    expect(lukkError(422, 'X', { message: 'Invalid', errors: { a: ['b'] } })).toEqual({ status: 422, message: 'Invalid', errors: { a: ['b'] } })
+    expect(lukkError(500, 'Server Error', undefined)).toEqual({ status: 500, message: 'Server Error' })
+    expect(lukkError(401, 'Unauthorized', null)).toEqual({ status: 401, message: 'Unauthorized' })
+  })
+})
 
 function json(body: unknown, status = 200): Response {
   return new Response(body === undefined ? '' : JSON.stringify(body), {

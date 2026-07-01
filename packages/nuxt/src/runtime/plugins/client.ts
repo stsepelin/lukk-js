@@ -1,4 +1,4 @@
-import { createLukkClient, type LukkClient } from 'lukk-core'
+import { createLukkClient, type LukkClient, singleFlight } from 'lukk-core'
 // #imports is resolved by Nuxt at build time
 import { defineNuxtPlugin, useRuntimeConfig, useState } from '#imports'
 import { ACCESS_KEY, CONFIRMATION_KEY } from '../keys'
@@ -24,16 +24,27 @@ export default defineNuxtPlugin(() => {
   const accessToken = useState<string | null>(ACCESS_KEY, () => null)
   const confirmation = useState<string | null>(CONFIRMATION_KEY, () => null)
 
-  // `refresh` self-references `client`; the closure only runs after assignment, so const is safe.
+  // ONE single-flight refresh, shared by `$lukk`'s own 401 path AND `useLukkFetch`'s
+  // app-API retry — so a concurrent auth + app-API 401 can't replay the rotating
+  // refresh token twice (which reuse detection would punish with a family revoke).
+  // The closures reference `client`, which only runs after assignment, so const is safe.
+  const refresh = singleFlight(async () => {
+    const pair = await client.refreshTokens()
+    if (import.meta.client) accessToken.value = pair.access_token
+    return pair
+  })
+  // A throwing refresh means "not refreshable" → null (the documented contract).
+  const safeRefresh = () => refresh().catch(() => null)
+
   const client: LukkClient = createLukkClient({
     baseURL,
     confirmationHeader: cfg.confirmationHeader,
     getAccessToken: () => accessToken.value,
     getConfirmationToken: () => confirmation.value,
-    refresh: () => client.refreshTokens().catch(() => null),
+    refresh: safeRefresh,
     onTokens: (pair) => { if (import.meta.client) accessToken.value = pair.access_token },
     onUnauthenticated: () => { accessToken.value = null },
   })
 
-  return { provide: { lukk: client } }
+  return { provide: { lukk: client, lukkRefresh: safeRefresh } }
 })

@@ -88,6 +88,9 @@ BFF-only and opt-in. Forwards `${path}/**` to the **fixed** `target` (your Larav
 
 - **`forceJson`** (default `true`) sets `Accept: application/json` on forwarded requests so a JSON API renders clean `401`/`422` JSON for unauthenticated/validation errors — instead of Laravel's default guest-redirect, which 500s behind a proxy (`shouldRenderJsonWhen` does **not** fix that — see [Transport Modes](transport-modes.md#bff)). Set `false` to forward the browser's `Accept` instead — only if a route under `path` legitimately serves a non-JSON response.
 
+> [!TIP]
+> Call the proxied API with [`useLukkFetch()`](transport-modes.md#use-lukk-fetch) — a plain `$fetch` forwards no cookie during SSR and silently `401`s. It also rejects with a typed `LukkError` (`{ message, status, errors }`).
+
 <a name="session-password"></a>
 ## `session.password`
 

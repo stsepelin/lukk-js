@@ -2,8 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useLukkAuth } from '../src/runtime/composables/useLukkAuth'
 import { __test, useState } from './mocks/imports'
 
-function withApp(lukk: Record<string, unknown>) {
-  __test.nuxtApp = { $lukk: lukk }
+function withApp(lukk: Record<string, unknown>, lukkRefresh: () => Promise<unknown> = () => Promise.resolve(null)) {
+  __test.nuxtApp = { $lukk: lukk, $lukkRefresh: lukkRefresh }
   __test.runtimeConfig.public.lukk = {
     mode: 'direct',
     baseURL: 'https://api/auth',
@@ -111,15 +111,17 @@ describe('useLukkAuth', () => {
     expect(revoke).toHaveBeenCalledOnce()
   })
 
-  it('initSession restores + loads the user when a session exists', async () => {
-    withApp({ restore: vi.fn().mockResolvedValue({ access_token: 'a', expires_in: 900 }) })
+  it('initSession restores via the shared single-flight + loads the user when a session exists', async () => {
+    const refresh = vi.fn().mockResolvedValue({ access_token: 'a', expires_in: 900 })
+    withApp({}, refresh)
     const { user, initSession } = useLukkAuth()
     await initSession()
+    expect(refresh).toHaveBeenCalledTimes(1)
     expect(user.value).toEqual({ id: 1, name: 'Ada' })
   })
 
   it('initSession does nothing without a session', async () => {
-    withApp({ restore: vi.fn().mockResolvedValue(null) })
+    withApp({}, vi.fn().mockResolvedValue(null))
     const { user, initSession } = useLukkAuth()
     await initSession()
     expect(user.value).toBeNull()

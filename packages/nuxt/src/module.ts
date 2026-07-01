@@ -13,6 +13,12 @@ import { LUKK_BFF_PREFIX } from './runtime/shared'
 
 export { LUKK_BFF_PREFIX, LUKK_SESSION_COOKIE } from './runtime/shared'
 
+/** The origin of an absolute URL (drops any path, e.g. lukk's `/auth` prefix). */
+function originOf(url: string): string {
+  try { return new URL(url).origin }
+  catch { return url }
+}
+
 export interface ModuleOptions {
   /** lukk base URL incl. the route prefix, e.g. `https://api.example.com/auth`. */
   baseURL: string
@@ -97,6 +103,10 @@ export default defineNuxtModule<ModuleOptions>({
         confirmationHeader: options.confirmationHeader,
         baseURL: options.mode === 'direct' ? options.baseURL : '',
         userEndpoint: options.user.endpoint,
+        // App-API base for `useLukkFetch`: the same-origin proxy mount (BFF) or, in
+        // direct mode, the configured `api.target` else the lukk **origin** (the
+        // `/auth` prefix is dropped — pass full app paths to `useLukkFetch`).
+        apiBaseURL: options.mode === 'bff' ? apiPath : (options.api.target || originOf(options.baseURL)),
       },
     )
 

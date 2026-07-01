@@ -1,6 +1,6 @@
 # lukk-js Documentation
 
-JavaScript/TypeScript clients for **[lukk](https://github.com/stsepelin/lukk)** — minimal-dependency JWT authentication for first-party Laravel apps. One composable API across SSR, SPA, and SSG, in either a server-side **BFF** mode or a **direct** browser mode.
+JavaScript/TypeScript clients for **[lukk](https://github.com/stsepelin/lukk)** — minimal-dependency JWT authentication for first-party Laravel apps, plus [`useLukkFetch()`](transport-modes.md#use-lukk-fetch), an auth-aware client for your own Laravel API. One composable API across SSR, SPA, and SSG, in either a server-side **BFF** mode or a **direct** browser mode.
 
 > **Unofficial companion to lukk.** Not affiliated with or endorsed by the Laravel or Nuxt teams. "Laravel" and "Nuxt" are referenced only to describe compatibility and design influence.
 
