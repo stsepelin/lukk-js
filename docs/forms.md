@@ -38,8 +38,13 @@ form.recentlySuccessful // boolean — true briefly after success (for a "Saved!
 The optional second argument configures the form:
 
 ```ts
-useLukkForm({ … }, { recentlySuccessfulMs: 2000 }) // how long recentlySuccessful stays true
+useLukkForm({ … }, {
+  recentlySuccessfulMs: 2000, // how long recentlySuccessful stays true
+  rememberKey: 'signup',      // persist form.data across SPA navigation (Nuxt useState)
+})
 ```
+
+With `rememberKey`, a half-filled form survives a route change and back — mount another form with the same key and its `data` is restored. (The reset/`isDirty` baseline isn't remembered; `isDirty` compares the restored data against the original `initial`.) Use it for **plain** drafts: the state is serialized into the SSR payload, so don't remember `File`/`Blob` fields or sensitive values.
 
 The value type flows through, so `form.data.email` is typed, and the returned form is a `LukkForm<T>`.
 
@@ -96,10 +101,12 @@ form.hasErrors      // true
 **Every submit clears the errors first**, then re-populates them only from a `422` — so a stale message never lingers into the next attempt.
 
 > [!NOTE]
-> **Nested & array fields.** Laravel keys the bag with **dotted paths** for nested/array rules —
-> `address.street`, `items.0.name`. `form.errors` keys them exactly as returned, so read them with
-> bracket access: `form.errors['address.street']`. (For a nested `form.data`, bind the message with a
-> small computed or helper — the errors are a flat map, not mirrored onto the nested shape.)
+> **Nested & array fields.** Laravel flattens the bag into **dot notation** — nested objects as
+> `authorization.role`, array items as `users.0.email`. `form.errors` keys them exactly as returned,
+> so read them with bracket access: `form.errors['authorization.role']`. For a nested `form.data`, use
+> **`form.nestedErrors`** — the same errors expanded into a nested object: bind
+> `form.nestedErrors.authorization?.role`, and array fields nest under their index,
+> `form.nestedErrors.users?.[0]?.email`.
 
 You can also drive errors yourself (e.g. from a client-side check). All of these are **chainable** (they return the form):
 

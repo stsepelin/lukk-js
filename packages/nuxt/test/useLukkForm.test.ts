@@ -392,4 +392,49 @@ describe('useLukkForm', () => {
     await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
     expect(form.processing).toBe(false)
   })
+
+  it('nestedErrors expands Laravel dotted keys into a nested object (flat errors still work)', async () => {
+    const form = useLukkForm({ name: '', address: { street: '', city: '' } })
+    api.mockRejectedValueOnce(val422({ 'name': ['Required.'], 'address.street': ['Street.'], 'address.city': ['City.'] }))
+    await expect(form.post('/x')).rejects.toBeTruthy()
+
+    expect(form.errors['address.street']).toBe('Street.') // flat map unchanged
+    expect(form.nestedErrors.name).toBe('Required.')
+    const address = form.nestedErrors.address as Record<string, string>
+    expect(address.street).toBe('Street.') // `address` node created for street…
+    expect(address.city).toBe('City.') // …reused for the second key
+  })
+
+  it('nestedErrors is empty when there are no errors', () => {
+    expect(Object.keys(useLukkForm({ a: 1 }).nestedErrors)).toHaveLength(0)
+  })
+
+  it('nestedErrors does not throw when a key is both a leaf and a parent (conflicting rules)', async () => {
+    const form = useLukkForm({ a: 1 })
+    // Laravel can emit both `items` and `items.0.name`; the deeper key wins the node, no throw.
+    api.mockRejectedValueOnce(val422({ 'items': ['Must be an array.'], 'items.0.name': ['Required.'] }))
+    await expect(form.post('/x')).rejects.toBeTruthy()
+    expect(() => form.nestedErrors).not.toThrow()
+    expect((form.nestedErrors.items as Record<string, Record<string, string>>)['0'].name).toBe('Required.')
+  })
+
+  it('nestedErrors cannot pollute Object.prototype via a hostile 422 key', async () => {
+    const form = useLukkForm({ a: 1 })
+    api.mockRejectedValueOnce(val422({ '__proto__.polluted': ['x'], 'constructor.prototype.p2': ['y'] }))
+    await expect(form.post('/x')).rejects.toBeTruthy()
+    // The dangerous keys land as harmless own props on null-prototype nodes, not on the global.
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined()
+    expect(({} as Record<string, unknown>).p2).toBeUndefined()
+  })
+
+  it('rememberKey persists data across instances (survives SPA navigation)', () => {
+    const a = useLukkForm({ email: '' }, { rememberKey: 'signup-A' })
+    a.data.email = 'draft@x.c'
+    // A second mount with the same key (e.g. navigating back) restores the draft.
+    const b = useLukkForm({ email: '' }, { rememberKey: 'signup-A' })
+    expect(b.data.email).toBe('draft@x.c')
+    // A different key is independent; no key is per-instance.
+    expect(useLukkForm({ email: '' }, { rememberKey: 'signup-B' }).data.email).toBe('')
+    expect(useLukkForm({ email: '' }).data.email).toBe('')
+  })
 })
