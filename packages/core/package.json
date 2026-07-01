@@ -1,6 +1,6 @@
 {
   "name": "lukk-core",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Framework-agnostic client core for lukk (Laravel JWT auth): contract types, auth client, WebAuthn helpers.",
   "type": "module",
   "license": "MIT",

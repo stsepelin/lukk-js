@@ -1,5 +1,27 @@
 # lukk-nuxt
 
+## 0.4.0
+
+### Minor Changes
+
+- ed90bec: Email verification client (pairs with lukk's opt-in `features.email_verification`). Adds `client.sendEmailVerification()` (lukk-core) and a `useLukkEmailVerification()` composable (lukk-nuxt) exposing `verified` (computed off the loaded user's `email_verified_at`), `sending`, `sendVerificationEmail()` (resend the link), and `syncAfterVerify()` (reload the user on your verify callback page). The verify link itself is a browser navigation from the email that redirects back to your SPA — the composable owns the resend + the post-redirect sync, not the verification click.
+- 9dbfe8d: Support both step-up shapes — per-page and per-action — and complete the route-guard set.
+
+  - **Route guards:** add `lukk-verified` (send a logged-in user with an unverified email to `/verify-email`) and `lukk-confirmed` (send a logged-in user without a recent step-up confirmation to `/confirm-password`), matching `lukk-auth` / `lukk-guest`. Each acts only on an authenticated user (pair with `lukk-auth`); the server's `lukk.verified` (409) / `lukk.confirm` (423) remain the real enforcement. Use these to gate a **whole page/section**.
+  - **`useLukkConfirmation` modal flow:** add `withConfirmation(action)` for a **per-action** step-up — it runs the action and, on a `423`, drops any stale confirmation, flips the new reactive `required` (bind your modal to it), waits for a fresh confirm (password _or_ passkey), and retries once. Plus `cancel()` to abort a pending prompt. This also fixes a stale-`confirmed` edge: a `423` now clears the client flag instead of leaving it optimistically true.
+
+- 5076caa: BFF SSR auth hydration (on by default). In BFF mode the server now seeds `useLukkAuth().user` / `loggedIn` per request from the sealed session, so authenticated pages render logged-in on the first paint — no logged-out→logged-in flash and no consumer `<ClientOnly>`. A `session.server` plugin reads the sealed session read-only, and (when the access token is still valid) fetches your `user.endpoint` in-process via the same request-aware path `useLukkFetch` uses, seeding the user into the SSR payload; the client then skips the redundant restore.
+
+  Security: only the app `user` resource enters the payload — the access/refresh token never leaves the server; a hydrated render is marked `Cache-Control: no-store` so a shared cache can't cross-serve it; prerendered/cached pages and anonymous/expired-at-SSR sessions fall back to the client restore (never a mid-render token rotation, never a minted cookie, never a 500). `direct` mode is unaffected (no server session). Opt out with `lukk: { ssrHydrate: false }`.
+
+  **Behavior change:** SSR `useLukkAuth().user` was previously always `null` (populated only after client hydration); it is now populated during SSR in BFF mode. Review any page that special-cased "always anonymous on the server."
+
+### Patch Changes
+
+- 50fa215: Fix `$lukkRefresh is not a function` crashing every page load in BFF mode. `initSession` now reads the injected `$lukkRefresh` defensively (as `useLukkFetch` already did), so if the client plugin's provide isn't in effect yet it degrades to logged-out instead of throwing an app-wide error. The client plugin is also named (`lukk:client`) and the session-restore plugin now `dependsOn` it, guaranteeing the `$lukk` / `$lukkRefresh` provide is established before `initSession` runs — even under parallel plugins or layers.
+- Updated dependencies [ed90bec]
+  - lukk-core@0.3.0
+
 ## 0.3.0
 
 ### Minor Changes
