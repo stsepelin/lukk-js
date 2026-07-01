@@ -22,6 +22,7 @@ JavaScript/TypeScript clients for **[lukk](https://github.com/stsepelin/lukk)** 
 - [Two-Factor Authentication](two-factor-authentication.md) — the login challenge and 2FA management
 - [Passkeys](passkeys.md) — register, passwordless login, and management
 - [Confirmation](confirmation.md) — step-up ("sudo") confirmation for sensitive actions
+- [Email Verification](email-verification.md) — resend the link, and reflect the verified state
 
 ## Reference
 
