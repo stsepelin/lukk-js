@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "JavaScript/TypeScript clients for lukk (first-party Laravel JWT auth)",
+  "description": "JavaScript/TypeScript clients for lukk (first-party Laravel JWT auth) + an auth-aware client for your own Laravel API",
   "packageManager": "pnpm@10.33.0",
   "engines": {
     "node": ">=20"

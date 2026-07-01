@@ -100,6 +100,55 @@ The proxy above authenticates the lukk **`/auth`** routes. Your **own** API (and
    })
    ```
 
+<a name="use-lukk-fetch"></a>
+### Calling your app API from a page — use `useLukkFetch`
+
+The proxy authenticates the *transport*; you still need a *client* that sends the
+session correctly in every context. A plain `$fetch('/api/...')` works in the browser
+but **forwards no cookie during SSR** — so the same call, server-rendered, returns a
+silent `401`. `useLukkFetch()` gets this right in client, SSR, and server-route contexts:
+
+```ts
+const api = useLukkFetch()
+
+const { data } = await useAsyncData('me', () => api('/me')) // SSR-authenticated
+const user = await api<User>('/me') // typed via generics
+```
+
+It forwards **only** the sealed session cookie on SSR (never `authorization` or
+`x-forwarded-*`), always sends `Accept: application/json`, uses `redirect: 'manual'` (an
+upstream `3xx` becomes an external navigation to its `Location` — trusted only as far as
+your own API is — rather than silently-followed HTML), and rejects with a typed
+`LukkError` (`{ message, status, errors }`) so a `422` bag is ready to bind to a form. In **direct** mode it also attaches the in-memory bearer and single-flights a
+`401` refresh-and-retry (sharing `$lukk`'s one refresh, so the rotating token is never
+replayed).
+
+> [!WARNING]
+> In any server/SSR context, use `useLukkFetch()` (or Nuxt's `useFetch`) for
+> authenticated calls — a bare `$fetch` sends no cookie server-side and 401s.
+
+> [!NOTE]
+> **Credentials never leak cross-origin.** The session cookie and bearer are attached
+> only to a **same-origin-as-baseURL** target; a cross-origin URL passed to
+> `useLukkFetch` gets no credentials (and `credentials: 'same-origin'`). Also, browsers
+> can't read a manual-redirect target — an upstream `3xx` is surfaced as a navigation on
+> **SSR** but is opaque on the client (the call resolves without following it).
+
+**Organizing a typed API.** `useLukkFetch()` is a typed `ofetch` instance, so group your
+endpoints however you like — e.g. thin resource modules. lukk owns the auth transport and
+the Laravel error shape; your endpoints and their types stay yours:
+
+```ts
+// app/api/users.ts
+export const usersApi = () => {
+  const api = useLukkFetch()
+  return {
+    me: () => api<User>('/me'),
+    update: (dto: UpdateUser) => api<User>('/me', { method: 'PATCH', body: dto }),
+  }
+}
+```
+
 > [!NOTE]
 > **Clean JSON errors out of the box.** The app proxy sets `Accept: application/json` on
 > forwarded requests (`api.forceJson`, default `true`), so Laravel's `expectsJson()` is true
@@ -138,6 +187,12 @@ The proxy above authenticates the lukk **`/auth`** routes. Your **own** API (and
 
 - lukk in cookie mode (`LUKK_COOKIE_MODE=true`), so the refresh token is delivered as the `__Host-` cookie.
 - **CORS configured on lukk** for your site's exact origin, with credentials. Because the client sends `credentials: 'include'`, lukk must echo your specific `Origin` and set `Access-Control-Allow-Credentials: true` — a wildcard `Access-Control-Allow-Origin: *` is rejected by the browser when credentials are included. Getting this wrong fails *silently* as a perpetual logged-out loop. (Cross-site cookie delivery also requires lukk's refresh cookie to be `SameSite=None; Secure` if your app and API are on different sites.)
+
+Call your own API with [`useLukkFetch()`](#use-lukk-fetch) here too: it attaches the
+in-memory bearer and single-flights a `401` refresh-and-retry (sharing `$lukk`'s refresh).
+Because the token is client-only, a **direct**-mode `useLukkFetch` call during SSR has no
+bearer — fetch your API on the client, or use **BFF** mode when you need SSR-authenticated
+data.
 
 > [!WARNING]
 > **The access token is reachable by JavaScript in direct mode.** It lives in client memory (never `localStorage`), but any script on the page — including injected script under XSS — can read it and call the API as the user until it expires. Minimise your XSS surface and set a strict Content-Security-Policy. The token is **not** written during SSR, so it never lands in the hydration payload; keep it that way (don't trigger `login`/`fetchUser` server-side). If you need the browser to hold *no* token at all, use **BFF mode**.

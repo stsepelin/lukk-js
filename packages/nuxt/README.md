@@ -1,8 +1,9 @@
 # lukk-nuxt
 
 Nuxt module for **[lukk](https://github.com/stsepelin/lukk)** — first-party Laravel JWT
-auth. SSR / SPA / SSG, Nuxt 3 **and** 4, in **BFF** or **direct** mode — one composable
-API either way.
+auth, plus [`useLukkFetch()`](https://github.com/stsepelin/lukk-js/blob/main/docs/transport-modes.md#use-lukk-fetch),
+an auth-aware fetch for your own Laravel API. SSR / SPA / SSG, Nuxt 3 **and** 4, in
+**BFF** or **direct** mode — one composable API either way.
 
 ```bash
 npm i lukk-nuxt
@@ -45,6 +46,7 @@ const { user, loggedIn, login, logout, pendingTwoFactor, verifyTwoFactor } = use
 const { enable, confirm, disable, recoveryCodeCount } = useLukkTwoFactor()
 const { confirmPassword } = useLukkConfirmation()
 const { register, login: passkeyLogin, list, remove } = useLukkPasskeys()
+const api = useLukkFetch() // auth-aware fetch for your OWN app API
 </script>
 ```
 
@@ -52,6 +54,7 @@ const { register, login: passkeyLogin, list, remove } = useLukkPasskeys()
 - **`useLukkTwoFactor`** — enrol / confirm / disable / recovery-code count (behind step-up).
 - **`useLukkConfirmation`** — earn a step-up confirmation token (auto-attached to gated requests).
 - **`useLukkPasskeys`** — register / passwordless login / step-up confirm / list / remove.
+- **`useLukkFetch`** — a typed, transport-aware fetch for your own app API: forwards the session cookie on SSR (a bare `$fetch` doesn't → silent 401), attaches the bearer in direct mode with single-flight 401 refresh, and rejects with a typed `LukkError`.
 
 Guard pages with the route middleware — `lukk-auth` (require login) or
 `lukk-guest` (bounce already-authenticated users, e.g. off `/login`):
@@ -71,8 +74,16 @@ be authenticated server-side. Proxy it through lukk-nuxt:
 lukk: { mode: 'bff', api: { path: '/api', target: 'https://api.example.com' } }
 ```
 
-Now `$fetch('/api/...')` is authenticated with the bearer injected server-side — or
-read the token yourself in a Nitro route via `getLukkAccessToken(event)`. Full guide:
+Now call it with **`useLukkFetch()`** — it forwards the session cookie on SSR (a bare
+`$fetch` doesn't, so it 401s server-side), sends `Accept: application/json`, and rejects
+with a typed `LukkError`:
+
+```ts
+const api = useLukkFetch()
+const { data } = await useAsyncData('me', () => api('/me')) // SSR-authenticated
+```
+
+Or read the token yourself in a Nitro route via `getLukkAccessToken(event)`. Full guide:
 [Authenticating your own API](https://github.com/stsepelin/lukk-js/blob/main/docs/transport-modes.md#bff).
 
 ## Security
