@@ -59,6 +59,14 @@ async function onSubmit() {
 
 On success, the token is persisted and the [user is loaded](#user) — `loggedIn` flips to `true`. A failed login throws a typed [`LukkError`](core.md#errors) (`{ status, message, errors? }`).
 
+**Custom login fields.** `email` and `password` are required, but you may pass **extra fields** — a `remember` flag, a captcha token, a tenant — and they reach Laravel as-is (no cast needed; the input type is `LoginInput = LoginCredentials & Record<string, unknown>`):
+
+```ts
+await login({ email: email.value, password: password.value, remember: true, captcha: token.value })
+```
+
+lukk ignores unknown fields on the default login path; to actually *act* on them (or accept a different credential field such as `username`), take over login on the **server** with [`Lukk::authenticateUsing`](https://stsepelin.github.io/lukk/customization#custom-login-logic) — the closure receives the full request. `twoFactorChallenge` accepts extra fields the same way.
+
 > [!NOTE]
 > If the user has two-factor authentication enabled, `login` does **not** log them in — it surfaces a challenge (`pendingTwoFactor` becomes `true`) for you to complete. See [Two-Factor Authentication](two-factor-authentication.md).
 

@@ -38,6 +38,13 @@ export interface LoginCredentials {
   password: string
 }
 
+/**
+ * Login credentials, plus any extra fields your backend reads (e.g. `remember`, a captcha
+ * token). `email`/`password` stay required; extras pass straight through to lukk, where a
+ * custom `Lukk::authenticateUsing` closure can act on them.
+ */
+export type LoginInput = LoginCredentials & Record<string, unknown>
+
 /** Completing a 2FA login at `POST /auth/two-factor-challenge`. */
 export interface TwoFactorChallengeInput {
   challenge_token: string
@@ -45,6 +52,9 @@ export interface TwoFactorChallengeInput {
   code?: string
   recovery_code?: string
 }
+
+/** {@link TwoFactorChallengeInput}, plus any extra fields your backend reads. */
+export type TwoFactorInput = TwoFactorChallengeInput & Record<string, unknown>
 
 /** `POST /auth/two-factor` enrolment response (shown once). */
 export interface TwoFactorEnrollment {
