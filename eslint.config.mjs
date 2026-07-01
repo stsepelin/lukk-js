@@ -3,7 +3,7 @@ import { createConfigForNuxt } from '@nuxt/eslint-config/flat'
 export default createConfigForNuxt({
   features: { stylistic: true },
 }).prepend({
-  ignores: ['**/dist/**', '**/.nuxt/**', '**/.output/**', '**/coverage/**', '**/playground/.nuxt/**'],
+  ignores: ['**/dist/**', '**/.nuxt/**', '**/.output/**', '**/coverage/**', '**/playground/.nuxt/**', '**/.vitepress/cache/**', '**/.vitepress/dist/**'],
 }).append({
   rules: {
     // `request<void>` is how we type lukk's no-content endpoints — intentional and safe.

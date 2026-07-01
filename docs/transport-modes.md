@@ -182,6 +182,19 @@ export const usersApi = () => {
 > for the mount. (All proxied responses are `Cache-Control: no-store`, and `Content-Length`
 > is dropped — chunked transfer, so a progress bar won't show the total.)
 
+> [!NOTE]
+> **Cookies & CSRF (who owns `Set-Cookie`).** The proxy owns cookies: it **strips every upstream
+> `Set-Cookie`** your Laravel API returns and re-emits **only** lukk's sealed session cookie (rotated
+> on refresh). So an app-API response's own cookie — a locale, a feature flag, Laravel's
+> `XSRF-TOKEN` or web-session cookie — does **not** reach the browser through the proxy. This is by
+> design: lukk is stateless (bearer JWT), and forwarding upstream cookies would risk leaking or
+> colliding with the sealed session. If a browser cookie is genuinely needed, set it from a Nuxt
+> plugin/server route rather than a proxied app-API response, or keep those cookie-driven routes off
+> the `${path}` mount. For the same reason CSRF is enforced by **origin** (a `SameSite=Strict`
+> session + an `Origin` check), not a token — so Laravel's token-based CSRF (`419`) does not apply to
+> lukk auth or the proxied API. In **direct** mode there is no proxy: the browser handles the app's
+> `Set-Cookie` natively, subject to CORS and `SameSite`.
+
 <a name="use-lukk-form"></a>
 ### Binding a form to Laravel validation — use `useLukkForm`
 

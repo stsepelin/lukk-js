@@ -95,6 +95,12 @@ form.hasErrors      // true
 
 **Every submit clears the errors first**, then re-populates them only from a `422` — so a stale message never lingers into the next attempt.
 
+> [!NOTE]
+> **Nested & array fields.** Laravel keys the bag with **dotted paths** for nested/array rules —
+> `address.street`, `items.0.name`. `form.errors` keys them exactly as returned, so read them with
+> bracket access: `form.errors['address.street']`. (For a nested `form.data`, bind the message with a
+> small computed or helper — the errors are a flat map, not mirrored onto the nested shape.)
+
 You can also drive errors yourself (e.g. from a client-side check). All of these are **chainable** (they return the form):
 
 ```ts
