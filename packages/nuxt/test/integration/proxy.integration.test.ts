@@ -36,6 +36,13 @@ beforeAll(async () => {
         res.end(Buffer.from('%PDF-1.4 binary', 'utf8'))
         return
       }
+      if (req.url?.includes('/set-cookies')) {
+        // An allow-listed cookie, a non-listed one, and a forged session cookie.
+        res.setHeader('set-cookie', ['locale=en; Path=/', 'tracking=xyz; Path=/', '__Host-lukk-session=FORGED; Path=/'])
+        res.setHeader('content-type', 'application/json')
+        res.end(JSON.stringify({ ok: true }))
+        return
+      }
       received = { method: req.method, contentType: req.headers['content-type'], accept: req.headers.accept, authorization: req.headers.authorization, body: Buffer.concat(chunks) }
       res.setHeader('content-type', 'application/json')
       res.end(JSON.stringify({ ok: true }))
@@ -57,6 +64,7 @@ beforeAll(async () => {
     apiForceJson: true,
     baseURL: `http://127.0.0.1:${port(auth)}`,
     sessionPassword: SESSION_PASSWORD,
+    apiForwardSetCookie: ['locale'],
   } as unknown as Record<string, unknown>
 
   const app = createApp()
@@ -116,6 +124,15 @@ describe('api-proxy integration (real h3 + upstream)', () => {
     expect(res.status).toBe(200) // streamed normally, not a 500 from a queued-cookie collision
     expect(refreshCalls).toBe(0) // no session → no refresh
     expect(res.headers.get('set-cookie')).toBeNull() // crucially: no fresh empty session cookie minted
+  })
+
+  it('forwards only allow-listed app-API cookies, dropping others and any forged session cookie', async () => {
+    const res = await fetch(`${proxyURL}/api/set-cookies`)
+    expect(res.status).toBe(200)
+    const cookies = res.headers.getSetCookie()
+    expect(cookies.some(c => c.startsWith('locale=en'))).toBe(true) // allow-listed → forwarded
+    expect(cookies.some(c => c.startsWith('tracking='))).toBe(false) // not listed → stripped
+    expect(cookies.some(c => c.startsWith(`${LUKK_SESSION_COOKIE}=`))).toBe(false) // forged session → dropped
   })
 
   it('streams a binary download back with its headers', async () => {

@@ -29,13 +29,15 @@ const SPOOFABLE_FORWARDING = {
  * docs/transport-modes.md.
  */
 export default defineEventHandler(async (event) => {
-  const { apiPath, apiTarget, apiForceJson, baseURL, sessionPassword } = useRuntimeConfig(event).lukk as {
+  const { apiPath, apiTarget, apiForceJson, baseURL, sessionPassword, apiForwardSetCookie } = useRuntimeConfig(event).lukk as {
     apiPath: string
     apiTarget: string
     apiForceJson: boolean
     baseURL: string
     sessionPassword: string
+    apiForwardSetCookie?: string[]
   }
+  const forwardSetCookie = apiForwardSetCookie ?? []
 
   if (isForeignOrigin(event)) {
     setResponseStatus(event, 403)
@@ -105,11 +107,21 @@ export default defineEventHandler(async (event) => {
       'x-forwarded-for': getRequestIP(event, { xForwardedFor: false }) ?? '',
       ...SPOOFABLE_FORWARDING,
     },
-    // Not a cookie/cache passthrough: strip upstream Set-Cookie (restoring only the
-    // rotated session cookie) and keep the authenticated response out of shared caches.
+    // Not a cookie/cache passthrough: strip upstream Set-Cookie, restore the rotated session,
+    // and (opt-in) re-emit only allow-listed app-API cookies. Keep it out of shared caches.
     onResponse(ev) {
+      const upstream = toCookieArray(ev.node.res.getHeader('set-cookie'))
       ev.node.res.removeHeader('set-cookie')
-      if (sessionCookie !== undefined) ev.node.res.setHeader('set-cookie', sessionCookie)
+      const keep = toCookieArray(sessionCookie) // the rotated session cookie (if any)
+      // Opt-in passthrough: forward only allow-listed names — and NEVER the sealed session
+      // cookie, whatever the list says (an upstream must not be able to overwrite it).
+      if (forwardSetCookie.length) {
+        for (const cookie of upstream) {
+          const name = cookieName(cookie)
+          if (name !== LUKK_SESSION_COOKIE && forwardSetCookie.includes(name)) keep.push(cookie)
+        }
+      }
+      if (keep.length) ev.node.res.setHeader('set-cookie', keep)
       ev.node.res.setHeader('cache-control', 'private, no-store')
     },
   })
@@ -133,6 +145,18 @@ async function readSession(event: H3Event, password: string): Promise<TokenSessi
     // Tampered, expired, or wrong-secret seal → treat as no session.
     return {}
   }
+}
+
+/** Normalize a `Set-Cookie` header value (string | string[] | number | undefined) to an array. */
+function toCookieArray(value: number | string | string[] | undefined): string[] {
+  if (value === undefined) return []
+  return Array.isArray(value) ? [...value] : [String(value)]
+}
+
+/** The cookie name from a `Set-Cookie` string (the part before the first `=`). */
+function cookieName(setCookie: string): string {
+  const eq = setCookie.indexOf('=')
+  return eq === -1 ? '' : setCookie.slice(0, eq).trim()
 }
 
 /** Whether a lukk access JWT is at/near expiry (10s skew) — decoded, not verified. */

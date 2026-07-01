@@ -191,12 +191,22 @@ export const usersApi = () => {
 > design: lukk is stateless (bearer JWT), and forwarding upstream cookies would risk leaking or
 > colliding with the sealed session. If a browser cookie is genuinely needed, set it from a Nuxt
 > plugin/server route rather than a proxied app-API response, or keep those cookie-driven routes off
-> the `${path}` mount. For the same reason CSRF is enforced by **origin** (a `SameSite=Strict`
+> the `${path}` mount — **or** opt specific cookies in with `api.forwardSetCookie` (below). For the
+> same reason CSRF is enforced by **origin** (a `SameSite=Strict`
 > session + an `Origin` check), not a token — so Laravel's token-based CSRF (`419`) does not apply to
 > lukk auth or the proxied API. In **direct** mode there is no proxy: the browser handles the app's
 > `Set-Cookie` natively, subject to CORS and `SameSite`.
 
-<a name="use-lukk-form"></a>
+> [!NOTE]
+> **Opting cookies in — `api.forwardSetCookie`.** For a hybrid app whose Laravel API legitimately
+> sets a browser cookie, pass an **allow-list of cookie names** to let just those through the proxy:
+>
+> ```ts
+> lukk: { mode: 'bff', api: { path: '/api', target: '…', forwardSetCookie: ['locale', 'theme'] } }
+> ```
+>
+> Everything else is still stripped, and the sealed session cookie is **never** forwardable — even if
+> you list its name, an upstream can't overwrite it. Default `[]` (strip everything).
 ### Binding a form to Laravel validation — use `useLukkForm`
 
 `useLukkFetch` already rejects with a typed `LukkError` (`{ status, message, errors }`);

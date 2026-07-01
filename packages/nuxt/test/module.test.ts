@@ -78,6 +78,13 @@ describe('lukk-nuxt module', () => {
     expect((nuxt.options.runtimeConfig.lukk as { apiForceJson: boolean }).apiForceJson).toBe(false)
   })
 
+  it('passes api.forwardSetCookie into runtimeConfig (default empty)', () => {
+    const dflt = setup({ baseURL: 'https://api/auth', mode: 'bff', api: { path: '/api', target: 'https://laravel.test' } })
+    expect((dflt.options.runtimeConfig.lukk as { apiForwardSetCookie: string[] }).apiForwardSetCookie).toEqual([])
+    const set = setup({ baseURL: 'https://api/auth', mode: 'bff', api: { path: '/api', target: 'https://laravel.test', forwardSetCookie: ['locale'] } })
+    expect((set.options.runtimeConfig.lukk as { apiForwardSetCookie: string[] }).apiForwardSetCookie).toEqual(['locale'])
+  })
+
   it('does not register the app-API proxy without api config (bff)', () => {
     setup({ baseURL: 'https://api/auth', mode: 'bff' })
     expect(kit.addServerHandler).toHaveBeenCalledOnce() // just the bff proxy

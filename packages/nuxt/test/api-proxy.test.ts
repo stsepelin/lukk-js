@@ -2,7 +2,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { __test } from './mocks/imports'
 import type { TokenSession } from '../src/runtime/server/utils/refresh'
 
-const proxyRequest = vi.fn(async (event: { node: { res: { removeHeader: unknown, setHeader: unknown } } }, target: string, opts?: { headers?: Record<string, string>, onResponse?: (e: unknown, r: unknown) => void }) => {
+// Upstream (app-API) Set-Cookie the proxy would receive; the mock appends it like h3 does.
+let upstreamSetCookie: string | string[] | undefined
+const proxyRequest = vi.fn(async (event: { node: { res: { getHeader: (k: string) => unknown, setHeader: (k: string, v: unknown) => void, removeHeader: unknown } } }, target: string, opts?: { headers?: Record<string, string>, onResponse?: (e: unknown, r: unknown) => void }) => {
+  // Simulate h3 appending the upstream Set-Cookie to whatever's already queued (the session).
+  if (upstreamSetCookie !== undefined) {
+    const arr = (v: unknown): unknown[] => (v === undefined ? [] : Array.isArray(v) ? v : [v])
+    event.node.res.setHeader('set-cookie', [...arr(event.node.res.getHeader('set-cookie')), ...arr(upstreamSetCookie)])
+  }
   // h3 calls onResponse after setting upstream headers, before streaming the body.
   if (opts?.onResponse) await opts.onResponse(event, { headers: new Headers() })
   return { target, headers: opts?.headers }
@@ -78,6 +85,7 @@ beforeEach(() => {
   cookiePresent = true
   sealValid = true
   sealHasData = true
+  upstreamSetCookie = undefined
   refreshOnce.mockReset()
 })
 afterEach(() => { __test.reset(); vi.clearAllMocks() })
@@ -129,6 +137,41 @@ describe('app-API proxy', () => {
     expect(e.node.res.setHeader).toHaveBeenCalledWith('cache-control', 'private, no-store')
     // No refresh → no rotated session cookie restored.
     expect(e.node.res.setHeader).not.toHaveBeenCalledWith('set-cookie', expect.anything())
+  })
+
+  it('strips upstream Set-Cookie even when the app API sets one (default: no allow-list)', async () => {
+    upstreamSetCookie = ['locale=en; Path=/', 'tracking=x; Path=/']
+    const e = ev({ path: '/api/me' })
+    await run(e)
+    expect(e.node.res.removeHeader).toHaveBeenCalledWith('set-cookie')
+    expect(e.node.res.getHeader('set-cookie')).toBeUndefined() // nothing forwarded
+  })
+
+  it('forwards only allow-listed upstream cookies, stripping the rest', async () => {
+    ;(__test.runtimeConfig.lukk as Record<string, unknown>).apiForwardSetCookie = ['locale']
+    upstreamSetCookie = ['locale=en; Path=/', 'tracking=xyz; Path=/', 'malformed-no-equals'] // malformed → name '', dropped
+    const e = ev({ path: '/api/me' })
+    await run(e)
+    expect(e.node.res.getHeader('set-cookie')).toEqual(['locale=en; Path=/'])
+  })
+
+  it('never forwards the sealed session cookie, even if allow-listed (upstream cannot overwrite it)', async () => {
+    ;(__test.runtimeConfig.lukk as Record<string, unknown>).apiForwardSetCookie = ['__Host-lukk-session', 'locale']
+    upstreamSetCookie = ['__Host-lukk-session=EVIL; Path=/', 'locale=en']
+    const e = ev({ path: '/api/me' })
+    await run(e)
+    // Only `locale` survives; the forged session cookie is dropped despite being listed.
+    expect(e.node.res.getHeader('set-cookie')).toEqual(['locale=en'])
+  })
+
+  it('carries the rotated session cookie AND allow-listed upstream cookies together', async () => {
+    sessionData = { access: expiredJwt(), refresh: 'r' }
+    refreshOnce.mockResolvedValue({ access: 'new-tok', refresh: 'r2' })
+    ;(__test.runtimeConfig.lukk as Record<string, unknown>).apiForwardSetCookie = ['locale']
+    upstreamSetCookie = ['locale=en']
+    const e = ev({ path: '/api/me' })
+    await run(e)
+    expect(e.node.res.getHeader('set-cookie')).toEqual(['__Host-lukk-session=rotated', 'locale=en'])
   })
 
   it('sets an empty XFF when the connection IP is unknown', async () => {

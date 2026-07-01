@@ -7,16 +7,6 @@ commitment or a dated milestone; priorities move with real demand.
 The shipped surface (auth composables, `useLukkFetch`, `useLukkForm`, the BFF proxies) lives in the
 [docs](docs/README.md).
 
-## Transport
-
-- **Opt-in `Set-Cookie` passthrough** — `api: { forwardSetCookie: ['locale', …] }` to let *named*
-  upstream app-API cookies through the BFF proxy, while still stripping everything else and never
-  leaking or colliding with the sealed session. **Deferred:** security-sensitive change to the
-  proxy. The current, deliberate decision is that **the proxy owns cookies** — it strips all upstream
-  `Set-Cookie` and re-emits only lukk's sealed session (see
-  [Transport Modes → Cookies & CSRF](docs/transport-modes.md#bff)). This item would add a controlled
-  escape hatch for hybrid apps whose Laravel API legitimately sets a browser cookie.
-
 ## Client / auth
 
 - **Replace the credential field** — adding extra login fields **shipped** (`login()` /
