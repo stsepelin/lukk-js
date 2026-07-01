@@ -59,12 +59,13 @@ The proxy also **holds the step-up confirmation token server-side** (it strips i
 - lukk in body mode (`LUKK_COOKIE_MODE=false`, its default), so the proxy receives the refresh token to seal.
 
 > [!NOTE]
-> **Throttling & `grace_seconds`.** Every user's auth traffic egresses from the BFF server's IP, so lukk's *per-IP* refresh/login throttles collapse onto one address — raise them for a BFF deployment (and forward `X-Forwarded-For` to lukk if it sits behind your proxy). Keep lukk's `grace_seconds > 0` (its default 30s): the proxy single-flights refresh, but a zero grace window turns any concurrent refresh into a full-family revocation.
+> **Throttling & `grace_seconds`.** Every user's auth traffic egresses from the BFF server's IP, so lukk's *per-IP* refresh/login [throttles](https://stsepelin.github.io/lukk/configuration#rate-limits) collapse onto one address — raise them for a BFF deployment (and forward `X-Forwarded-For` to lukk if it sits behind your proxy). Keep lukk's `grace_seconds > 0` (its default 30s): the proxy single-flights refresh, but a zero grace window turns any concurrent refresh into a full-family [revocation](https://stsepelin.github.io/lukk/architecture#reuse-detection).
 
 ### Authenticating your own API in BFF
 
 The proxy above authenticates the lukk **`/auth`** routes. Your **own** API (and
-`user.endpoint`) gets no token automatically — the browser has none. Two supported ways:
+`user.endpoint`) gets no token automatically — the browser has none. Two supported ways
+(this pairs with lukk's [splitting auth from the API](https://stsepelin.github.io/lukk/deployment#splitting-auth-and-api) topology when the two live on different services):
 
 1. **The app-API proxy** (recommended) — forward `${path}/**` to a fixed Laravel `target`,
    injecting the bearer server-side:
@@ -237,6 +238,9 @@ and direct mode, and in SSR) because it submits through `useLukkFetch`.
 
 **See [Forms](forms.md) for the full API and recipes.**
 
+> [!NOTE]
+> A custom `/register` (or bespoke login) route lives on the Laravel side. To hand back a lukk session after your own registration flow, issue tokens with [`startSession()`](https://stsepelin.github.io/lukk/authentication#starting-sessions-manually); to accept a different credential field or add checks at login, use [custom login logic](https://stsepelin.github.io/lukk/customization#custom-login-logic).
+
 <a name="direct"></a>
 ## Direct Mode
 
@@ -279,7 +283,7 @@ When in doubt and you have a server, prefer **`bff`** — keeping tokens out of 
 <a name="switching"></a>
 ## Switching Modes
 
-Flip one config value — and update the lukk side to match the delivery mode:
+Flip one config value — and update the lukk side to match the [delivery mode](https://stsepelin.github.io/lukk/configuration#output-mode):
 
 ```ts
 // nuxt.config.ts

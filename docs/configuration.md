@@ -61,7 +61,7 @@ mode: 'bff' // or 'direct'
 - **`bff`** (default) — a Nitro proxy holds tokens server-side; the browser never sees one.
 - **`direct`** — the client calls lukk directly; the access token lives in memory.
 
-This is the single switch that changes the transport. Your component code does not change. Read [Transport Modes](transport-modes.md) before choosing.
+This is the single switch that changes the transport. Your component code does not change. Read [Transport Modes](transport-modes.md) before choosing, and pair it with lukk's [output mode](https://stsepelin.github.io/lukk/configuration#output-mode) on the server (`direct` ↔ cookie mode, `bff` ↔ body mode).
 
 <a name="user-endpoint"></a>
 ## `user.endpoint`

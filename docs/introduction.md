@@ -8,7 +8,7 @@
 <a name="what"></a>
 ## What lukk-js Is
 
-[lukk](https://github.com/stsepelin/lukk) is a Laravel package that issues short-lived access JWTs and opaque rotating refresh tokens for **first-party** apps — apps where you own both the client and the API. lukk-js is the other half of that story: the client that talks to it.
+[lukk](https://stsepelin.github.io/lukk/) is a Laravel package that issues short-lived access JWTs and opaque rotating refresh tokens for **first-party** apps — apps where you own both the client and the API. lukk-js is the other half of that story: the client that talks to it.
 
 It does the unglamorous work you'd otherwise hand-write for every project — attaching the bearer token, refreshing it before requests fail, surviving a 401, threading the 2FA and passkey ceremonies, and keeping a reactive `user` in sync — behind one small composable surface.
 

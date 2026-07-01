@@ -90,4 +90,4 @@ Every lukk-js concept has a lukk counterpart:
 | single-flight refresh | the rotation grace window |
 | `useLukkPasskeys` / `useLukkTwoFactor` | the `passkeys` / `two_factor` features |
 
-When in doubt about behavior, the [lukk docs](https://github.com/stsepelin/lukk/tree/main/docs) are the source of truth — lukk-js is built to match them, and conformance proves it does.
+When in doubt about behavior, the [lukk docs](https://stsepelin.github.io/lukk/architecture) are the source of truth — lukk-js is built to match them, and conformance proves it does. See lukk's [standards mapping](https://stsepelin.github.io/lukk/architecture#standards-mapping) and [security checklist](https://stsepelin.github.io/lukk/architecture#security-checklist) for the server-side guarantees the client relies on.

@@ -2,6 +2,9 @@
 
 Some actions are too sensitive to allow on the strength of an old login — changing 2FA, managing passkeys. lukk gates those behind **step-up ("sudo") confirmation**: the user re-proves their identity, and for a short window afterwards the sensitive routes open up. `useLukkConfirmation` is the client for that.
 
+> [!NOTE]
+> This is the client for lukk's server-side step-up — see [Confirmation on the lukk side](https://stsepelin.github.io/lukk/confirmation) for the routes and how it gates your own.
+
 - [`useLukkConfirmation`](#composable)
 - [How It Works](#how)
 - [Confirming with a Password](#password)
@@ -23,7 +26,7 @@ const {
 <a name="how"></a>
 ## How It Works
 
-When you confirm, the token is **automatically attached** in the `X-Lukk-Confirmation` header on every subsequent request — so once `confirmed` is `true`, the gated actions simply work, until the window expires server-side (lukk's `confirm.ttl`). You never thread the token through your own calls.
+When you confirm, the token is **automatically attached** in the `X-Lukk-Confirmation` header on every subsequent request — so once `confirmed` is `true`, the gated actions simply work, until the window expires server-side (lukk's [`confirm.ttl`](https://stsepelin.github.io/lukk/confirmation#configuration)). You never thread the token through your own calls.
 
 Where the token lives depends on the [mode](transport-modes.md):
 
