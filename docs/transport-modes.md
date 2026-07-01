@@ -84,6 +84,15 @@ The proxy above authenticates the lukk **`/auth`** routes. Your **own** API (and
    marks responses non-cacheable, streams the body, and never proxies `/api/_lukk/**`.
 
    > [!NOTE]
+   > **Transparent refresh.** If the sealed session's access token has already expired,
+   > the proxy refreshes it server-side *before* forwarding — sharing the same per-session
+   > single-flight as the `/api/_lukk/**` auth proxy, so a concurrent auth call and app-API
+   > call rotate the refresh token exactly once (never a reuse-detection family revoke). The
+   > rotated session is re-sealed into the cookie and carried through the streamed response.
+   > A genuinely revoked session still surfaces naturally: the refresh fails and Laravel
+   > sees the (stale) bearer, returning its own `401`. The request body is never buffered.
+
+   > [!NOTE]
    > The trusted IP is the connection peer. If Nitro itself sits behind a load balancer /
    > CDN, that's the LB's IP — configure your trust chain (or have your edge set the real
    > `X-Forwarded-For`) if Laravel needs the true client IP.

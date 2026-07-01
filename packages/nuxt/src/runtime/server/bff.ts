@@ -3,12 +3,7 @@ import { defineEventHandler, getRequestHeader, readRawBody, setResponseStatus, u
 import { useRuntimeConfig } from '#imports'
 import { LUKK_BFF_PREFIX, LUKK_SESSION_COOKIE } from '../shared'
 import { isForeignOrigin, resolveTarget } from './proxy-utils'
-
-interface TokenSession {
-  access?: string
-  refresh?: string
-  confirmation?: string
-}
+import { refreshOnce, type TokenSession } from './utils/refresh'
 
 /**
  * The BFF proxy. The browser calls `/api/_lukk/*`; this handler attaches the
@@ -17,11 +12,6 @@ interface TokenSession {
  * **strips every minted credential out of the response** — so the browser only
  * ever holds the opaque session cookie, never a token.
  */
-
-// Per-session single-flight: collapse a burst of concurrent 401-refreshes into
-// one real `/refresh` call, so a rotated refresh token is never replayed.
-const inflightRefresh = new Map<string, Promise<TokenSession | null>>()
-
 export default defineEventHandler(async (event) => {
   const { baseURL, sessionPassword } = useRuntimeConfig(event).lukk as { baseURL: string, sessionPassword: string }
   const method = event.method
@@ -92,30 +82,6 @@ export default defineEventHandler(async (event) => {
   setResponseStatus(event, res.status)
   return data ?? text
 })
-
-/** Single-flight the server-side refresh per session, returning the new token pair. */
-function refreshOnce(session: { id?: string, data: TokenSession }, baseURL: string): Promise<TokenSession | null> {
-  const id = session.id
-  // No id → don't key the map (an empty key would collapse distinct sessions).
-  if (!id) return rawRefresh(session.data.refresh!, baseURL)
-  const existing = inflightRefresh.get(id)
-  if (existing) return existing
-  const run = rawRefresh(session.data.refresh!, baseURL).finally(() => inflightRefresh.delete(id))
-  inflightRefresh.set(id, run)
-  return run
-}
-
-async function rawRefresh(refreshToken: string, baseURL: string): Promise<TokenSession | null> {
-  const target = resolveTarget(baseURL, '/refresh')!
-  const res = await fetch(target, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-    body: JSON.stringify({ refresh_token: refreshToken }),
-  })
-  if (!res.ok) return null
-  const pair = await res.json() as { access_token: string, refresh_token?: string }
-  return { access: pair.access_token, refresh: pair.refresh_token ?? refreshToken }
-}
 
 function isConfirmation(value: unknown): value is { confirmation_token: string } {
   return typeof value === 'object' && value !== null
