@@ -30,6 +30,17 @@ describe('createLukkClient', () => {
     expect(init?.method).toBe('POST')
   })
 
+  it('resends the email-verification link', async () => {
+    const fetch = vi.fn(async () => json({ status: 'verification-link-sent' }, 202))
+    const client = createLukkClient({ baseURL: 'https://x/auth', fetch })
+
+    await client.sendEmailVerification()
+
+    const [url, init] = fetch.mock.calls[0]!
+    expect(url).toBe('https://x/auth/email/verification-notification')
+    expect(init?.method).toBe('POST')
+  })
+
   it('passes extra login fields through to the request body (custom authenticateUsing)', async () => {
     const fetch = vi.fn(async () => json({ access_token: 'a', expires_in: 900, refresh_token: 'r' }))
     const client = createLukkClient({ baseURL: 'https://x/auth', fetch })

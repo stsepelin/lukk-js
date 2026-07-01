@@ -9,6 +9,14 @@ The shipped surface (auth composables, `useLukkFetch`, `useLukkForm`, the BFF pr
 
 ## Client / auth
 
+- **Email verification** — **shipped**: `useLukkEmailVerification()` (`verified` computed off the loaded
+  user, `sending`, `sendVerificationEmail()`, `syncAfterVerify()`) plus a core `sendEmailVerification()`
+  method. The verify click is a browser navigation that redirects back to the SPA, so the client owns the
+  resend + the post-redirect sync, not the verification itself. See
+  [docs/email-verification.md](docs/email-verification.md). An optional `lukk-verified` route middleware
+  was **left out** — branch on `verified`, or let the server's `lukk.verified` 409 surface through
+  `useLukkFetch`.
+
 - **Replace the credential field** — adding extra login fields **shipped** (`login()` /
   `twoFactorChallenge()` accept `LoginInput = LoginCredentials & Record<string, unknown>`; see
   [Authentication → Custom login fields](docs/authentication.md#login)). Still open: a first-class,

@@ -121,6 +121,10 @@ export function createLukkClient(hooks: LukkClientHooks) {
     revokeAllSessions: () => request<void>('/sessions', { method: 'DELETE' }),
     revokeOtherSessions: () => request<void>('/sessions/others', { method: 'DELETE' }),
 
+    // --- email verification ---
+    /** Resend the email-verification link to the authenticated user (a no-op if already verified). */
+    sendEmailVerification: () => request<void>('/email/verification-notification', { method: 'POST' }),
+
     // --- step-up confirmation ---
     confirmPassword: (password: string) => request<ConfirmationToken>('/confirm-password', json({ password })),
     confirmPasskey: (ceremony_id: string, credential: unknown) => request<ConfirmationToken>('/confirm-passkey', json({ ceremony_id, credential })),
