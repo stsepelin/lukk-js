@@ -71,8 +71,15 @@ export function createLukkClient(hooks: LukkClientHooks) {
     }
 
     const res = await doFetch(joinURL(hooks.baseURL, path), {
-      credentials: sameOrigin ? 'include' : 'same-origin',
       ...init,
+      // `credentials` and `redirect` sit AFTER `...init` so a caller can't override the origin-scoped
+      // credentials mode or re-enable redirect following.
+      // Origin-scoped: attach cookies only to a same-origin-as-baseURL target (see `sameOrigin` above).
+      credentials: sameOrigin ? 'include' : 'same-origin',
+      // Never auto-follow a redirect: on a server/undici fetch a cross-origin 3xx would forward
+      // the custom `X-Lukk-Confirmation` header to the target (the bearer is stripped, this isn't).
+      // A 3xx from an auth route is anomalous — surface it as an error instead of chasing it.
+      redirect: 'manual',
       headers,
     })
 

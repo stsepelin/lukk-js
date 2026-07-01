@@ -1,5 +1,4 @@
 import { createLukkClient, type LukkClient, singleFlight } from 'lukk-core'
-// #imports is resolved by Nuxt at build time
 import { defineNuxtPlugin, useRuntimeConfig, useState } from '#imports'
 import { ACCESS_KEY, CONFIRMATION_KEY } from '../keys'
 import { LUKK_BFF_PREFIX } from '../shared'
