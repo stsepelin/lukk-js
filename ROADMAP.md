@@ -53,3 +53,14 @@ Beyond the near-`useForm` parity already shipped in [`useLukkForm`](docs/forms.m
 
 - **More framework bindings** — `lukk-react` and friends on top of the framework-agnostic
   `lukk-core`. The monorepo is structured for this from the start.
+
+## AI & tooling
+
+The docs are already AI-consumable via [`/llms.txt`](https://stsepelin.github.io/lukk-js/llms.txt)
++ `/llms-full.txt` and [`AGENTS.md`](AGENTS.md). Deferred:
+
+- **MCP server** — a Model Context Protocol server a user's AI client could connect to for live
+  doc search / usage scaffolding (e.g. "scaffold a lukk-nuxt setup"). **Deferred:** needs hosting
+  or a published, user-run package plus per-client config and ongoing upkeep. For a docs use-case,
+  `llms.txt` already delivers most of the value with none of that — revisit only for a concrete
+  interactive tool.
