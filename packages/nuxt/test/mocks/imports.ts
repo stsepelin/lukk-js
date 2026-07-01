@@ -1,6 +1,6 @@
 /** A lightweight stand-in for Nuxt's `#imports`, so runtime code can be unit-
  *  tested without booting Nuxt. Configure per-test via the `__test` handle. */
-import { computed, ref, type Ref } from 'vue'
+import { computed, reactive, ref, shallowRef, toRaw, type Ref } from 'vue'
 
 const states = new Map<string, Ref<unknown>>()
 
@@ -33,4 +33,4 @@ export const useRequestHeaders = (_keys?: string[]) => __test.requestHeaders
 export const useRequestFetch = () => (async () => undefined) as unknown
 export const defineNuxtPlugin = <T>(fn: T): T => fn
 export const defineNuxtRouteMiddleware = <T>(fn: T): T => fn
-export { computed }
+export { computed, reactive, ref, shallowRef, toRaw }

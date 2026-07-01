@@ -6,7 +6,7 @@
 [![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen.svg?style=flat-square)](https://github.com/stsepelin/lukk-js/actions)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](LICENSE.md)
 
-JavaScript/TypeScript clients for **[lukk](https://github.com/stsepelin/lukk)** — minimal-dependency JWT authentication for first-party Laravel apps, plus an auth-aware client for calling your own Laravel API correctly. Nuxt first; the core is framework-agnostic, so more bindings can follow.
+JavaScript/TypeScript clients for **[lukk](https://github.com/stsepelin/lukk)** — minimal-dependency JWT authentication for first-party Laravel apps, plus an auth-aware fetch and reactive forms for talking to your own Laravel API correctly. Nuxt first; the core is framework-agnostic, so more bindings can follow.
 
 > **Unofficial companion to lukk.** Not affiliated with or endorsed by the Laravel or Nuxt teams. "Laravel" and "Nuxt" are referenced only to describe compatibility and design influence.
 
@@ -16,6 +16,7 @@ JavaScript/TypeScript clients for **[lukk](https://github.com/stsepelin/lukk)** 
 - **Two transport modes, a config switch apart** — a [**BFF**](docs/transport-modes.md) proxy that keeps tokens server-side (the browser never sees a token), or [**direct**](docs/transport-modes.md) calls straight to lukk (the only option for fully static sites).
 - **The whole lukk surface** — [login](docs/authentication.md), token refresh, logout, session revocation, [two-factor](docs/two-factor-authentication.md), [step-up confirmation](docs/confirmation.md), and [passkeys](docs/passkeys.md).
 - **Call your own API, correctly** — [`useLukkFetch()`](docs/transport-modes.md#use-lukk-fetch) is a typed, auth-aware fetch for *your* Laravel API: authenticated in every context (a plain `$fetch` silently 401s in SSR), single-flight 401 refresh, credentials never leak cross-origin, and a typed Laravel error (`{ message, status, errors }`) ready to bind to a form.
+- **Forms, bound to Laravel validation** — [`useLukkForm()`](docs/forms.md) is a reactive form in the spirit of Inertia's `useForm`: submit `data`, bind a `422` bag to per-field errors, with `processing` / `isDirty` / lifecycle hooks and automatic `multipart/form-data` for file uploads.
 - **Silent refresh, single-flight** — a 401 transparently refreshes and retries; a burst of 401s triggers exactly one refresh.
 - **Typed end to end** — the lukk HTTP contract mirrored in TypeScript, [conformance-tested](docs/architecture.md#conformance) against a real lukk instance so it can't drift.
 - **Tiny** — `lukk-core` has zero runtime dependencies; `lukk-nuxt` adds only `@nuxt/kit` + `defu`.
@@ -25,7 +26,7 @@ JavaScript/TypeScript clients for **[lukk](https://github.com/stsepelin/lukk)** 
 | Package | What it is |
 |---|---|
 | **[`lukk-core`](packages/core)** | Framework-agnostic: the lukk HTTP **contract** types, the auth client (token attach + refresh + single-flight), and WebAuthn helpers. Use it directly in any TS app, or as the base for a binding. |
-| **[`lukk-nuxt`](packages/nuxt)** | A Nuxt module (Nuxt 3 **and** 4): auto-imported composables, `useLukkFetch()` for your own API, route middleware, the BFF proxy, and the transport wiring. |
+| **[`lukk-nuxt`](packages/nuxt)** | A Nuxt module (Nuxt 3 **and** 4): auto-imported composables, `useLukkFetch()` + `useLukkForm()` for your own API, route middleware, the BFF proxy, and the transport wiring. |
 
 ## Transport modes
 

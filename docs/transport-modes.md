@@ -182,6 +182,48 @@ export const usersApi = () => {
 > for the mount. (All proxied responses are `Cache-Control: no-store`, and `Content-Length`
 > is dropped — chunked transfer, so a progress bar won't show the total.)
 
+<a name="use-lukk-form"></a>
+### Binding a form to Laravel validation — use `useLukkForm`
+
+`useLukkFetch` already rejects with a typed `LukkError` (`{ status, message, errors }`);
+`useLukkForm` turns that into a reactive form in the spirit of Inertia's `useForm` — hold
+the fields, submit them, and map a `422` bag onto per-field errors — over the same
+transport-aware fetch (so it's SSR-correct and mode-agnostic):
+
+```vue
+<script setup lang="ts">
+const form = useLukkForm({ email: '', password: '' })
+
+async function register() {
+  try {
+    await form.post('/register')      // form.data is sent as the body
+    await navigateTo('/dashboard')
+  }
+  catch { /* 422 already bound to form.errors; other errors rethrow to your handler */ }
+}
+</script>
+
+<template>
+  <form @submit.prevent="register">
+    <input v-model="form.data.email">
+    <small v-if="form.errors.email">{{ form.errors.email }}</small>
+
+    <input v-model="form.data.password" type="password">
+    <small v-if="form.errors.password">{{ form.errors.password }}</small>
+
+    <button :disabled="form.processing">Create account</button>
+  </form>
+</template>
+```
+
+Fields live under `form.data.*`, `form.errors` holds the first `422` message per field, and
+`form.processing` tracks the request — plus `wasSuccessful`/`recentlySuccessful`/`isDirty`,
+`onSuccess`/`onError`/`onFinish` hooks, automatic `multipart/form-data` for `File`/`Blob` fields,
+and chainable `reset`/`defaults`/`transform`/`cancel`. It is transport-agnostic (identical in BFF
+and direct mode, and in SSR) because it submits through `useLukkFetch`.
+
+**See [Forms](forms.md) for the full API and recipes.**
+
 <a name="direct"></a>
 ## Direct Mode
 
