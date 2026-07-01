@@ -57,7 +57,7 @@ describe('lukk-nuxt module', () => {
   it('always wires composables, middleware, plugins, and the server helpers', () => {
     setup({ baseURL: 'https://api/auth', mode: 'direct' })
     expect(kit.addImportsDir).toHaveBeenCalledOnce()
-    expect(kit.addRouteMiddleware).toHaveBeenCalledTimes(2) // lukk-auth + lukk-guest
+    expect(kit.addRouteMiddleware).toHaveBeenCalledTimes(4) // lukk-auth + lukk-guest + lukk-verified + lukk-confirmed
     expect(kit.addPlugin).toHaveBeenCalledTimes(2) // client + session.client
     expect(kit.addServerImportsDir).toHaveBeenCalledOnce() // getLukkAccessToken / useLukkSession
   })

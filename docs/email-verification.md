@@ -68,4 +68,10 @@ await syncAfterVerify() // re-fetch the user; `verified` becomes true
 <a name="gating"></a>
 ## Gating pages
 
-To require a verified email before a page renders, branch on `verified` in `definePageMeta`/middleware, or lean on the server: lukk's [`lukk.verified`](https://stsepelin.github.io/lukk/email-verification#gating-routes) middleware returns a **409** for unverified users, so an app-API call through `useLukkFetch` to a gated route surfaces that status for you to handle.
+To require a verified email before a page renders, use the **`lukk-verified`** route middleware (stack it after `lukk-auth`) — it redirects a logged-in, unverified user to `/verify-email`:
+
+```ts
+definePageMeta({ middleware: ['lukk-auth', 'lukk-verified'] })
+```
+
+Or branch on `verified` yourself, and lean on the server as the real enforcement: lukk's [`lukk.verified`](https://stsepelin.github.io/lukk/email-verification#gating-routes) middleware returns a **409** for unverified users, so an app-API call through `useLukkFetch` to a gated route surfaces that status for you to handle.
