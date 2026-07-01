@@ -62,8 +62,14 @@ export interface ModuleOptions {
    * validation errors instead of Laravel's default guest-redirect (which 500s
    * behind a proxy). Set `false` to forward the browser's `Accept` instead — only
    * if a route under `path` legitimately serves a non-JSON response.
+   *
+   * `forwardSetCookie` (default `[]`) is an allow-list of **cookie names** the proxy
+   * will pass through from your app API to the browser. By default the proxy owns
+   * cookies and strips every upstream `Set-Cookie`; list a name here to let a hybrid
+   * app's own cookie (a locale, a feature flag) reach the browser. The sealed session
+   * cookie is never forwardable regardless of this list.
    */
-  api: { path: string, target: string, forceJson: boolean }
+  api: { path: string, target: string, forceJson: boolean, forwardSetCookie: string[] }
 }
 
 export default defineNuxtModule<ModuleOptions>({
@@ -79,7 +85,7 @@ export default defineNuxtModule<ModuleOptions>({
     storage: 'cookie',
     user: { endpoint: '' },
     session: { password: '' },
-    api: { path: '', target: '', forceJson: true },
+    api: { path: '', target: '', forceJson: true, forwardSetCookie: [] },
   },
   setup(options, nuxt) {
     const resolver = createResolver(import.meta.url)
@@ -126,6 +132,7 @@ export default defineNuxtModule<ModuleOptions>({
         apiPath,
         apiTarget: options.api.target,
         apiForceJson: options.api.forceJson,
+        apiForwardSetCookie: options.api.forwardSetCookie,
       },
     )
 

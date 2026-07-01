@@ -19,7 +19,7 @@ Everything is configured under the `lukk` key in `nuxt.config.ts`:
 | `baseURL` | `string` | `''` | Your lukk auth URL, including the route prefix. |
 | `mode` | `'bff' \| 'direct'` | `'bff'` | Transport mode — see [Transport Modes](transport-modes.md). |
 | `user.endpoint` | `string` | `''` | Your app's authenticated user route (per-mode — see [`user.endpoint`](#user-endpoint)). |
-| `api.path` / `api.target` / `api.forceJson` | `string` / `string` / `bool` | `''` / `''` / `true` | BFF-only app-API proxy — see [`api`](#api). |
+| `api.path` / `api.target` / `api.forceJson` / `api.forwardSetCookie` | `string` / `string` / `bool` / `string[]` | `''` / `''` / `true` / `[]` | BFF-only app-API proxy — see [`api`](#api). |
 | `session.password` | `string` | env | BFF sealed-session secret (≥ 32 chars). |
 | `confirmationHeader` | `string` | `'X-Lukk-Confirmation'` | Header carrying the step-up token. |
 | `storage` | `string` | `'cookie'` | BFF token storage backend. |
@@ -87,6 +87,7 @@ api: { path: '/api', target: 'https://api.example.com', forceJson: true }
 BFF-only and opt-in. Forwards `${path}/**` to the **fixed** `target` (your Laravel API), injecting the access token server-side — so the browser authenticates to your own API without ever holding a token. `target` is never derived from the request (SSRF-safe); non-GET requests with a foreign `Origin` are rejected (CSRF); the inbound `Cookie`/`Authorization` + spoofable `X-Forwarded-*` are stripped; upstream `Set-Cookie` is stripped; and `/api/_lukk/**` is never proxied.
 
 - **`forceJson`** (default `true`) sets `Accept: application/json` on forwarded requests so a JSON API renders clean `401`/`422` JSON for unauthenticated/validation errors — instead of Laravel's default guest-redirect, which 500s behind a proxy (`shouldRenderJsonWhen` does **not** fix that — see [Transport Modes](transport-modes.md#bff)). Set `false` to forward the browser's `Accept` instead — only if a route under `path` legitimately serves a non-JSON response.
+- **`forwardSetCookie`** (default `[]`) is an allow-list of cookie **names** to pass through from the app API to the browser; everything else is stripped. The sealed session cookie is never forwardable (an upstream can't overwrite it). For a hybrid app whose Laravel API sets its own cookie (a locale, a theme) — see [Transport Modes → Cookies & CSRF](transport-modes.md#bff).
 
 > [!TIP]
 > Call the proxied API with [`useLukkFetch()`](transport-modes.md#use-lukk-fetch) — a plain `$fetch` forwards no cookie during SSR and silently `401`s. It also rejects with a typed `LukkError` (`{ message, status, errors }`).
