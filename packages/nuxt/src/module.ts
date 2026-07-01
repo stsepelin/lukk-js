@@ -28,6 +28,15 @@ export interface ModuleOptions {
    * @default 'bff'
    */
   mode: LukkMode
+  /**
+   * BFF only: hydrate `useLukkAuth().user` on the server so authenticated pages render
+   * logged-in on the first paint (no logged-out→logged-in flash, no `<ClientOnly>`). The
+   * server reads the sealed session and seeds the user resource into the SSR payload — the
+   * token itself never leaves the server, and the render is marked `no-store`. Set `false`
+   * to keep the pre-0.4 client-only behavior. No effect in `direct` mode (no server session).
+   * @default true
+   */
+  ssrHydrate: boolean
   /** Header carrying the step-up token. @default 'X-Lukk-Confirmation' */
   confirmationHeader: string
   /**
@@ -81,6 +90,7 @@ export default defineNuxtModule<ModuleOptions>({
   defaults: {
     baseURL: '',
     mode: 'bff',
+    ssrHydrate: true,
     confirmationHeader: 'X-Lukk-Confirmation',
     storage: 'cookie',
     user: { endpoint: '' },
@@ -150,6 +160,11 @@ export default defineNuxtModule<ModuleOptions>({
     addPlugin(resolver.resolve('./runtime/plugins/client'))
     // Browser-only: silently restore an existing session on load.
     addPlugin({ src: resolver.resolve('./runtime/plugins/session.client'), mode: 'client' })
+    // BFF SSR hydration: seed the user on the server so authed pages render logged-in on the
+    // first paint. Default on; opt out with `ssrHydrate: false`. No-op in direct mode.
+    if (options.mode === 'bff' && options.ssrHydrate !== false) {
+      addPlugin({ src: resolver.resolve('./runtime/plugins/session.server'), mode: 'server' })
+    }
 
     // BFF mode: the same-origin Nitro proxy that holds tokens server-side.
     if (options.mode === 'bff') {

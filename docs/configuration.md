@@ -3,6 +3,7 @@
 - [Options](#options)
 - [`baseURL`](#baseurl)
 - [`mode`](#mode)
+- [`ssrHydrate`](#ssr-hydrate)
 - [`user.endpoint`](#user-endpoint)
 - [`session.password`](#session-password)
 - [`confirmationHeader`](#confirmation-header)
@@ -18,6 +19,7 @@ Everything is configured under the `lukk` key in `nuxt.config.ts`:
 |---|---|---|---|
 | `baseURL` | `string` | `''` | Your lukk auth URL, including the route prefix. |
 | `mode` | `'bff' \| 'direct'` | `'bff'` | Transport mode — see [Transport Modes](transport-modes.md). |
+| `ssrHydrate` | `bool` | `true` | BFF-only — hydrate `user`/`loggedIn` during SSR (no flash). See [`ssrHydrate`](#ssr-hydrate). |
 | `user.endpoint` | `string` | `''` | Your app's authenticated user route (per-mode — see [`user.endpoint`](#user-endpoint)). |
 | `api.path` / `api.target` / `api.forceJson` / `api.forwardSetCookie` | `string` / `string` / `bool` / `string[]` | `''` / `''` / `true` / `[]` | BFF-only app-API proxy — see [`api`](#api). |
 | `session.password` | `string` | env | BFF sealed-session secret (≥ 32 chars). |
@@ -62,6 +64,20 @@ mode: 'bff' // or 'direct'
 - **`direct`** — the client calls lukk directly; the access token lives in memory.
 
 This is the single switch that changes the transport. Your component code does not change. Read [Transport Modes](transport-modes.md) before choosing, and pair it with lukk's [output mode](https://stsepelin.github.io/lukk/configuration#output-mode) on the server (`direct` ↔ cookie mode, `bff` ↔ body mode).
+
+<a name="ssr-hydrate"></a>
+## `ssrHydrate`
+
+```ts
+ssrHydrate: true // default; BFF only
+```
+
+In BFF mode the server reads the sealed session and seeds `useLukkAuth().user` / `loggedIn` **during server rendering**, so authenticated pages render logged-in on the first paint — no logged-out→logged-in flash and no `<ClientOnly>`. Only the app `user` resource enters the SSR payload (never a token), and a hydrated render is marked `Cache-Control: no-store`. See [Transport Modes → SSR hydration](transport-modes.md#ssr-hydration) for the full rationale.
+
+Set `false` to keep the pre-0.4 client-only restore. No effect in `direct` mode (there's no server-side session to read).
+
+> [!NOTE]
+> Enabling this (the default) means SSR `user` is now populated in BFF mode where it was previously `null` until client hydration — a behavior change from ≤ 0.3. Review any page that assumed the server always renders anonymous.
 
 <a name="user-endpoint"></a>
 ## `user.endpoint`

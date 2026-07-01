@@ -14,6 +14,11 @@ export default defineNuxtPlugin({
   name: 'lukk:session-restore',
   dependsOn: ['lukk:client'],
   async setup() {
-    await useLukkAuth().initSession()
+    const auth = useLukkAuth()
+    // If SSR already hydrated the user (BFF `ssrHydrate`), skip the client restore — no
+    // redundant refresh on every page load. Anonymous / expired-at-SSR renders leave `user`
+    // null, so this still restores them.
+    if (auth.loggedIn.value) return
+    await auth.initSession()
   },
 })
