@@ -31,6 +31,9 @@ export const useRequestHeaders = (_keys?: string[]) => __test.requestHeaders
 // Only needs to resolve for the import; the server-BFF branch that calls it is
 // unreachable in the client test env (it's driven via createRequestFetch's own test).
 export const useRequestFetch = () => (async () => undefined) as unknown
-export const defineNuxtPlugin = <T>(fn: T): T => fn
+// Accepts a function plugin or the object form `{ name, dependsOn, setup }`; tests invoke the
+// returned setup directly (plugin metadata like `name`/`dependsOn` is a Nuxt-runtime concern).
+export const defineNuxtPlugin = (plugin: unknown): unknown =>
+  typeof plugin === 'function' ? plugin : (plugin as { setup: unknown }).setup
 export const defineNuxtRouteMiddleware = <T>(fn: T): T => fn
 export { computed, reactive, ref, shallowRef, toRaw }
