@@ -1,7 +1,7 @@
 import { ofetch } from 'ofetch'
-import { navigateTo, useNuxtApp, useRequestHeaders, useRuntimeConfig, useState } from '#imports'
+import { navigateTo, useNuxtApp, useRequestFetch, useRequestHeaders, useRuntimeConfig, useState } from '#imports'
 import { ACCESS_KEY } from '../keys'
-import { createLukkFetch } from '../utils/create-lukk-fetch'
+import { createLukkFetch, createRequestFetch, type LukkFetchDeps, type RequestFetch } from '../utils/create-lukk-fetch'
 
 interface PublicLukk {
   mode: 'bff' | 'direct'
@@ -12,8 +12,10 @@ interface PublicLukk {
  * An auth-aware fetch for your OWN app API — the piece a plain `$fetch` gets wrong
  * (it forwards no cookie in SSR → a silent 401). Transport-aware:
  *
- *  - **BFF**: same-origin to the proxy mount; on SSR it forwards the sealed session
- *    cookie (only `cookie`), and the proxy injects the bearer + refreshes server-side.
+ *  - **BFF**: same-origin to the proxy mount. On the client the interceptor forwards
+ *    only `cookie`; on SSR it routes through Nuxt's request-aware fetch, which resolves
+ *    the relative mount in-process and forwards the request headers to our own proxy —
+ *    which strips everything but the session and injects the bearer server-side.
  *  - **direct**: attaches the in-memory bearer and single-flights a 401 refresh+retry
  *    (sharing `$lukk`'s refresh, so the rotating token is never replayed).
  *
@@ -29,7 +31,7 @@ export function useLukkFetch() {
   // ofetch's interceptor can lose the SSR async context (empty on the client).
   const cookie = useRequestHeaders(['cookie']).cookie
 
-  return createLukkFetch({
+  const deps: LukkFetchDeps = {
     baseURL: cfg.apiBaseURL,
     isServer: import.meta.server === true,
     // Direct mode holds the token in client memory; SSR has none, so nothing to refresh.
@@ -39,5 +41,17 @@ export function useLukkFetch() {
     refresh: () => nuxtApp.$lukkRefresh?.() ?? Promise.resolve(null),
     onRedirect: location => navigateTo(location, { external: true }),
     fetchImpl: ofetch,
-  })
+  }
+
+  // Server + BFF: the relative proxy mount can't be fetched by plain ofetch, and a
+  // request-derived absolute origin would be `Host`-spoofable. Route through Nuxt's
+  // request-aware fetch, which resolves the relative URL in-process (no network egress,
+  // no Host dependency) and forwards the session cookie to our own proxy.
+  // Server-only glue; the routing itself is covered by createRequestFetch's tests.
+  /* v8 ignore next 3 */
+  if (import.meta.server === true && cfg.mode === 'bff') {
+    return createRequestFetch(useRequestFetch() as unknown as RequestFetch, deps)
+  }
+
+  return createLukkFetch(deps)
 }

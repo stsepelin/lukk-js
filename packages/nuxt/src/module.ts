@@ -95,6 +95,12 @@ export default defineNuxtModule<ModuleOptions>({
       console.warn('[lukk-nuxt] BFF mode needs a session secret (≥ 32 chars) — set `session.password` or NUXT_LUKK_SESSION_PASSWORD.')
     }
 
+    // Half-configured app-API proxy: one of path/target set without the other. The
+    // proxy is only registered when BOTH are present, so this would silently do nothing.
+    if (options.mode === 'bff' && !!apiPath !== !!options.api.target) {
+      console.warn('[lukk-nuxt] The app-API proxy needs BOTH `api.path` and `api.target` — it was not registered.')
+    }
+
     // Client-visible config. In BFF mode the browser talks only to our own Nitro
     // proxy, so the lukk URL is NOT exposed to the client.
     nuxt.options.runtimeConfig.public.lukk = defu(nuxt.options.runtimeConfig.public.lukk,

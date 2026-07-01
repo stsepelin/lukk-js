@@ -5,8 +5,11 @@ import { createLukkFetch } from '../src/runtime/utils/create-lukk-fetch'
 import { useLukkFetch } from '../src/runtime/composables/useLukkFetch'
 
 // The factory is unit-tested separately; here we only assert the composable wires
-// the right transport-aware deps from config + state.
-vi.mock('../src/runtime/utils/create-lukk-fetch')
+// the right transport-aware deps from config + state. Keep the real `resolveServerBase`.
+vi.mock('../src/runtime/utils/create-lukk-fetch', async importActual => ({
+  ...(await importActual<typeof import('../src/runtime/utils/create-lukk-fetch')>()),
+  createLukkFetch: vi.fn(),
+}))
 
 beforeEach(() => {
   __test.reset()

@@ -1,6 +1,7 @@
 import { isTwoFactorChallenge, type LoginCredentials, type LoginResult } from 'lukk-core'
 import { computed, useNuxtApp, useRuntimeConfig, useState } from '#imports'
 import { ACCESS_KEY, CHALLENGE_KEY, CONFIRMATION_KEY, CONFIRMED_KEY, USER_KEY } from '../keys'
+import { useLukkFetch } from './useLukkFetch'
 
 interface PublicLukk {
   mode: 'bff' | 'direct'
@@ -16,6 +17,9 @@ interface PublicLukk {
 export function useLukkAuth() {
   const { $lukk, $lukkRefresh } = useNuxtApp()
   const cfg = useRuntimeConfig().public.lukk as PublicLukk
+  // Auth-aware fetch for the current-user load — SSR-correct (forwards the session
+  // cookie) unlike a bare `$fetch`, and transport-aware for the bearer.
+  const api = useLukkFetch()
 
   // Shared with the client plugin (`onTokens` writes the access token here).
   const access = useState<string | null>(ACCESS_KEY, () => null)
@@ -91,9 +95,10 @@ export function useLukkAuth() {
    */
   async function fetchUser(): Promise<void> {
     if (!cfg.userEndpoint) return
-    const headers: Record<string, string> = access.value ? { Authorization: `Bearer ${access.value}` } : {}
     try {
-      user.value = await $fetch(cfg.userEndpoint, { headers })
+      // userEndpoint is a full path; `baseURL: ''` keeps it as-is (in server-BFF the
+      // request-aware transport resolves the relative endpoint in-process).
+      user.value = await api(cfg.userEndpoint, { baseURL: '' })
     }
     catch (e) {
       // Only an auth failure means "logged out". A transient 5xx/network error
