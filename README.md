@@ -95,6 +95,8 @@ Full documentation lives in [`docs/`](docs/README.md):
 
 Planned and deliberately-deferred work is tracked in [`ROADMAP.md`](ROADMAP.md).
 
+**For AI assistants:** the docs are exposed as [`/llms.txt`](https://stsepelin.github.io/lukk-js/llms.txt) + [`/llms-full.txt`](https://stsepelin.github.io/lukk-js/llms-full.txt) ([llms.txt](https://llmstxt.org) convention), and [`AGENTS.md`](AGENTS.md) has integration + contribution rules.
+
 ## Development
 
 ```bash
