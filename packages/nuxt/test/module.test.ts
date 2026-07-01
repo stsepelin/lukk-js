@@ -100,4 +100,18 @@ describe('lukk-nuxt module', () => {
     expect(warn).toHaveBeenCalled()
     warn.mockRestore()
   })
+
+  it('warns on a half-configured app-API proxy (path XOR target), but not when both/neither are set', () => {
+    const warned = (o: Parameters<typeof setup>[0]) => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      setup({ baseURL: 'https://api/auth', ...o })
+      const hit = warn.mock.calls.some(c => String(c[0]).includes('app-API proxy needs BOTH'))
+      warn.mockRestore()
+      return hit
+    }
+    expect(warned({ mode: 'bff', api: { path: '/api' } })).toBe(true) // target missing
+    expect(warned({ mode: 'bff', api: { target: 'https://laravel.test' } })).toBe(true) // path missing
+    expect(warned({ mode: 'bff', api: { path: '/api', target: 'https://laravel.test' } })).toBe(false) // both
+    expect(warned({ mode: 'bff' })).toBe(false) // neither (valid BFF-without-proxy)
+  })
 })

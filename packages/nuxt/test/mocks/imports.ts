@@ -28,6 +28,9 @@ export const useNuxtApp = () => __test.nuxtApp
 export const useRuntimeConfig = () => __test.runtimeConfig
 export const navigateTo = (to: unknown, options?: unknown) => { __test.navigated = to; __test.navigatedOptions = options; return to }
 export const useRequestHeaders = (_keys?: string[]) => __test.requestHeaders
+// Only needs to resolve for the import; the server-BFF branch that calls it is
+// unreachable in the client test env (it's driven via createRequestFetch's own test).
+export const useRequestFetch = () => (async () => undefined) as unknown
 export const defineNuxtPlugin = <T>(fn: T): T => fn
 export const defineNuxtRouteMiddleware = <T>(fn: T): T => fn
 export { computed }

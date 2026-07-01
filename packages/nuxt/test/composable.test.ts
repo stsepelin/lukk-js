@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { __test } from './mocks/imports'
+
+// fetchUser goes through useLukkFetch — mock it with a controllable fake.
+const { api } = vi.hoisted(() => ({ api: vi.fn() }))
+vi.mock('../src/runtime/composables/useLukkFetch', () => ({ useLukkFetch: () => api }))
+
+// eslint-disable-next-line import/first
 import { useLukkAuth } from '../src/runtime/composables/useLukkAuth'
-import { __test, useState } from './mocks/imports'
 
 function withApp(lukk: Record<string, unknown>, lukkRefresh: () => Promise<unknown> = () => Promise.resolve(null)) {
   __test.nuxtApp = { $lukk: lukk, $lukkRefresh: lukkRefresh }
@@ -12,9 +18,7 @@ function withApp(lukk: Record<string, unknown>, lukkRefresh: () => Promise<unkno
   }
 }
 
-const $fetch = () => globalThis as unknown as { $fetch: ReturnType<typeof vi.fn> }
-
-beforeEach(() => { $fetch().$fetch = vi.fn().mockResolvedValue({ id: 1, name: 'Ada' }) })
+beforeEach(() => { api.mockReset().mockResolvedValue({ id: 1, name: 'Ada' }) })
 afterEach(() => { __test.reset(); vi.restoreAllMocks() })
 
 describe('useLukkAuth', () => {
@@ -35,14 +39,15 @@ describe('useLukkAuth', () => {
 
     expect(await login({ email: 'e', password: 'p' })).toEqual({ two_factor: true, challenge_token: 'c' })
     expect(user.value).toBeNull()
-    expect($fetch().$fetch).not.toHaveBeenCalled()
+    expect(api).not.toHaveBeenCalled()
   })
 
-  it('fetchUser attaches a Bearer token when present', async () => {
+  it('fetchUser loads the user via useLukkFetch (full path, no baseURL)', async () => {
     withApp({})
-    useState<string | null>('lukk:access', () => null).value = 'tok'
-    await useLukkAuth().fetchUser()
-    expect($fetch().$fetch).toHaveBeenCalledWith('https://app/me', { headers: { Authorization: 'Bearer tok' } })
+    const { user, fetchUser } = useLukkAuth()
+    await fetchUser()
+    expect(api).toHaveBeenCalledWith('https://app/me', { baseURL: '' })
+    expect(user.value).toEqual({ id: 1, name: 'Ada' })
   })
 
   it('fetchUser logs out only on auth failures, not transient errors', async () => {
@@ -53,20 +58,20 @@ describe('useLukkAuth', () => {
     expect(user.value).toEqual({ id: 1, name: 'Ada' })
 
     // transient 5xx → keep the user (don't bounce a logged-in user to /login)
-    $fetch().$fetch = vi.fn().mockRejectedValue({ statusCode: 503 })
+    api.mockRejectedValueOnce({ statusCode: 503 })
     await fetchUser()
     expect(user.value).toEqual({ id: 1, name: 'Ada' })
 
-    // 403 → logged out
-    $fetch().$fetch = vi.fn().mockRejectedValue({ status: 403 })
+    // 403 (LukkError.status) → logged out
+    api.mockRejectedValueOnce({ status: 403 })
     await fetchUser()
     expect(user.value).toBeNull()
 
     // reload, then 401 → logged out
-    $fetch().$fetch = vi.fn().mockResolvedValue({ id: 2, name: 'Bob' })
+    api.mockResolvedValueOnce({ id: 2, name: 'Bob' })
     await fetchUser()
     expect(user.value).toEqual({ id: 2, name: 'Bob' })
-    $fetch().$fetch = vi.fn().mockRejectedValue({ statusCode: 401 })
+    api.mockRejectedValueOnce({ statusCode: 401 })
     await fetchUser()
     expect(user.value).toBeNull()
   })
@@ -76,13 +81,13 @@ describe('useLukkAuth', () => {
     __test.runtimeConfig.public.lukk.userEndpoint = ''
     const { user, fetchUser } = useLukkAuth()
     await fetchUser()
-    expect($fetch().$fetch).not.toHaveBeenCalled()
+    expect(api).not.toHaveBeenCalled()
     expect(user.value).toBeNull()
   })
 
   it('fetchUser sets the user to null when the request fails', async () => {
     withApp({})
-    $fetch().$fetch = vi.fn().mockRejectedValue(new Error('401'))
+    api.mockRejectedValueOnce(new Error('401'))
     const { user, fetchUser } = useLukkAuth()
     await fetchUser()
     expect(user.value).toBeNull()
@@ -125,7 +130,7 @@ describe('useLukkAuth', () => {
     const { user, initSession } = useLukkAuth()
     await initSession()
     expect(user.value).toBeNull()
-    expect($fetch().$fetch).not.toHaveBeenCalled()
+    expect(api).not.toHaveBeenCalled()
   })
 
   it('surfaces a 2FA challenge on login and completes it with a TOTP code', async () => {

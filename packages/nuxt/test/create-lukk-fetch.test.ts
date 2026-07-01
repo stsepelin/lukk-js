@@ -1,6 +1,6 @@
-import type { $Fetch } from 'ofetch'
+import type { $Fetch, FetchOptions } from 'ofetch'
 import { describe, expect, it, vi } from 'vitest'
-import { createLukkFetch, type LukkFetchDeps } from '../src/runtime/utils/create-lukk-fetch'
+import { createLukkFetch, createRequestFetch, type LukkFetchDeps } from '../src/runtime/utils/create-lukk-fetch'
 
 interface FakeResponse { status: number, type?: string, statusText?: string, headers: Headers, _data?: unknown }
 interface CreatedOpts {
@@ -193,5 +193,27 @@ describe('createLukkFetch — onResponseError', () => {
     const { opts, deps } = build({ canRefresh: true })
     await expect(opts.onResponseError(errCtx(403, {}, 1))).rejects.toMatchObject({ status: 403 })
     expect(deps.refresh).not.toHaveBeenCalled()
+  })
+})
+
+describe('createRequestFetch (server-BFF)', () => {
+  it('routes each call through the request-aware fetch, merging shared options + per-call opts', async () => {
+    const requestFetch = vi.fn(async () => ({ ok: true }))
+    const { deps } = build({ baseURL: '/api' })
+    const api = createRequestFetch(requestFetch, deps)
+
+    // per-call opts merge over the shared options
+    expect(await api('/me', { method: 'POST' })).toEqual({ ok: true })
+    const [req, opts] = requestFetch.mock.calls[0] as [string, FetchOptions]
+    expect(req).toBe('/me')
+    expect(opts.baseURL).toBe('/api') // shared
+    expect(opts.credentials).toBe('include') // shared
+    expect(opts.redirect).toBe('manual') // shared
+    expect(opts.method).toBe('POST') // per-call
+    expect(typeof opts.onRequest).toBe('function') // interceptors carried through
+
+    // default opts ({}) when none passed
+    await api('/other')
+    expect((requestFetch.mock.calls[1] as [string, FetchOptions])[1].baseURL).toBe('/api')
   })
 })

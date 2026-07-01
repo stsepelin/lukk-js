@@ -1,4 +1,4 @@
-import type { $Fetch, FetchContext } from 'ofetch'
+import type { $Fetch, FetchContext, FetchOptions } from 'ofetch'
 // Reuse core's guard + error builder so the same-origin check and the LukkError shape
 // stay identical across the two transports (no drift on a security-critical path).
 import { isSameOrigin, lukkError } from 'lukk-core'
@@ -30,15 +30,15 @@ function redirectLocation(response: Response): string | null {
 }
 
 /**
- * Builds an auth-aware ofetch instance for the consumer's own app API.
- *
- * Transport-aware: BFF forwards the sealed session cookie on SSR (only `cookie`,
+ * The auth-aware ofetch options — shared by the client/direct instance (via
+ * `createLukkFetch`) and the server-BFF path (passed as init to Nuxt's request-aware
+ * fetch). Transport-aware: BFF forwards the sealed session cookie on SSR (only `cookie`,
  * never `authorization`/`x-forwarded-*`); direct attaches the in-memory bearer and
- * single-flights a 401 refresh-and-retry. Always JSON, `redirect: 'manual'` (a 3xx
- * is surfaced, not silently followed), and rejects with a typed `LukkError`.
+ * single-flights a 401 refresh-and-retry. Always JSON, `redirect: 'manual'`, and rejects
+ * with a typed `LukkError`.
  */
-export function createLukkFetch(deps: LukkFetchDeps): $Fetch {
-  return deps.fetchImpl.create({
+export function lukkFetchOptions(deps: LukkFetchDeps): FetchOptions {
+  return {
     baseURL: deps.baseURL,
     credentials: 'include',
     redirect: 'manual',
@@ -80,5 +80,23 @@ export function createLukkFetch(deps: LukkFetchDeps): $Fetch {
       }
       throw lukkError(ctx.response.status, ctx.response.statusText, ctx.response._data as { message?: string, errors?: Record<string, string[]> })
     },
-  })
+  }
+}
+
+/** The client/direct instance: an ofetch instance carrying the shared options. */
+export function createLukkFetch(deps: LukkFetchDeps): $Fetch {
+  return deps.fetchImpl.create(lukkFetchOptions(deps))
+}
+
+/**
+ * The server-BFF instance: routes each call through Nuxt's request-aware fetch (which
+ * resolves the relative mount in-process and forwards the session cookie), carrying the
+ * shared auth-aware options.
+ */
+/** Minimal callable shape of Nuxt's request-aware fetch that we drive. */
+export type RequestFetch = (request: string, opts?: FetchOptions) => Promise<unknown>
+
+export function createRequestFetch(requestFetch: RequestFetch, deps: LukkFetchDeps): $Fetch {
+  const options = lukkFetchOptions(deps)
+  return ((request: string, opts: FetchOptions = {}) => requestFetch(request, { ...options, ...opts })) as $Fetch
 }
