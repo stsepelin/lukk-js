@@ -145,8 +145,9 @@ function joinURL(base: string, path: string): string {
  * Is the request target the same origin as `baseURL`? A relative `path` is always
  * same-origin (it joins onto the base). An absolute `path` only counts when its
  * origin matches an absolute base — otherwise we refuse to attach credentials.
+ * Exported so lukk-nuxt's `useLukkFetch` reuses the exact same guard.
  */
-function isSameOrigin(base: string, path: string): boolean {
+export function isSameOrigin(base: string, path: string): boolean {
   if (!/^https?:\/\//i.test(path)) return true
   if (!/^https?:\/\//i.test(base)) return false
   try { return new URL(path).origin === new URL(base).origin }
@@ -160,9 +161,18 @@ async function parseBody<T>(res: Response): Promise<T> {
   catch { throw { status: res.status, message: 'lukk: invalid JSON in response body' } satisfies LukkError }
 }
 
+/**
+ * Build a {@link LukkError} from a status + an already-parsed Laravel error body
+ * (`{ message, errors }`). Exported so lukk-nuxt shapes app-API errors identically.
+ */
+export function lukkError(status: number, statusText: string, body: { message?: string, errors?: Record<string, string[]> } | null | undefined): LukkError {
+  const b = body ?? {}
+  return { status, message: b.message ?? statusText, ...(b.errors ? { errors: b.errors } : {}) }
+}
+
 async function toLukkError(res: Response): Promise<LukkError> {
   let body: { message?: string, errors?: Record<string, string[]> } = {}
   try { body = JSON.parse(await res.text()) }
   catch { /* non-JSON error body */ }
-  return { status: res.status, message: body.message ?? res.statusText, ...(body.errors ? { errors: body.errors } : {}) }
+  return lukkError(res.status, res.statusText, body)
 }
