@@ -62,6 +62,17 @@ describe('lukk-nuxt module', () => {
     expect(kit.addServerImportsDir).toHaveBeenCalledOnce() // getLukkAccessToken / useLukkSession
   })
 
+  it('registers the SSR-hydration server plugin in bff mode by default, and skips it with ssrHydrate: false', () => {
+    setup({ baseURL: 'https://api/auth', mode: 'bff' })
+    expect(kit.addPlugin).toHaveBeenCalledTimes(3) // client + session.client + session.server
+    expect(kit.addPlugin).toHaveBeenCalledWith(expect.objectContaining({ src: expect.stringContaining('session.server'), mode: 'server' }))
+
+    vi.clearAllMocks()
+    setup({ baseURL: 'https://api/auth', mode: 'bff', ssrHydrate: false })
+    expect(kit.addPlugin).toHaveBeenCalledTimes(2) // client + session.client only
+    expect(kit.addPlugin).not.toHaveBeenCalledWith(expect.objectContaining({ mode: 'server' }))
+  })
+
   it('registers the app-API proxy when api.{path,target} are set in bff mode', () => {
     const nuxt = setup({ baseURL: 'https://api/auth', mode: 'bff', api: { path: '/api', target: 'https://laravel.test' } })
     // bff proxy + app proxy

@@ -15,14 +15,15 @@ vi.mock('lukk-core', async importActual => ({
 }))
 
 const initSession = vi.fn()
-vi.mock('../src/runtime/composables/useLukkAuth', () => ({ useLukkAuth: () => ({ initSession }) }))
+const loggedIn = { value: false }
+vi.mock('../src/runtime/composables/useLukkAuth', () => ({ useLukkAuth: () => ({ initSession, loggedIn }) }))
 
 // eslint-disable-next-line import/first
 import clientPlugin from '../src/runtime/plugins/client'
 // eslint-disable-next-line import/first
 import sessionPlugin from '../src/runtime/plugins/session.client'
 
-afterEach(() => { __test.reset(); captured.hooks = undefined; vi.clearAllMocks() })
+afterEach(() => { __test.reset(); captured.hooks = undefined; loggedIn.value = false; vi.clearAllMocks() })
 
 describe('client plugin', () => {
   it('targets the lukk URL in direct mode and wires the token hooks', async () => {
@@ -68,8 +69,14 @@ describe('client plugin', () => {
 })
 
 describe('session.client plugin', () => {
-  it('restores the session on load', async () => {
+  it('restores the session on load when not already logged in', async () => {
     await (sessionPlugin as unknown as () => Promise<void>)()
     expect(initSession).toHaveBeenCalledOnce()
+  })
+
+  it('skips the client restore when SSR already hydrated the user', async () => {
+    loggedIn.value = true
+    await (sessionPlugin as unknown as () => Promise<void>)()
+    expect(initSession).not.toHaveBeenCalled()
   })
 })

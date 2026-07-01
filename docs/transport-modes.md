@@ -47,7 +47,7 @@ The proxy also **holds the step-up confirmation token server-side** (it strips i
 **Why choose it**
 
 - The browser holds **no token** (access, refresh, or confirmation), so XSS can't exfiltrate one.
-- Clean SSR: the server already has the session, so authenticated pages render on the first paint.
+- Clean SSR: the server reads the sealed session and hydrates both the authenticated **data** and the auth **state** (`user` / `loggedIn`), so authenticated pages render logged-in on the first paint — no flash, no `<ClientOnly>` (see [SSR hydration](#ssr-hydration)).
 - No CORS — the browser only talks to your own origin.
 
 **The CSRF trade-off.** Moving tokens server-side trades XSS-exfiltration risk for CSRF risk: the proxy is authenticated by the ambient session cookie. lukk-nuxt closes this — the session cookie is `__Host-lukk-session` (`SameSite=Strict; Secure; HttpOnly; Path=/`, no `Domain`), **and** the proxy rejects any state-changing request whose `Origin` doesn't match your app (a `403`). You don't need to add your own CSRF layer for `/api/_lukk/**`.
@@ -63,6 +63,23 @@ The proxy also **holds the step-up confirmation token server-side** (it strips i
 
 > [!WARNING]
 > **Keep the sealed session under ~4 KB (a claims budget).** The `__Host-lukk-session` cookie holds the access JWT *plus* the refresh and confirmation tokens, iron-sealed (which inflates the payload ~1.34× on top of a fixed envelope). Per [RFC 6265bis §5.6](https://httpwg.org/specs/rfc6265bis.html#section-5.6) a browser **silently drops** any cookie whose `name`+`value` exceeds **4096 octets** — so if a bloated access token pushes the seal over the line, login appears to succeed but the cookie never persists and every following request is anonymous. This only bites when your backend embeds a large claim set via [`Lukk::tokenClaimsUsing`](https://stsepelin.github.io/lukk/customization) (many roles/permissions/tenant data). Keep custom claims lean — put bulky authorization data behind an API lookup keyed by `sub`, not in the token. lukk-nuxt emits a one-line `console.warn` as the sealed session nears the limit so you catch it in development.
+
+<a name="ssr-hydration"></a>
+### SSR hydration
+
+In BFF mode the server holds the session, so lukk-nuxt hydrates `useLukkAuth().user` / `loggedIn` **during server rendering** — an authenticated page renders logged-in on the first paint, with no logged-out→logged-in flash and no consumer `<ClientOnly>`. It's **on by default**; disable it with `lukk: { ssrHydrate: false }` (reverting to client-only restore).
+
+Per request, on the server, a `session.server` plugin reads the sealed session (read-only — it never mints or slides the cookie), and if the access token is still valid it fetches your `user.endpoint` in-process (the same request-aware path `useLukkFetch` uses) and seeds the user into the SSR payload. The client then hydrates with `user` already present and skips the redundant restore.
+
+Security properties:
+
+- **No token in the payload.** Only your app `user` resource is serialized into the HTML; the access/refresh token never leaves the server (the BFF invariant holds). Expose only fields you're comfortable shipping in the page from your `user.endpoint`.
+- **`no-store` on hydrated renders.** A page that embeds a per-user identity is marked `Cache-Control: no-store`, so a shared cache/CDN can't serve one user's render to another (the sealed cookie header alone does **not** prevent caching — RFC 6265bis §5.6).
+- **Fails safe.** An anonymous, tampered, or expired-seal request hydrates as logged-out with no side effects (no minted cookie, no 500). An access token that's *expired at render time* is deferred to the client restore rather than refreshed mid-render (refreshing would rotate + re-seal the session during the document response).
+- **`direct` mode is unaffected** — the access token lives in client memory only, so there's no server session to hydrate from; direct-mode pages stay client-hydrated.
+
+> [!NOTE]
+> **Additive, but a behavior change from ≤ 0.3.** SSR `useLukkAuth().user` used to be `null` on the server (populated only after client hydration); it is now populated during SSR in BFF mode. If a page special-cased "always anonymous on the server", review it (or set `ssrHydrate: false`).
 
 ### Authenticating your own API in BFF
 

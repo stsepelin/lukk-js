@@ -2,6 +2,7 @@ import type { H3Event } from 'h3'
 import { defineEventHandler, getCookie, getRequestHeader, getRequestIP, proxyRequest, setResponseStatus, unsealSession, useSession } from 'h3'
 import { useRuntimeConfig } from '#imports'
 import { LUKK_BFF_PREFIX, LUKK_SESSION_COOKIE } from '../shared'
+import { accessExpired } from './access-token'
 import { isForeignOrigin, resolveTarget } from './proxy-utils'
 import { refreshOnce, type TokenSession } from './utils/refresh'
 
@@ -157,17 +158,4 @@ function toCookieArray(value: number | string | string[] | undefined): string[] 
 function cookieName(setCookie: string): string {
   const eq = setCookie.indexOf('=')
   return eq === -1 ? '' : setCookie.slice(0, eq).trim()
-}
-
-/** Whether a lukk access JWT is at/near expiry (10s skew) — decoded, not verified. */
-function accessExpired(jwt: string): boolean {
-  const parts = jwt.split('.')
-  if (parts.length !== 3) return true // malformed → refresh
-  try {
-    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString()) as { exp?: number }
-    return typeof payload.exp !== 'number' || payload.exp * 1000 <= Date.now() + 10_000
-  }
-  catch {
-    return true
-  }
 }
