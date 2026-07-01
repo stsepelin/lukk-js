@@ -1,11 +1,16 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { __test } from './mocks/imports'
 
-const captured: { hooks?: Record<string, (...a: unknown[]) => unknown> } = {}
-vi.mock('lukk-core', () => ({
+const captured: {
+  hooks?: Record<string, (...a: unknown[]) => unknown>
+  client?: { refreshTokens: ReturnType<typeof vi.fn> }
+} = {}
+vi.mock('lukk-core', async importActual => ({
+  ...(await importActual<typeof import('lukk-core')>()),
   createLukkClient: vi.fn((hooks: Record<string, (...a: unknown[]) => unknown>) => {
     captured.hooks = hooks
-    return { refreshTokens: vi.fn().mockResolvedValue({ access_token: 'fresh', expires_in: 900 }) }
+    captured.client = { refreshTokens: vi.fn().mockResolvedValue({ access_token: 'fresh', expires_in: 900 }) }
+    return captured.client
   }),
 }))
 
@@ -40,6 +45,25 @@ describe('client plugin', () => {
     __test.runtimeConfig.public.lukk = { mode: 'bff', baseURL: '', confirmationHeader: 'X-Lukk-Confirmation' }
     ;(clientPlugin as unknown as () => unknown)()
     expect(captured.hooks!.baseURL).toBe('/api/_lukk')
+  })
+
+  it('provides $lukkRefresh as ONE single-flight shared with the client (concurrent → one refresh)', async () => {
+    __test.runtimeConfig.public.lukk = { mode: 'direct', baseURL: 'https://api/auth', confirmationHeader: 'X' }
+    const { provide } = (clientPlugin as unknown as () => { provide: { lukkRefresh: () => Promise<unknown> } })()
+
+    const [a, b] = await Promise.all([provide.lukkRefresh(), provide.lukkRefresh()])
+    expect(a).toEqual({ access_token: 'fresh', expires_in: 900 })
+    expect(b).toBe(a)
+    expect(captured.client!.refreshTokens).toHaveBeenCalledTimes(1)
+    // the shared refresh also updated the in-memory access token
+    expect(await captured.hooks!.getAccessToken()).toBe('fresh')
+  })
+
+  it('$lukkRefresh resolves null when the refresh fails', async () => {
+    __test.runtimeConfig.public.lukk = { mode: 'direct', baseURL: 'https://api/auth', confirmationHeader: 'X' }
+    const { provide } = (clientPlugin as unknown as () => { provide: { lukkRefresh: () => Promise<unknown> } })()
+    captured.client!.refreshTokens.mockRejectedValueOnce(new Error('revoked'))
+    expect(await provide.lukkRefresh()).toBeNull()
   })
 })
 

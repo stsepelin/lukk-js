@@ -8,11 +8,15 @@ export const __test = {
   nuxtApp: {} as Record<string, unknown>,
   runtimeConfig: { public: { lukk: {} as Record<string, unknown> } },
   navigated: undefined as unknown,
+  navigatedOptions: undefined as unknown,
+  requestHeaders: {} as Record<string, string | undefined>,
   reset() {
     states.clear()
     this.nuxtApp = {}
     this.runtimeConfig = { public: { lukk: {} } }
     this.navigated = undefined
+    this.navigatedOptions = undefined
+    this.requestHeaders = {}
   },
 }
 
@@ -22,7 +26,8 @@ export function useState<T>(key: string, init: () => T): Ref<T> {
 }
 export const useNuxtApp = () => __test.nuxtApp
 export const useRuntimeConfig = () => __test.runtimeConfig
-export const navigateTo = (to: unknown) => { __test.navigated = to; return to }
+export const navigateTo = (to: unknown, options?: unknown) => { __test.navigated = to; __test.navigatedOptions = options; return to }
+export const useRequestHeaders = (_keys?: string[]) => __test.requestHeaders
 export const defineNuxtPlugin = <T>(fn: T): T => fn
 export const defineNuxtRouteMiddleware = <T>(fn: T): T => fn
 export { computed }

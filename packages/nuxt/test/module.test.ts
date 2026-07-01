@@ -41,9 +41,17 @@ describe('lukk-nuxt module', () => {
   it('skips the proxy and exposes the URL + user endpoint in direct mode', () => {
     const nuxt = setup({ baseURL: 'https://api/auth', mode: 'direct', user: { endpoint: '/me' } })
     expect(kit.addServerHandler).not.toHaveBeenCalled()
-    const pub = nuxt.options.runtimeConfig.public.lukk as { baseURL: string, userEndpoint: string }
+    const pub = nuxt.options.runtimeConfig.public.lukk as { baseURL: string, userEndpoint: string, apiBaseURL: string }
     expect(pub.baseURL).toBe('https://api/auth')
     expect(pub.userEndpoint).toBe('/me')
+    expect(pub.apiBaseURL).toBe('https://api') // direct → API origin (the /auth prefix is dropped)
+  })
+
+  it('derives apiBaseURL: proxy mount (bff), api.target, or empty when unconfigured', () => {
+    const pub = (o: Parameters<typeof setup>[0]) => (setup(o).options.runtimeConfig.public.lukk as { apiBaseURL: string }).apiBaseURL
+    expect(pub({ baseURL: 'https://api/auth', mode: 'bff', api: { path: '/api', target: 'https://laravel.test' } })).toBe('/api')
+    expect(pub({ baseURL: 'https://api/auth', mode: 'bff' })).toBe('') // no api.path → relative root
+    expect(pub({ baseURL: 'https://api/auth', mode: 'direct', api: { target: 'https://app.test/api' } })).toBe('https://app.test/api')
   })
 
   it('always wires composables, middleware, plugins, and the server helpers', () => {

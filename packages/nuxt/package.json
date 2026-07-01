@@ -1,7 +1,7 @@
 {
   "name": "lukk-nuxt",
   "version": "0.2.1",
-  "description": "Nuxt module for lukk (first-party Laravel JWT auth) — SSR / SPA / SSG, BFF or direct.",
+  "description": "Nuxt module for lukk (first-party Laravel JWT auth) + useLukkFetch, an auth-aware client for your own Laravel API — SSR / SPA / SSG, BFF or direct.",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -42,7 +42,8 @@
   "dependencies": {
     "@nuxt/kit": "^3.13.0",
     "defu": "^6.1.4",
-    "lukk-core": "workspace:*"
+    "lukk-core": "workspace:*",
+    "ofetch": "^1.5.1"
   },
   "devDependencies": {
     "@nuxt/module-builder": "^0.8.4",

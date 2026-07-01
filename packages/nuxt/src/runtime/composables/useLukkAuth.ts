@@ -14,7 +14,7 @@ interface PublicLukk {
  * underneath differs.
  */
 export function useLukkAuth() {
-  const { $lukk } = useNuxtApp()
+  const { $lukk, $lukkRefresh } = useNuxtApp()
   const cfg = useRuntimeConfig().public.lukk as PublicLukk
 
   // Shared with the client plugin (`onTokens` writes the access token here).
@@ -103,9 +103,13 @@ export function useLukkAuth() {
     }
   }
 
-  /** Silently restore a session on app load (a valid refresh cookie → logged in). */
+  /**
+   * Silently restore a session on app load (a valid refresh → logged in). Goes through
+   * the shared single-flight `$lukkRefresh` so a boot restore can't race a concurrent
+   * app-API 401 refresh and replay the rotating token twice.
+   */
   async function initSession(): Promise<void> {
-    const pair = await $lukk.restore()
+    const pair = await $lukkRefresh()
     if (pair) await fetchUser()
   }
 
