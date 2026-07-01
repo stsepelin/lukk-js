@@ -15,6 +15,7 @@ function withApp(lukk: Record<string, unknown>, lukkRefresh: () => Promise<unkno
     baseURL: 'https://api/auth',
     confirmationHeader: 'X-Lukk-Confirmation',
     userEndpoint: 'https://app/me',
+    userKey: 'data',
   }
 }
 
@@ -159,5 +160,62 @@ describe('useLukkAuth', () => {
   it('throws when completing 2FA without a pending challenge', async () => {
     withApp({ twoFactorChallenge: vi.fn() })
     await expect(useLukkAuth().verifyTwoFactor('123')).rejects.toThrow('no pending')
+  })
+
+  describe('user shaping', () => {
+    it('auto-unwraps a Laravel `{ data: {...} }` API-Resource wrapper', async () => {
+      withApp({})
+      api.mockResolvedValueOnce({ data: { id: 1, name: 'Ada' } })
+      const { user, loggedIn, fetchUser } = useLukkAuth()
+      await fetchUser()
+      expect(user.value).toEqual({ id: 1, name: 'Ada' })
+      expect(loggedIn.value).toBe(true)
+    })
+
+    it('unwraps a configured custom key', async () => {
+      withApp({})
+      __test.runtimeConfig.public.lukk.userKey = 'result'
+      api.mockResolvedValueOnce({ result: { id: 2 } })
+      const { user, fetchUser } = useLukkAuth()
+      await fetchUser()
+      expect(user.value).toEqual({ id: 2 })
+    })
+
+    it('stores the response as-is when unwrapping is disabled (key=false)', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {}) // no-id wrapper → expected dev warning
+      withApp({})
+      __test.runtimeConfig.public.lukk.userKey = ''
+      api.mockResolvedValueOnce({ data: { id: 3 } })
+      const { user, fetchUser } = useLukkAuth()
+      await fetchUser()
+      expect(user.value).toEqual({ data: { id: 3 } })
+    })
+
+    it('logs out on an explicit `{ data: null }` (no-user) response', async () => {
+      withApp({})
+      api.mockResolvedValueOnce({ data: null })
+      const { user, loggedIn, fetchUser } = useLukkAuth()
+      await fetchUser()
+      expect(user.value).toBeNull()
+      expect(loggedIn.value).toBe(false)
+    })
+
+    it('warns (dev) when the loaded user still looks like an un-unwrapped wrapper', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      withApp({})
+      __test.runtimeConfig.public.lukk.userKey = '' // leave it wrapped, no id
+      api.mockResolvedValueOnce({ data: { name: 'Ada' } })
+      await useLukkAuth().fetchUser()
+      expect(warn).toHaveBeenCalledOnce()
+      expect(warn.mock.calls[0]![0]).toContain('user.endpoint')
+    })
+
+    it('does not warn for a well-shaped user', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      withApp({})
+      api.mockResolvedValueOnce({ id: 1, name: 'Ada' })
+      await useLukkAuth().fetchUser()
+      expect(warn).not.toHaveBeenCalled()
+    })
   })
 })

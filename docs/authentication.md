@@ -84,6 +84,8 @@ lukk ignores unknown fields on the default login path; to actually *act* on them
 
 Call `fetchUser()` to reload it (e.g. after a profile update). With no `user.endpoint` configured, `user` stays `null` and you can drive `loggedIn` yourself.
 
+lukk **auto-unwraps** a Laravel `{ data: {...} }` API-Resource wrapper and types `user` as `LukkUser` — augment that interface for your own fields, and tune the wrapper with `user.key`. See [Configuration → Response shape / Typing the user](configuration.md#user-endpoint).
+
 <a name="logout"></a>
 ## Logging Out
 

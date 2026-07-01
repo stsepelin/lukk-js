@@ -91,6 +91,33 @@ A route on **your** backend that returns the authenticated user, used to populat
 - **`direct`** — a path or absolute URL; the access token is attached as a `Bearer` header.
 - **`bff`** — the browser has no token, so this **must be a same-origin path authenticated server-side**: a path under the [`api`](#api) proxy (e.g. `/api/me`), or your own route using `getLukkAccessToken(event)`. No header is attached client-side.
 
+### Response shape — `user.key`
+
+```ts
+user: { endpoint: '/api/me', key: 'data' } // default
+```
+
+lukk **auto-unwraps a Laravel API-Resource wrapper**: a clean `{ "data": {...} }` (with no `meta`/`links`/`errors` envelope) becomes the user object — so a `UserResource` "just works". A `{ "data": null }` response is treated as logged-out.
+
+- `key: 'data'` (default) — unwrap the `data` wrapper.
+- `key: 'user'` (or any string) — unwrap a different wrapper key.
+- `key: false` — disable unwrapping; store the response verbatim.
+
+Prefer keeping the resource **flat and lean** (it ships in the SSR HTML): `JsonResource::withoutWrapping()` / `$wrap = null`, or extend `Lukk\Http\Resources\UserResource`. If you're `loggedIn` but `user` fields are `undefined`, lukk logs a dev warning pointing here.
+
+### Typing the user — `LukkUser`
+
+`useLukkAuth().user` is typed `LukkUser | null`. lukk pre-declares only what it reads (`email_verified_at` / `email_verified`); augment it with your own fields:
+
+```ts
+declare module 'lukk-core' {
+  interface LukkUser {
+    name: string
+    roles: string[]
+  }
+}
+```
+
 See [Authentication → The Current User](authentication.md#user) and [Transport Modes → Authenticating your own API](transport-modes.md#bff).
 
 <a name="api"></a>
