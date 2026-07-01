@@ -1,9 +1,10 @@
 # lukk-nuxt
 
 Nuxt module for **[lukk](https://github.com/stsepelin/lukk)** — first-party Laravel JWT
-auth, plus [`useLukkFetch()`](https://github.com/stsepelin/lukk-js/blob/main/docs/transport-modes.md#use-lukk-fetch),
-an auth-aware fetch for your own Laravel API. SSR / SPA / SSG, Nuxt 3 **and** 4, in
-**BFF** or **direct** mode — one composable API either way.
+auth for Nuxt, plus the data layer that rides on it: an [auth-aware fetch](https://github.com/stsepelin/lukk-js/blob/main/docs/transport-modes.md#use-lukk-fetch)
+and [reactive forms](https://github.com/stsepelin/lukk-js/blob/main/docs/forms.md) for your
+own Laravel API. SSR / SPA / SSG, Nuxt 3 **and** 4, in **BFF** or **direct** mode — one
+composable API either way.
 
 ```bash
 npm i lukk-nuxt
@@ -42,19 +43,29 @@ NUXT_LUKK_SESSION_PASSWORD=change-me-to-a-long-random-string
 
 ```vue
 <script setup lang="ts">
+// Auth
 const { user, loggedIn, login, logout, pendingTwoFactor, verifyTwoFactor } = useLukkAuth()
 const { enable, confirm, disable, recoveryCodeCount } = useLukkTwoFactor()
 const { confirmPassword } = useLukkConfirmation()
 const { register, login: passkeyLogin, list, remove } = useLukkPasskeys()
-const api = useLukkFetch() // auth-aware fetch for your OWN app API
+
+// Your own Laravel API
+const api = useLukkFetch()                             // auth-aware fetch
+const form = useLukkForm({ email: '', password: '' }) // reactive form + 422 binding
 </script>
 ```
+
+**Auth**
 
 - **`useLukkAuth`** — password + 2FA login, logout, session restore, `revokeOtherSessions`, the reactive `user`.
 - **`useLukkTwoFactor`** — enrol / confirm / disable / recovery-code count (behind step-up).
 - **`useLukkConfirmation`** — earn a step-up confirmation token (auto-attached to gated requests).
 - **`useLukkPasskeys`** — register / passwordless login / step-up confirm / list / remove.
+
+**Your Laravel API**
+
 - **`useLukkFetch`** — a typed, transport-aware fetch for your own app API: forwards the session cookie on SSR (a bare `$fetch` doesn't → silent 401), attaches the bearer in direct mode with single-flight 401 refresh, and rejects with a typed `LukkError`.
+- **[`useLukkForm`](https://github.com/stsepelin/lukk-js/blob/main/docs/forms.md)** — a reactive form (Inertia-`useForm`-style) over `useLukkFetch`: holds `data`, submits it (`post`/`put`/`patch`/`delete`/`get`), and binds a Laravel `422` bag to per-field `errors` — with `processing`/`wasSuccessful`/`recentlySuccessful`/`isDirty`, `onSuccess`/`onError`/`onFinish` hooks, chainable `reset`/`defaults`/`transform`, automatic `multipart/form-data` for `File`/`Blob` fields, and `cancel()`.
 
 Guard pages with the route middleware — `lukk-auth` (require login) or
 `lukk-guest` (bounce already-authenticated users, e.g. off `/login`):
@@ -112,8 +123,8 @@ credentials, and CSRF + SSRF guards on both proxies. See the
 
 ## Documentation
 
-Full guides — installation, configuration, both transport modes, 2FA, passkeys, and
-step-up confirmation — live in the [lukk-js docs](https://github.com/stsepelin/lukk-js/tree/main/docs).
+Full guides — installation, configuration, both transport modes, forms, 2FA, passkeys,
+and step-up confirmation — live in the [lukk-js docs](https://github.com/stsepelin/lukk-js/tree/main/docs).
 
 ## License
 

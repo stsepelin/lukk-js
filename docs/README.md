@@ -14,6 +14,7 @@ JavaScript/TypeScript clients for **[lukk](https://github.com/stsepelin/lukk)** 
 
 - [Authentication](authentication.md) — login, logout, the reactive user, sessions, and route guards
 - [Transport Modes](transport-modes.md) — BFF vs direct: security, performance, and the SSR/SPA/SSG matrix
+- [Forms](forms.md) — `useLukkForm`: bind your forms to Laravel validation, with file uploads and state
 - [Using lukk-core](core.md) — the framework-agnostic client, for non-Nuxt apps
 
 ## Additional Features
