@@ -86,11 +86,14 @@ Full documentation lives in [`docs/`](docs/README.md):
 | [Configuration](docs/configuration.md) | Every module option, explained |
 | [Authentication](docs/authentication.md) | Login, logout, the reactive user, sessions, route guards |
 | [Transport Modes](docs/transport-modes.md) | BFF vs direct — security, performance, SSR/SPA/SSG |
+| [Forms](docs/forms.md) | `useLukkForm` — bind forms to Laravel validation, file uploads, state |
 | [Two-Factor Authentication](docs/two-factor-authentication.md) | The login challenge and 2FA management |
 | [Passkeys](docs/passkeys.md) | Register, passwordless login, and management |
 | [Confirmation](docs/confirmation.md) | Step-up ("sudo") confirmation for sensitive actions |
 | [Using lukk-core](docs/core.md) | The framework-agnostic client, for non-Nuxt apps |
 | [Architecture](docs/architecture.md) | Design rationale, the hooks seam, and conformance |
+
+Planned and deliberately-deferred work is tracked in [`ROADMAP.md`](ROADMAP.md).
 
 ## Development
 
