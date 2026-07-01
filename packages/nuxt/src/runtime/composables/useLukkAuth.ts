@@ -15,7 +15,12 @@ interface PublicLukk {
  * underneath differs.
  */
 export function useLukkAuth() {
-  const { $lukk, $lukkRefresh } = useNuxtApp()
+  const nuxtApp = useNuxtApp()
+  const { $lukk } = nuxtApp
+  // `$lukkRefresh` is provided by the universal client plugin. Read it as optional (like
+  // `useLukkFetch` does) so a not-yet-in-effect provide — an ordering gap on hydration, or a
+  // failed plugin setup — degrades to logged-out instead of a fatal `$lukkRefresh is not a function`.
+  const $lukkRefresh = (nuxtApp as { $lukkRefresh?: () => Promise<unknown> }).$lukkRefresh
   const cfg = useRuntimeConfig().public.lukk as PublicLukk
   // Auth-aware fetch for the current-user load — SSR-correct (forwards the session
   // cookie) unlike a bare `$fetch`, and transport-aware for the bearer.
@@ -114,7 +119,7 @@ export function useLukkAuth() {
    * app-API 401 refresh and replay the rotating token twice.
    */
   async function initSession(): Promise<void> {
-    const pair = await $lukkRefresh()
+    const pair = (await $lukkRefresh?.()) ?? null
     if (pair) await fetchUser()
   }
 
