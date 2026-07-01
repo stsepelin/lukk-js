@@ -41,10 +41,17 @@ describe('lukk-nuxt module', () => {
   it('skips the proxy and exposes the URL + user endpoint in direct mode', () => {
     const nuxt = setup({ baseURL: 'https://api/auth', mode: 'direct', user: { endpoint: '/me' } })
     expect(kit.addServerHandler).not.toHaveBeenCalled()
-    const pub = nuxt.options.runtimeConfig.public.lukk as { baseURL: string, userEndpoint: string, apiBaseURL: string }
+    const pub = nuxt.options.runtimeConfig.public.lukk as { baseURL: string, userEndpoint: string, apiBaseURL: string, userKey: string | false }
     expect(pub.baseURL).toBe('https://api/auth')
     expect(pub.userEndpoint).toBe('/me')
+    expect(pub.userKey).toBe('data') // default unwrap key
     expect(pub.apiBaseURL).toBe('https://api') // direct → API origin (the /auth prefix is dropped)
+  })
+
+  it('passes through a custom user.key (and normalizes false → "" to disable unwrapping)', () => {
+    const key = (o: Parameters<typeof setup>[0]) => (setup(o).options.runtimeConfig.public.lukk as { userKey: string }).userKey
+    expect(key({ baseURL: 'https://api/auth', mode: 'bff', user: { endpoint: '/me', key: 'result' } })).toBe('result')
+    expect(key({ baseURL: 'https://api/auth', mode: 'bff', user: { endpoint: '/me', key: false } })).toBe('')
   })
 
   it('derives apiBaseURL: proxy mount (bff), api.target, or empty when unconfigured', () => {

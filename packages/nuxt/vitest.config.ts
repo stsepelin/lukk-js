@@ -3,7 +3,7 @@ import { configDefaults, defineConfig } from 'vitest/config'
 
 export default defineConfig({
   // The runtime is unit-tested as the client (Nuxt defines these at build time).
-  define: { 'import.meta.client': 'true', 'import.meta.server': 'false' },
+  define: { 'import.meta.client': 'true', 'import.meta.server': 'false', 'import.meta.dev': 'true' },
   resolve: {
     // Unit-test runtime code (composables/plugins/middleware) without booting Nuxt.
     alias: { '#imports': fileURLToPath(new URL('./test/mocks/imports.ts', import.meta.url)) },
