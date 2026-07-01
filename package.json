@@ -28,5 +28,11 @@
     "typescript": "^5.6.0",
     "vitepress": "^1.6.3",
     "vitepress-plugin-llms": "^1.0.0"
+  },
+  "pnpm": {
+    "overrides": {
+      "vite": ">=6.4.3",
+      "esbuild": ">=0.25.0"
+    }
   }
 }

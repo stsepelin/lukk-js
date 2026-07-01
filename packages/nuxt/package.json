@@ -48,10 +48,10 @@
   "devDependencies": {
     "@nuxt/module-builder": "^0.8.4",
     "@nuxt/schema": "^3.13.0",
-    "@vitest/coverage-v8": "2.1.9",
+    "@vitest/coverage-v8": "^3.2.6",
     "h3": "^1.15.11",
     "nuxt": "^3.13.0",
-    "vitest": "^2.0.0",
+    "vitest": "^3.2.6",
     "vue": "^3.5.39",
     "vue-tsc": "^3.3.5"
   }
