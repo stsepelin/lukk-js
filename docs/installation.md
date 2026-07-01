@@ -86,8 +86,8 @@ Generate one with `openssl rand -base64 32`. This is the BFF equivalent of Larav
 
 The module supports Nuxt 3 (`>= 3.13`) and Nuxt 4 — no version-specific configuration. It registers:
 
-- the composables (`useLukkAuth`, `useLukkTwoFactor`, `useLukkConfirmation`, `useLukkPasskeys`), auto-imported;
-- the route middleware `lukk-auth` and `lukk-guest`;
+- the composables (`useLukkAuth`, `useLukkTwoFactor`, `useLukkConfirmation`, `useLukkPasskeys`, `useLukkEmailVerification`), auto-imported;
+- the route middleware `lukk-auth`, `lukk-guest`, `lukk-verified`, and `lukk-confirmed`;
 - a client plugin that restores an existing session on load;
 - in `bff` mode, the Nitro proxy at `/api/_lukk/**`.
 

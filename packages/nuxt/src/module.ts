@@ -152,9 +152,12 @@ export default defineNuxtModule<ModuleOptions>({
     // Server-side helpers for your own routes: getLukkAccessToken(event), useLukkSession(event).
     addServerImportsDir(resolver.resolve('./runtime/server/utils'))
 
-    // Route guards: `lukk-auth` (require login) and `lukk-guest` (bounce authed users).
+    // Route guards: `lukk-auth` (require login), `lukk-guest` (bounce authed users),
+    // `lukk-verified` (require a verified email), `lukk-confirmed` (require step-up confirmation).
     addRouteMiddleware({ name: 'lukk-auth', path: resolver.resolve('./runtime/middleware/auth') })
     addRouteMiddleware({ name: 'lukk-guest', path: resolver.resolve('./runtime/middleware/guest') })
+    addRouteMiddleware({ name: 'lukk-verified', path: resolver.resolve('./runtime/middleware/verified') })
+    addRouteMiddleware({ name: 'lukk-confirmed', path: resolver.resolve('./runtime/middleware/confirmed') })
 
     // One client plugin for both modes — only the baseURL/transport differs.
     addPlugin(resolver.resolve('./runtime/plugins/client'))

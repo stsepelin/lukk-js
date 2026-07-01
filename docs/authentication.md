@@ -130,12 +130,14 @@ To end *every* session including the current one, just [log out](#logout).
 <a name="middleware"></a>
 ## Protecting Routes
 
-The module registers two route middlewares:
+The module registers four route middlewares:
 
 | Middleware | Effect |
 |---|---|
 | `lukk-auth` | Redirects to `/login` when **not** authenticated. |
 | `lukk-guest` | Redirects to `/` when **already** authenticated (e.g. to keep logged-in users off the login page). |
+| `lukk-verified` | Redirects a logged-in user with an **unverified email** to `/verify-email`. |
+| `lukk-confirmed` | Redirects a logged-in user without a recent **step-up confirmation** to `/confirm-password`. |
 
 ```vue
 <script setup lang="ts">
@@ -148,6 +150,15 @@ definePageMeta({ middleware: 'lukk-auth' })
 <script setup lang="ts">
 // pages/login.vue
 definePageMeta({ middleware: 'lukk-guest' })
+</script>
+```
+
+`lukk-verified` and `lukk-confirmed` act only on an **authenticated** user, so stack them after `lukk-auth`. They're the client-side redirect; the server's [`lukk.verified`](https://stsepelin.github.io/lukk/email-verification#gating-routes) (409) and [`lukk.confirm`](https://stsepelin.github.io/lukk/confirmation) (423) are the real enforcement.
+
+```vue
+<script setup lang="ts">
+// pages/settings/security.vue — must be logged in, verified, AND recently confirmed
+definePageMeta({ middleware: ['lukk-auth', 'lukk-verified', 'lukk-confirmed'] })
 </script>
 ```
 
