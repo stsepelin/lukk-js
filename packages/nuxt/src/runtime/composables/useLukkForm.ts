@@ -156,7 +156,10 @@ export function useLukkForm<T extends FormFields>(initial: T, options: UseLukkFo
   const hasErrors = computed(() => Object.keys(errors.value).length > 0)
   // Structural (JSON) comparison — fine for the plain data this form is meant to hold. Note it
   // does not diff `File`/`Blob` fields (both serialize to `{}`); track those out of band.
-  const isDirty = computed(() => JSON.stringify(data) !== JSON.stringify(baseline.value))
+  // Serialize the baseline only when it's reassigned (defaults()/on-success rebase) so a keystroke
+  // re-stringifies `data` alone, not both sides.
+  const baselineJson = computed(() => JSON.stringify(baseline.value))
+  const isDirty = computed(() => JSON.stringify(data) !== baselineJson.value)
   // Expand Laravel's dotted keys (`address.street`, `items.0.name`) into a nested object so a
   // nested `data` shape can bind errors as `form.nestedErrors.address?.street`.
   const nestedErrors = computed<Record<string, unknown>>(() => {

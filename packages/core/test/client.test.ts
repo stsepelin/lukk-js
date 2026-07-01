@@ -177,6 +177,14 @@ describe('createLukkClient', () => {
     await expect(client.request('/whatever')).rejects.toMatchObject({ status: 200, message: expect.stringContaining('invalid JSON') })
   })
 
+  it('never follows redirects — sends redirect:manual and surfaces a 3xx as an error (no confirmation-token leak)', async () => {
+    const fetch = vi.fn(async () => new Response(null, { status: 302, headers: { location: 'https://evil.example/' } }))
+    const client = createLukkClient({ baseURL: 'https://x/auth', fetch, getConfirmationToken: () => 'conf' })
+    // A step-up call attaches X-Lukk-Confirmation; a 3xx must be surfaced, not chased to `location`.
+    await expect(client.confirmPassword('pw')).rejects.toMatchObject({ status: 302 })
+    expect((fetch.mock.calls[0]![1] as RequestInit).redirect).toBe('manual')
+  })
+
   describe('credential origin-scoping', () => {
     const headersOf = (fetch: ReturnType<typeof vi.fn>) => new Headers(fetch.mock.calls[0]![1]!.headers)
 
