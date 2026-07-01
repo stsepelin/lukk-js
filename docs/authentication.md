@@ -29,7 +29,7 @@ const {
 } = useLukkAuth()
 ```
 
-The API is identical in [both transport modes](transport-modes.md) — only what happens under the hood differs.
+The API is identical in [both transport modes](transport-modes.md) — only what happens under the hood differs. Each verb maps to a lukk route; see [the lukk endpoints](https://stsepelin.github.io/lukk/authentication#endpoints) for the server contract.
 
 <a name="login"></a>
 ## Logging In

@@ -3,10 +3,10 @@
 Passkeys are passwordless, phishing-resistant WebAuthn/FIDO2 credentials. `useLukkPasskeys` drives the browser ceremony (`navigator.credentials`) and the base64url (de)serialization for you — you just `await` a verb.
 
 > [!NOTE]
-> Passkeys must be enabled on the [lukk](https://github.com/stsepelin/lukk) side (`features.passkeys`, plus an `rp_id` and `origins`). WebAuthn requires a secure context (HTTPS, or `localhost`).
+> Passkeys must be enabled on the [lukk](https://stsepelin.github.io/lukk/passkeys) side (`features.passkeys`, plus an `rp_id` and `origins`). WebAuthn requires a secure context (HTTPS, or `localhost`).
 
 > [!IMPORTANT]
-> Passkeys are phishing-resistant only because the authenticator binds each assertion to the **browser-facing origin**. Set lukk's `rp_id` to your app's registrable domain and `origins` to the exact origin in the address bar — **not** the lukk API host. In BFF mode the browser talks to your app, so the RP is your app's origin, even though the API lives elsewhere. Avoid wildcard origins.
+> Passkeys are phishing-resistant only because the authenticator binds each assertion to the **browser-facing origin**. Set lukk's `rp_id` to your app's registrable domain and `origins` to the exact origin in the address bar — **not** the lukk API host. In BFF mode the browser talks to your app, so the RP is your app's origin, even though the API lives elsewhere. Avoid wildcard origins. See lukk's [split-domain deployments](https://stsepelin.github.io/lukk/passkeys#split-domain-deployments) for setting `rp_id`/`origins` on the server.
 
 - [`useLukkPasskeys`](#composable)
 - [Registering a Passkey](#register)

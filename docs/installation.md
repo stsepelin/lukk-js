@@ -10,7 +10,7 @@
 <a name="requirements"></a>
 ## Requirements
 
-- A [lukk](https://github.com/stsepelin/lukk)-powered Laravel API (`^0.1`)
+- A [lukk](https://stsepelin.github.io/lukk/installation)-powered Laravel API (`^0.1`)
 - Node `>= 20`
 - Nuxt `3` or `4`
 

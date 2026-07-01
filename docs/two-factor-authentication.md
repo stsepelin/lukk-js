@@ -3,7 +3,7 @@
 Two-factor authentication has two halves: **completing a login** when a user has 2FA enabled, and **managing** 2FA (turning it on, off, recovery codes). The first lives on `useLukkAuth`; the second on `useLukkTwoFactor`.
 
 > [!NOTE]
-> 2FA must be enabled and configured on the [lukk](https://github.com/stsepelin/lukk) side (`features.two_factor`). lukk-js is the client for it.
+> 2FA must be enabled and configured on the [lukk](https://stsepelin.github.io/lukk/two-factor-authentication) side (`features.two_factor`). lukk-js is the client for it.
 
 - [The Login Challenge](#challenge)
 - [Recovery Codes at Login](#recovery)
