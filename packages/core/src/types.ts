@@ -109,7 +109,7 @@ export interface PublicKeyCredentialRequestOptionsJSON {
 
 export type UserVerificationRequirement = 'required' | 'preferred' | 'discouraged'
 
-/** Transport mode — see PLAN.md. */
+/** Transport mode — see docs/transport-modes.md. */
 export type LukkMode = 'bff' | 'direct'
 
 export interface LukkError {

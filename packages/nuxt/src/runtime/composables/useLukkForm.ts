@@ -79,7 +79,7 @@ export interface LukkForm<T extends FormFields> {
  * the on-success rebase snapshots; the shape is the plain, cloneable data the form is meant to hold.
  */
 function cloneData<V>(value: V): V {
-  if (value instanceof Blob) return value // File/Blob (uploads): reference, don't byte-copy
+  if (value instanceof Blob) return value
   if (value instanceof Date) return new Date(value.getTime()) as V
   if (Array.isArray(value)) return value.map(cloneData) as V
   if (value !== null && typeof value === 'object') {
@@ -276,7 +276,6 @@ export function useLukkForm<T extends FormFields>(initial: T, options: UseLukkFo
     // A plain snapshot — don't hand the reactive proxy to the serializer.
     const source = { ...data } as T
     const payload = transformFn ? transformFn(source) : source
-    // Send multipart when the payload carries a File/Blob (or it's forced); GET stays query.
     const asFormData = method !== 'get' && (forceFormData === true || hasFiles(payload))
     const carrier = method === 'get'
       ? { query: payload }
