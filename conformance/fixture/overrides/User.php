@@ -2,12 +2,16 @@
 
 namespace App\Models;
 
+use Illuminate\Contracts\Auth\MustVerifyEmail;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 use Lukk\Concerns\HasRefreshTokens;
 use Lukk\Concerns\HasTwoFactorAuthentication;
 
-class User extends Authenticatable
+// Implements MustVerifyEmail so the email-verification matrix combo works. The
+// verification methods come from the framework trait already used by the base
+// Authenticatable — enabling verification is just implementing the contract.
+class User extends Authenticatable implements MustVerifyEmail
 {
     use HasRefreshTokens;
     use HasTwoFactorAuthentication;
@@ -19,6 +23,6 @@ class User extends Authenticatable
 
     protected function casts(): array
     {
-        return ['password' => 'hashed'];
+        return ['password' => 'hashed', 'email_verified_at' => 'datetime'];
     }
 }
