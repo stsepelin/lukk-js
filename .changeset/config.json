@@ -2,10 +2,19 @@
   "$schema": "https://unpkg.com/@changesets/config@3.0.0/schema.json",
   "changelog": "@changesets/cli/changelog",
   "commit": false,
-  "fixed": [["lukk-core", "lukk-nuxt"]],
+  "fixed": [
+    [
+      "lukk-core",
+      "lukk-nuxt"
+    ]
+  ],
   "linked": [],
   "access": "public",
   "baseBranch": "main",
   "updateInternalDependencies": "patch",
-  "ignore": ["lukk-nuxt-playground"]
+  "ignore": [
+    "lukk-nuxt-playground",
+    "lukk-e2e-nuxt-bff",
+    "lukk-e2e-nuxt-direct"
+  ]
 }

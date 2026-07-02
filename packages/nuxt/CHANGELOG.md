@@ -1,5 +1,23 @@
 # lukk-nuxt
 
+## 0.5.0
+
+### Minor Changes
+
+- Local development over plain http now works in BFF mode. The module decides the sealed session cookie's `Secure` attribute once at build time (`lukk.session.cookieSecure`): Secure + `__Host-` in a production build and under `nuxi dev --https`, relaxed (plain `lukk-session`, no `Secure`) for `nuxi dev` over http — where a browser drops a `Secure` cookie even on localhost, silently losing the session. The runtime never sniffs the request scheme, so there's no `x-forwarded-proto` spoofing surface, and the relaxed cookie can't reach a production bundle. Override with `lukk: { session: { cookieSecure: true | false } }`.
+- 109ada1: Accept any reasonable `user.endpoint` shape — especially Laravel's default `{ "data": {...} }` API-Resource wrapper, which previously made `useLukkAuth().user` a `{ data }` object (so `loggedIn` was `true` but every field was `undefined`).
+
+  - **lukk-core:** new augmentable `LukkUser` interface (extend it via `declare module 'lukk-core'` to type `useLukkAuth().user` everywhere), plus `shapeUser()` and `isEmailVerified()`.
+  - **lukk-nuxt:** `fetchUser` now **auto-unwraps** a clean `{ data: {...} }` wrapper (never a `meta`/`links`/`errors` envelope, and `{ data: null }` → logged-out), configurable via `user.key` (default `'data'`; `false` disables). `useLukkAuth().user` is typed `LukkUser | null`, and `verified` accepts Laravel's `email_verified_at` **or** the OIDC boolean `email_verified`. A dev-only `console.warn` fires when a "logged-in" user still looks like an un-unwrapped wrapper (no `id`), pointing at `user.key` / `$wrap = null`.
+
+  Pairs with a new optional `Lukk\Http\Resources\UserResource` base class on the PHP side.
+
+### Patch Changes
+
+- Security: the BFF proxy and the app-API proxy no longer follow an upstream 3xx redirect (`redirect: 'manual'`). A trusted upstream that open-redirects could otherwise re-emit the injected bearer / `X-Lukk-Confirmation` header — and, on a 307/308, the request body — to the redirect host (CWE-918/-200). An opaque/3xx upstream response is now rejected as a `502` instead.
+- Updated dependencies [109ada1]
+  - lukk-core@0.5.0
+
 ## 0.4.0
 
 ### Minor Changes
