@@ -27,6 +27,12 @@ describe('getLukkAccessToken / useLukkSession', () => {
     expect(await useLukkSession(e)).toEqual({ access: 'tok' })
   })
 
+  it('reads the relaxed `lukk-session` cookie name when cookieSecure is off (dev over http)', async () => {
+    __test.runtimeConfig.lukk = { sessionPassword: 'p'.repeat(32), cookieSecure: false } as unknown as Record<string, unknown>
+    const e = { cookies: { 'lukk-session': JSON.stringify({ access: 'devtok' }) } }
+    expect(await getLukkAccessToken(e)).toBe('devtok')
+  })
+
   it('returns null when there is no session cookie (unauthenticated)', async () => {
     expect(await getLukkAccessToken(event())).toBeNull()
   })

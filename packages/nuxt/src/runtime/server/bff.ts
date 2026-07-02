@@ -2,12 +2,11 @@ import type { H3Event } from 'h3'
 import { isTokenPair } from 'lukk-core'
 import { defineEventHandler, getCookie, getRequestHeader, readRawBody, setResponseStatus, unsealSession, useSession } from 'h3'
 import { useRuntimeConfig } from '#imports'
-import { LUKK_BFF_PREFIX, LUKK_SESSION_COOKIE } from '../shared'
+import { LUKK_BFF_PREFIX, sessionCookieName } from '../shared'
 import { isForeignOrigin, resolveTarget } from './proxy-utils'
 import { refreshOnce, type TokenSession } from './utils/refresh'
 
-// `__Host-`-compatible: Secure + Path=/ + no Domain (the prefix enforces these).
-const SESSION_COOKIE = { sameSite: 'strict', secure: true, httpOnly: true, path: '/' } as const
+type SessionCookieOptions = { sameSite: 'strict', secure: boolean, httpOnly: true, path: '/' }
 
 /**
  * The BFF proxy. The browser calls `/api/_lukk/*`; this handler attaches the
@@ -17,8 +16,14 @@ const SESSION_COOKIE = { sameSite: 'strict', secure: true, httpOnly: true, path:
  * ever holds the opaque session cookie, never a token.
  */
 export default defineEventHandler(async (event) => {
-  const { baseURL, sessionPassword } = useRuntimeConfig(event).lukk as { baseURL: string, sessionPassword: string }
+  const { baseURL, sessionPassword, cookieSecure } = useRuntimeConfig(event).lukk as { baseURL: string, sessionPassword: string, cookieSecure?: boolean }
   const method = event.method
+
+  // Secure/`__Host-` in prod + dev-https, relaxed for dev-http (see module cookieSecure).
+  // Default to secure when unset so a misread config can never silently drop Secure.
+  const secure = cookieSecure !== false
+  const sessionName = sessionCookieName(secure)
+  const cookieOptions: SessionCookieOptions = { sameSite: 'strict', secure, httpOnly: true, path: '/' }
 
   // CSRF: reject a state-changing request riding the session cookie from a foreign origin.
   if (isForeignOrigin(event)) {
@@ -31,10 +36,10 @@ export default defineEventHandler(async (event) => {
   // a request actually stores or clears tokens (login, refresh, confirmation, logout) — those low-
   // frequency write paths re-unseal once (a deliberate trade: no empty-cookie mint on the hot read
   // path is worth a second iron-open when auth state actually changes).
-  const hasCookie = !!getCookie(event, LUKK_SESSION_COOKIE)
-  const sealed = await readSealed(event, sessionPassword)
+  const hasCookie = !!getCookie(event, sessionName)
+  const sealed = await readSealed(event, sessionPassword, sessionName)
   let rwSession: ReturnType<typeof openSession> | null = null
-  const session = () => (rwSession ??= openSession(event, sessionPassword))
+  const session = () => (rwSession ??= openSession(event, sessionPassword, sessionName, cookieOptions))
 
   // Resolve + contain the upstream URL to same-origin-under-base (defeats traversal / authority-smuggling).
   const subpath = event.path.slice(LUKK_BFF_PREFIX.length).split('?')[0] || '/'
@@ -111,16 +116,16 @@ export default defineEventHandler(async (event) => {
 })
 
 /** Open the read-write sealed session (h3 mints the cookie if absent — call only when writing). */
-function openSession(event: H3Event, password: string) {
-  return useSession<TokenSession>(event, { password, name: LUKK_SESSION_COOKIE, cookie: SESSION_COOKIE })
+function openSession(event: H3Event, password: string, name: string, cookie: SessionCookieOptions) {
+  return useSession<TokenSession>(event, { password, name, cookie })
 }
 
 /** Read-only unseal of the sealed session — never mints or slides the cookie. */
-async function readSealed(event: H3Event, password: string): Promise<TokenSession> {
-  const sealed = getCookie(event, LUKK_SESSION_COOKIE)
+async function readSealed(event: H3Event, password: string, name: string): Promise<TokenSession> {
+  const sealed = getCookie(event, name)
   if (!sealed || !password) return {}
   try {
-    const unsealed = await unsealSession(event, { password, name: LUKK_SESSION_COOKIE }, sealed)
+    const unsealed = await unsealSession(event, { password, name }, sealed)
     return (unsealed as { data?: TokenSession }).data ?? {}
   }
   catch {

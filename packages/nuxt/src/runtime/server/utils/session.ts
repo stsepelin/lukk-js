@@ -1,7 +1,7 @@
 import type { H3Event } from 'h3'
 import { getCookie, unsealSession } from 'h3'
 import { useRuntimeConfig } from '#imports'
-import { LUKK_SESSION_COOKIE } from '../../shared'
+import { sessionCookieName } from '../../shared'
 
 /**
  * READ-ONLY access to the BFF sealed token session, for your own server routes.
@@ -20,11 +20,12 @@ export async function useLukkSession(event: H3Event): Promise<{ access: string |
 
 /** The current user's lukk access token from the sealed BFF session, or null. */
 export async function getLukkAccessToken(event: H3Event): Promise<string | null> {
-  const { sessionPassword } = useRuntimeConfig(event).lukk as { sessionPassword?: string }
-  const sealed = getCookie(event, LUKK_SESSION_COOKIE)
+  const { sessionPassword, cookieSecure } = useRuntimeConfig(event).lukk as { sessionPassword?: string, cookieSecure?: boolean }
+  const name = sessionCookieName(cookieSecure !== false)
+  const sealed = getCookie(event, name)
   if (!sealed || !sessionPassword) return null
   try {
-    const unsealed = await unsealSession(event, { password: sessionPassword, name: LUKK_SESSION_COOKIE }, sealed)
+    const unsealed = await unsealSession(event, { password: sessionPassword, name }, sealed)
     const access = (unsealed as { data?: { access?: unknown } }).data?.access
     return typeof access === 'string' ? access : null
   }
