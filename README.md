@@ -13,12 +13,12 @@ JavaScript/TypeScript clients for **[lukk](https://github.com/stsepelin/lukk)** 
 ## Features
 
 - **One composable API, every rendering mode** — the same `useLukkAuth()` works in SSR, SPA, and SSG.
-- **Two transport modes, a config switch apart** — a [**BFF**](https://stsepelin.github.io/lukk/transport-modes) proxy that keeps tokens server-side (the browser never sees a token), or [**direct**](https://stsepelin.github.io/lukk/transport-modes) calls straight to lukk (the only option for fully static sites).
-- **The whole lukk surface** — [login](https://stsepelin.github.io/lukk/authentication), token refresh, logout, session revocation, [two-factor](https://stsepelin.github.io/lukk/two-factor-authentication), [step-up confirmation](https://stsepelin.github.io/lukk/confirmation), and [passkeys](https://stsepelin.github.io/lukk/passkeys).
-- **Call your own API, correctly** — [`useLukkFetch()`](https://stsepelin.github.io/lukk/use-lukk-fetch) is a typed, auth-aware fetch for *your* Laravel API: authenticated in every context (a plain `$fetch` silently 401s in SSR), single-flight 401 refresh, credentials never leak cross-origin, and a typed Laravel error (`{ message, status, errors }`) ready to bind to a form.
-- **Forms, bound to Laravel validation** — [`useLukkForm()`](https://stsepelin.github.io/lukk/use-lukk-form) is a reactive form in the spirit of Inertia's `useForm`: submit `data`, bind a `422` bag to per-field errors, with `processing` / `isDirty` / lifecycle hooks and automatic `multipart/form-data` for file uploads.
+- **Two transport modes, a config switch apart** — a [**BFF**](https://stsepelin.github.io/lukk-docs/transport-modes) proxy that keeps tokens server-side (the browser never sees a token), or [**direct**](https://stsepelin.github.io/lukk-docs/transport-modes) calls straight to lukk (the only option for fully static sites).
+- **The whole lukk surface** — [login](https://stsepelin.github.io/lukk-docs/authentication), token refresh, logout, session revocation, [two-factor](https://stsepelin.github.io/lukk-docs/two-factor-authentication), [step-up confirmation](https://stsepelin.github.io/lukk-docs/confirmation), and [passkeys](https://stsepelin.github.io/lukk-docs/passkeys).
+- **Call your own API, correctly** — [`useLukkFetch()`](https://stsepelin.github.io/lukk-docs/use-lukk-fetch) is a typed, auth-aware fetch for *your* Laravel API: authenticated in every context (a plain `$fetch` silently 401s in SSR), single-flight 401 refresh, credentials never leak cross-origin, and a typed Laravel error (`{ message, status, errors }`) ready to bind to a form.
+- **Forms, bound to Laravel validation** — [`useLukkForm()`](https://stsepelin.github.io/lukk-docs/use-lukk-form) is a reactive form in the spirit of Inertia's `useForm`: submit `data`, bind a `422` bag to per-field errors, with `processing` / `isDirty` / lifecycle hooks and automatic `multipart/form-data` for file uploads.
 - **Silent refresh, single-flight** — a 401 transparently refreshes and retries; a burst of 401s triggers exactly one refresh.
-- **Typed end to end** — the lukk HTTP contract mirrored in TypeScript, [conformance-tested](https://stsepelin.github.io/lukk/architecture#conformance) against a real lukk instance so it can't drift.
+- **Typed end to end** — the lukk HTTP contract mirrored in TypeScript, [conformance-tested](https://stsepelin.github.io/lukk-docs/architecture#conformance) against a real lukk instance so it can't drift.
 - **Tiny** — `lukk-core` has zero runtime dependencies; `lukk-nuxt` adds only `@nuxt/kit` + `defu`.
 
 ## Packages
@@ -37,7 +37,7 @@ JavaScript/TypeScript clients for **[lukk](https://github.com/stsepelin/lukk)** 
 | **`bff`** (default) | A Nitro proxy holds tokens in a sealed, server-side cookie; the browser only ever talks to your own origin. | SSR or a served SPA — the most secure option, no token in the browser. |
 | **`direct`** | The client calls lukk directly. Access token in memory, refresh token in lukk's `__Host-` cookie. | A fully static site (SSG), or a simple SPA with no runtime server. |
 
-See **[Transport Modes](https://stsepelin.github.io/lukk/transport-modes)** for the security trade-offs and the SSR/SPA/SSG matrix.
+See **[Transport Modes](https://stsepelin.github.io/lukk-docs/transport-modes)** for the security trade-offs and the SSR/SPA/SSG matrix.
 
 ## Requirements
 
@@ -73,17 +73,17 @@ async function onSubmit() {
 </script>
 ```
 
-In `bff` mode, also set a session secret (≥ 32 chars): `NUXT_LUKK_SESSION_PASSWORD=…`. See **[Installation](https://stsepelin.github.io/lukk/installation)** for the full walkthrough.
+In `bff` mode, also set a session secret (≥ 32 chars): `NUXT_LUKK_SESSION_PASSWORD=…`. See **[Installation](https://stsepelin.github.io/lukk-docs/installation)** for the full walkthrough.
 
 ## Documentation
 
-📚 **Full documentation: [stsepelin.github.io/lukk](https://stsepelin.github.io/lukk)**
+📚 **Full documentation: [stsepelin.github.io/lukk-docs](https://stsepelin.github.io/lukk-docs)**
 
-lukk-js (this client) and [lukk](https://github.com/stsepelin/lukk) (the Laravel package) are documented together on one site — each feature page covers both the server and the client. Start with the [Introduction](https://stsepelin.github.io/lukk/introduction) or jump to [Installation](https://stsepelin.github.io/lukk/installation).
+lukk-js (this client) and [lukk](https://github.com/stsepelin/lukk) (the Laravel package) are documented together on one site — each feature page covers both the server and the client. Start with the [Introduction](https://stsepelin.github.io/lukk-docs/introduction) or jump to [Installation](https://stsepelin.github.io/lukk-docs/installation).
 
 Planned and deliberately-deferred work is tracked in [`ROADMAP.md`](ROADMAP.md).
 
-**For AI assistants:** the docs are exposed as [`/llms.txt`](https://stsepelin.github.io/lukk/llms.txt) + [`/llms-full.txt`](https://stsepelin.github.io/lukk/llms-full.txt) ([llms.txt](https://llmstxt.org) convention), and [`AGENTS.md`](AGENTS.md) has integration + contribution rules.
+**For AI assistants:** the docs are exposed as [`/llms.txt`](https://stsepelin.github.io/lukk-docs/llms.txt) + [`/llms-full.txt`](https://stsepelin.github.io/lukk-docs/llms-full.txt) ([llms.txt](https://llmstxt.org) convention), and [`AGENTS.md`](AGENTS.md) has integration + contribution rules.
 
 ## Development
 
