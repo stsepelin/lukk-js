@@ -52,8 +52,12 @@ export interface ModuleOptions {
    *  - bff: MUST be a **same-origin path authenticated server-side** — the app-API
    *    proxy (`api` below), or your own route using `getLukkAccessToken(event)`.
    *    The browser holds no token to attach.
+   *
+   * `key` (default `'data'`) unwraps a wrapper around the user — lukk auto-unwraps a clean
+   * Laravel API-Resource `{ "data": {...} }` (never a paginated/error envelope). Set a different
+   * key for another wrapper, or `false` to disable unwrapping and store the response as-is.
    */
-  user: { endpoint: string }
+  user: { endpoint: string, key?: string | false }
   /**
    * BFF only: the secret that seals the server-side token session (≥ 32 chars).
    * Prefer setting it via the `NUXT_LUKK_SESSION_PASSWORD` env var.
@@ -125,6 +129,8 @@ export default defineNuxtModule<ModuleOptions>({
         confirmationHeader: options.confirmationHeader,
         baseURL: options.mode === 'direct' ? options.baseURL : '',
         userEndpoint: options.user.endpoint,
+        // Normalize to a string for runtimeConfig: '' disables unwrapping, else the wrapper key (default 'data').
+        userKey: options.user.key === false ? '' : (options.user.key ?? 'data'),
         // App-API base for `useLukkFetch`: the same-origin proxy mount (BFF) or, in
         // direct mode, the configured `api.target` else the lukk **origin** (the
         // `/auth` prefix is dropped — pass full app paths to `useLukkFetch`).

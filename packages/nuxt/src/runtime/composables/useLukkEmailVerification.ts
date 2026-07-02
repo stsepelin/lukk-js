@@ -1,3 +1,4 @@
+import { isEmailVerified } from 'lukk-core'
 import { computed, ref, useNuxtApp } from '#imports'
 import { useLukkAuth } from './useLukkAuth'
 
@@ -15,9 +16,8 @@ export function useLukkEmailVerification() {
   const { $lukk } = useNuxtApp()
   const { user, fetchUser } = useLukkAuth()
 
-  /** Whether the loaded user's email is verified (from its `email_verified_at`). */
-  const verified = computed(() =>
-    Boolean((user.value as { email_verified_at?: unknown } | null)?.email_verified_at))
+  /** Whether the loaded user's email is verified (`email_verified_at` or the `email_verified` boolean). */
+  const verified = computed(() => isEmailVerified(user.value))
 
   /** True while a resend request is in flight — bind a button's disabled state to it. */
   const sending = ref(false)

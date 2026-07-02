@@ -1,4 +1,4 @@
-import { isTwoFactorChallenge, type LoginInput, type LoginResult } from 'lukk-core'
+import { isTwoFactorChallenge, type LoginInput, type LoginResult, type LukkUser, shapeUser, userShapeWarning } from 'lukk-core'
 import { computed, useNuxtApp, useRuntimeConfig, useState } from '#imports'
 import { ACCESS_KEY, CHALLENGE_KEY, CONFIRMATION_KEY, CONFIRMED_KEY, USER_KEY } from '../keys'
 import { useLukkFetch } from './useLukkFetch'
@@ -8,6 +8,7 @@ interface PublicLukk {
   baseURL: string
   confirmationHeader: string
   userEndpoint: string
+  userKey: string
 }
 
 /**
@@ -28,7 +29,7 @@ export function useLukkAuth() {
 
   // Shared with the client plugin (`onTokens` writes the access token here).
   const access = useState<string | null>(ACCESS_KEY, () => null)
-  const user = useState<unknown | null>(USER_KEY, () => null)
+  const user = useState<LukkUser | null>(USER_KEY, () => null)
   // A pending 2FA challenge token, set by `login` when the user has 2FA enabled.
   const challenge = useState<string | null>(CHALLENGE_KEY, () => null)
   // The step-up confirmation state (managed by `useLukkConfirmation`).
@@ -102,8 +103,14 @@ export function useLukkAuth() {
     if (!cfg.userEndpoint) return
     try {
       // userEndpoint is a full path; `baseURL: ''` keeps it as-is (in server-BFF the
-      // request-aware transport resolves the relative endpoint in-process).
-      user.value = await api(cfg.userEndpoint, { baseURL: '' })
+      // request-aware transport resolves the relative endpoint in-process). `shapeUser`
+      // auto-unwraps a Laravel `{ data: {...} }` API-Resource wrapper (configurable via `user.key`).
+      user.value = shapeUser(await api(cfg.userEndpoint, { baseURL: '' }), cfg.userKey || false)
+      // Dev-only: nudge the developer if the endpoint shape wasn't handled (no `id`, still wrapped).
+      if (import.meta.dev) {
+        const warning = userShapeWarning(user.value)
+        if (warning) console.warn(warning)
+      }
     }
     catch (e) {
       // Only an auth failure means "logged out". A transient 5xx/network error
