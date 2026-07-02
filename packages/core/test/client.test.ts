@@ -41,6 +41,30 @@ describe('createLukkClient', () => {
     expect(init?.method).toBe('POST')
   })
 
+  it('requests a password-reset link (forgot-password)', async () => {
+    const fetch = vi.fn(async () => json({ status: 'password-reset-link-sent' }))
+    const client = createLukkClient({ baseURL: 'https://x/auth', fetch })
+
+    await client.forgotPassword('a@b.c')
+
+    const [url, init] = fetch.mock.calls[0]!
+    expect(url).toBe('https://x/auth/forgot-password')
+    expect(init?.method).toBe('POST')
+    expect(JSON.parse((init as RequestInit).body as string)).toEqual({ email: 'a@b.c' })
+  })
+
+  it('completes a password reset with the token + email + new password', async () => {
+    const fetch = vi.fn(async () => json({ status: 'password-reset' }))
+    const client = createLukkClient({ baseURL: 'https://x/auth', fetch })
+
+    await client.resetPassword({ token: 't', email: 'a@b.c', password: 'new-secret-123', password_confirmation: 'new-secret-123' })
+
+    const [url, init] = fetch.mock.calls[0]!
+    expect(url).toBe('https://x/auth/reset-password')
+    expect(init?.method).toBe('POST')
+    expect(JSON.parse((init as RequestInit).body as string)).toEqual({ token: 't', email: 'a@b.c', password: 'new-secret-123', password_confirmation: 'new-secret-123' })
+  })
+
   it('passes extra login fields through to the request body (custom authenticateUsing)', async () => {
     const fetch = vi.fn(async () => json({ access_token: 'a', expires_in: 900, refresh_token: 'r' }))
     const client = createLukkClient({ baseURL: 'https://x/auth', fetch })

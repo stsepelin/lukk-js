@@ -56,6 +56,15 @@ export interface TwoFactorChallengeInput {
 /** {@link TwoFactorChallengeInput}, plus any extra fields your backend reads. */
 export type TwoFactorInput = TwoFactorChallengeInput & Record<string, unknown>
 
+/** Completing a password reset at `POST /auth/reset-password`. The `token` + `email`
+ *  come from the reset link lukk emailed; `password_confirmation` must match `password`. */
+export interface ResetPasswordInput {
+  token: string
+  email: string
+  password: string
+  password_confirmation: string
+}
+
 /** `POST /auth/two-factor` enrolment response (shown once). */
 export interface TwoFactorEnrollment {
   otpauth_uri: string
