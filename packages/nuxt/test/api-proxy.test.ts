@@ -4,6 +4,8 @@ import type { TokenSession } from '../src/runtime/server/utils/refresh'
 
 // Upstream (app-API) Set-Cookie the proxy would receive; the mock appends it like h3 does.
 let upstreamSetCookie: string | string[] | undefined
+// The fetch Response h3 hands to onResponse; a test can make it a redirect to exercise the guard.
+let upstreamResponse: { status: number, type: string, headers: Headers }
 const proxyRequest = vi.fn(async (event: { node: { res: { getHeader: (k: string) => unknown, setHeader: (k: string, v: unknown) => void, removeHeader: unknown } } }, target: string, opts?: { headers?: Record<string, string>, onResponse?: (e: unknown, r: unknown) => void }) => {
   // Simulate h3 appending the upstream Set-Cookie to whatever's already queued (the session).
   if (upstreamSetCookie !== undefined) {
@@ -11,7 +13,7 @@ const proxyRequest = vi.fn(async (event: { node: { res: { getHeader: (k: string)
     event.node.res.setHeader('set-cookie', [...arr(event.node.res.getHeader('set-cookie')), ...arr(upstreamSetCookie)])
   }
   // h3 calls onResponse after setting upstream headers, before streaming the body.
-  if (opts?.onResponse) await opts.onResponse(event, { headers: new Headers() })
+  if (opts?.onResponse) await opts.onResponse(event, upstreamResponse)
   return { target, headers: opts?.headers }
 })
 
@@ -69,6 +71,7 @@ function ev(o: { path: string, method?: string, headers?: Record<string, string>
     status: 200,
     ip: '203.0.113.7' as string | undefined,
     node: { res: {
+      statusCode: 200,
       getHeader: vi.fn((k: string) => headers[k]),
       setHeader: vi.fn((k: string, v: unknown) => { headers[k] = v }),
       removeHeader: vi.fn((k: string) => { headers[k] = undefined }),
@@ -86,6 +89,7 @@ beforeEach(() => {
   sealValid = true
   sealHasData = true
   upstreamSetCookie = undefined
+  upstreamResponse = { status: 200, type: 'default', headers: new Headers() }
   refreshOnce.mockReset()
 })
 afterEach(() => { __test.reset(); vi.clearAllMocks() })
@@ -115,6 +119,28 @@ describe('app-API proxy', () => {
     __test.runtimeConfig.lukk = { ...__test.runtimeConfig.lukk, apiForceJson: false } as unknown as Record<string, unknown>
     await run(ev({ path: '/api/report.pdf', headers: { accept: 'application/pdf' } }))
     expect(proxyRequest).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ headers: expect.objectContaining({ accept: 'application/pdf' }) }))
+  })
+
+  it('forwards redirect:manual so an upstream 3xx is never followed (bearer not re-emitted)', async () => {
+    await run(ev({ path: '/api/users' }))
+    expect(proxyRequest).toHaveBeenCalledWith(
+      expect.anything(), expect.anything(),
+      expect.objectContaining({ fetchOptions: expect.objectContaining({ redirect: 'manual' }) }),
+    )
+  })
+
+  it('rejects an opaque upstream redirect with a 502 (not a masked empty 200)', async () => {
+    upstreamResponse = { status: 0, type: 'opaqueredirect', headers: new Headers() }
+    const e = ev({ path: '/api/users' })
+    await run(e)
+    expect(e.node.res.statusCode).toBe(502)
+  })
+
+  it('rejects a 3xx upstream response with a 502', async () => {
+    upstreamResponse = { status: 302, type: 'default', headers: new Headers() }
+    const e = ev({ path: '/api/users' })
+    await run(e)
+    expect(e.node.res.statusCode).toBe(502)
   })
 
   it('sends an empty Accept when forceJson is off and the browser sent none', async () => {

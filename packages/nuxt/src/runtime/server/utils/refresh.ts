@@ -30,6 +30,10 @@ async function rawRefresh(refreshToken: string, baseURL: string): Promise<TokenS
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
     body: JSON.stringify({ refresh_token: refreshToken }),
+    // Never follow an upstream 3xx: a 307/308 preserves this POST body, which would
+    // re-send the rotating refresh token to the redirect host (CWE-918/200). An opaque
+    // redirect is not `ok`, so it falls through to the null return below.
+    redirect: 'manual',
   })
   if (!res.ok) return null
   const pair = await res.json() as { access_token: string, refresh_token?: string }
