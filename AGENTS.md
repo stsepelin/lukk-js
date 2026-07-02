@@ -2,7 +2,7 @@
 
 Guidance for AI coding assistants. Two audiences: teams **using** lukk-js in an app, and contributors **working on** this repo.
 
-Docs: <https://stsepelin.github.io/lukk-js/> — machine-readable at [`/llms.txt`](https://stsepelin.github.io/lukk-js/llms.txt) and [`/llms-full.txt`](https://stsepelin.github.io/lukk-js/llms-full.txt). Backend package: [lukk](https://stsepelin.github.io/lukk/).
+Docs: <https://stsepelin.github.io/lukk> — a unified site covering both lukk (PHP) and lukk-js, machine-readable at [`/llms.txt`](https://stsepelin.github.io/lukk/llms.txt) and [`/llms-full.txt`](https://stsepelin.github.io/lukk/llms-full.txt). Docs source lives in the [lukk-docs](https://github.com/stsepelin/lukk-docs) repo.
 
 ## Using lukk-js in an app
 

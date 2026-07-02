@@ -2,7 +2,7 @@
 
 JavaScript/TypeScript clients for the [`lukk`](https://github.com/stsepelin/lukk) Laravel JWT auth package. A pnpm monorepo: **`lukk-core`** (framework-agnostic contract types + auth client + WebAuthn helpers, zero runtime deps) and **`lukk-nuxt`** (a Nuxt 3/4 module built on the core). The clients mirror lukk's HTTP contract and are conformance-tested against a real lukk instance so the types can't drift.
 
-User-facing docs live in `docs/` (start at `docs/README.md`; `docs/architecture.md` has the design rationale + the lukk mapping). The lukk PHP source is the contract source of truth.
+User-facing docs live in the separate **[lukk-docs](https://github.com/stsepelin/lukk-docs)** repo (a unified VitePress site covering both this client and the lukk PHP package, published to stsepelin.github.io/lukk). Edit docs there — this repo no longer has a `docs/` directory. The lukk PHP source is the contract source of truth.
 
 ## Commands
 
