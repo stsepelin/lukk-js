@@ -1,0 +1,20 @@
+{
+  "name": "lukk-e2e-nuxt-direct",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "nuxi build",
+    "generate": "nuxi generate",
+    "preview": "node .output/server/index.mjs",
+    "dev": "nuxi dev",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "lukk-nuxt": "workspace:*",
+    "nuxt": "^3.13.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.48.0"
+  }
+}

@@ -2,3 +2,4 @@ packages:
   - packages/core
   - packages/nuxt
   - packages/nuxt/playground
+  - conformance/apps/*

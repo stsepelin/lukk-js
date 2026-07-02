@@ -11,4 +11,8 @@ export default createConfigForNuxt({
     // We use compact, single-purpose multi-statement lines deliberately (resets, test setup).
     '@stylistic/max-statements-per-line': 'off',
   },
+}).append({
+  // The E2E fixture apps use conventional single-word Nuxt page names (index/login/dashboard).
+  files: ['conformance/apps/**/pages/**/*.vue', 'conformance/apps/**/app.vue'],
+  rules: { 'vue/multi-word-component-names': 'off' },
 })
