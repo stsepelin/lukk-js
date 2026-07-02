@@ -14,10 +14,10 @@ vi.mock('@nuxt/kit', () => kit)
 // eslint-disable-next-line import/first
 import lukkModule from '../src/module'
 
-interface FakeNuxt { options: { runtimeConfig: { public: Record<string, unknown> } & Record<string, unknown> } }
+interface FakeNuxt { options: { runtimeConfig: { public: Record<string, unknown> } & Record<string, unknown> } & Record<string, unknown> }
 
-function setup(overrides: Record<string, unknown>): FakeNuxt {
-  const nuxt: FakeNuxt = { options: { runtimeConfig: { public: {} } } }
+function setup(overrides: Record<string, unknown>, nuxtOptions: Record<string, unknown> = {}): FakeNuxt {
+  const nuxt: FakeNuxt = { options: { runtimeConfig: { public: {} }, ...nuxtOptions } }
   const mod = lukkModule as unknown as { defaults: Record<string, unknown>, setup: (o: unknown, n: FakeNuxt) => void }
   const opts: Record<string, unknown> = { ...mod.defaults, ...overrides }
   // Model Nuxt's deep-merge of nested option objects (so e.g. api.forceJson defaults apply).
@@ -36,6 +36,26 @@ describe('lukk-nuxt module', () => {
     expect(kit.addServerHandler).toHaveBeenCalledOnce()
     expect((nuxt.options.runtimeConfig.public.lukk as { baseURL: string }).baseURL).toBe('')
     expect((nuxt.options.runtimeConfig.lukk as { baseURL: string }).baseURL).toBe('https://api/auth')
+  })
+
+  it('makes the session cookie Secure by default (production build)', () => {
+    const nuxt = setup({ baseURL: 'https://api/auth', mode: 'bff' }) // no nuxt.options.dev → prod
+    expect((nuxt.options.runtimeConfig.lukk as { cookieSecure: boolean }).cookieSecure).toBe(true)
+  })
+
+  it('relaxes the session cookie for `nuxi dev` over http', () => {
+    const nuxt = setup({ baseURL: 'https://api/auth', mode: 'bff' }, { dev: true })
+    expect((nuxt.options.runtimeConfig.lukk as { cookieSecure: boolean }).cookieSecure).toBe(false)
+  })
+
+  it('keeps the session cookie Secure under `nuxi dev --https`', () => {
+    const nuxt = setup({ baseURL: 'https://api/auth', mode: 'bff' }, { dev: true, devServer: { https: true } })
+    expect((nuxt.options.runtimeConfig.lukk as { cookieSecure: boolean }).cookieSecure).toBe(true)
+  })
+
+  it('honors an explicit session.cookieSecure override', () => {
+    const nuxt = setup({ baseURL: 'https://api/auth', mode: 'bff', session: { password: 'x'.repeat(32), cookieSecure: false } }, { dev: false })
+    expect((nuxt.options.runtimeConfig.lukk as { cookieSecure: boolean }).cookieSecure).toBe(false)
   })
 
   it('skips the proxy and exposes the URL + user endpoint in direct mode', () => {

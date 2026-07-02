@@ -1,7 +1,7 @@
 import type { H3Event } from 'h3'
 import { defineEventHandler, getCookie, getRequestHeader, getRequestIP, proxyRequest, setResponseStatus, unsealSession, useSession } from 'h3'
 import { useRuntimeConfig } from '#imports'
-import { LUKK_BFF_PREFIX, LUKK_SESSION_COOKIE } from '../shared'
+import { LUKK_BFF_PREFIX, sessionCookieName } from '../shared'
 import { accessExpired } from './access-token'
 import { isForeignOrigin, resolveTarget } from './proxy-utils'
 import { refreshOnce, type TokenSession } from './utils/refresh'
@@ -30,15 +30,19 @@ const SPOOFABLE_FORWARDING = {
  * docs/transport-modes.md.
  */
 export default defineEventHandler(async (event) => {
-  const { apiPath, apiTarget, apiForceJson, baseURL, sessionPassword, apiForwardSetCookie } = useRuntimeConfig(event).lukk as {
+  const { apiPath, apiTarget, apiForceJson, baseURL, sessionPassword, apiForwardSetCookie, cookieSecure } = useRuntimeConfig(event).lukk as {
     apiPath: string
     apiTarget: string
     apiForceJson: boolean
     baseURL: string
     sessionPassword: string
     apiForwardSetCookie?: string[]
+    cookieSecure?: boolean
   }
   const forwardSetCookie = apiForwardSetCookie ?? []
+  // Secure/`__Host-` in prod + dev-https, relaxed for dev-http (see module cookieSecure).
+  const secure = cookieSecure !== false
+  const sessionName = sessionCookieName(secure)
 
   if (isForeignOrigin(event)) {
     setResponseStatus(event, 403)
@@ -73,13 +77,13 @@ export default defineEventHandler(async (event) => {
   // which then collides with the streamed response). Only when the injected access
   // token has actually lapsed do we open the read-write session to rotate — and there
   // the seal is valid, so its id is restored (no re-mint).
-  const sealed = await readSession(event, sessionPassword)
+  const sealed = await readSession(event, sessionPassword, sessionName)
   let access = sealed.access
   if (access && sealed.refresh && accessExpired(access)) {
     const session = await useSession<TokenSession>(event, {
       password: sessionPassword,
-      name: LUKK_SESSION_COOKIE,
-      cookie: { sameSite: 'strict', secure: true, httpOnly: true, path: '/' },
+      name: sessionName,
+      cookie: { sameSite: 'strict', secure, httpOnly: true, path: '/' },
     })
     // Proactive refresh: rotate ONCE (shared single-flight with the BFF proxy) so a
     // streamed request isn't spent on a guaranteed 401. A revoked session still
@@ -130,7 +134,7 @@ export default defineEventHandler(async (event) => {
       if (forwardSetCookie.length) {
         for (const cookie of upstream) {
           const name = cookieName(cookie)
-          if (name !== LUKK_SESSION_COOKIE && forwardSetCookie.includes(name)) keep.push(cookie)
+          if (name !== sessionName && forwardSetCookie.includes(name)) keep.push(cookie)
         }
       }
       if (keep.length) ev.node.res.setHeader('set-cookie', keep)
@@ -146,11 +150,11 @@ export default defineEventHandler(async (event) => {
  * otherwise collide with the streamed proxy response). Local + never returns the
  * refresh token to a client — it's used only to decide whether to rotate.
  */
-async function readSession(event: H3Event, password: string): Promise<TokenSession> {
-  const sealed = getCookie(event, LUKK_SESSION_COOKIE)
+async function readSession(event: H3Event, password: string, name: string): Promise<TokenSession> {
+  const sealed = getCookie(event, name)
   if (!sealed || !password) return {}
   try {
-    const unsealed = await unsealSession(event, { password, name: LUKK_SESSION_COOKIE }, sealed)
+    const unsealed = await unsealSession(event, { password, name }, sealed)
     return (unsealed as { data?: TokenSession }).data ?? {}
   }
   catch {

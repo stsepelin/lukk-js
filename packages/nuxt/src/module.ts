@@ -61,8 +61,15 @@ export interface ModuleOptions {
   /**
    * BFF only: the secret that seals the server-side token session (≥ 32 chars).
    * Prefer setting it via the `NUXT_LUKK_SESSION_PASSWORD` env var.
+   *
+   * `cookieSecure` controls the session cookie's Secure attribute (and, by extension,
+   * the `__Host-` name prefix, which requires Secure). It defaults to: Secure in a
+   * production build, Secure under `nuxi dev --https`, and NOT Secure for `nuxi dev`
+   * over plain http (a browser drops a Secure cookie even on localhost, so the session
+   * wouldn't persist). Set it explicitly only for an unusual setup (e.g. dev behind
+   * your own TLS proxy). Never ship `false` to production.
    */
-  session: { password: string }
+  session: { password: string, cookieSecure?: boolean }
   /**
    * BFF only, optional: proxy your own app API so it's authenticated out of the
    * box. Requests to `${path}/**` are forwarded to the FIXED `target` (your
@@ -140,11 +147,19 @@ export default defineNuxtModule<ModuleOptions>({
 
     // Server-only config (the real lukk URL + storage choice for the BFF proxy,
     // plus the optional app-API proxy target — fixed here, never request-derived).
+    // Secure session cookie in production; also under `nuxi dev --https` (detected via
+    // the dev-server https config); relaxed only for `nuxi dev` over plain http, where a
+    // browser would drop a Secure cookie. Decided once here — the runtime never sniffs
+    // the request scheme (no x-forwarded-proto spoofing surface).
+    const cookieSecure = options.session.cookieSecure
+      ?? (!nuxt.options.dev || Boolean(nuxt.options.devServer?.https))
+
     nuxt.options.runtimeConfig.lukk = defu(nuxt.options.runtimeConfig.lukk,
       {
         baseURL: options.baseURL,
         storage: options.storage,
         sessionPassword: options.session.password,
+        cookieSecure,
         apiPath,
         apiTarget: options.api.target,
         apiForceJson: options.api.forceJson,
