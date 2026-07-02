@@ -7,6 +7,7 @@ import type {
   PasskeySummary,
   PublicKeyCredentialCreationOptionsJSON,
   RecoveryCodeCount,
+  ResetPasswordInput,
   TokenPair,
   TwoFactorInput,
   TwoFactorEnrollment,
@@ -124,6 +125,12 @@ export function createLukkClient(hooks: LukkClientHooks) {
     // --- email verification ---
     /** Resend the email-verification link to the authenticated user (a no-op if already verified). */
     sendEmailVerification: () => request<void>('/email/verification-notification', { method: 'POST' }),
+
+    // --- password reset (public; pairs with lukk's features.password_reset) ---
+    /** Request a password-reset link be emailed. Always resolves 200 (no user enumeration). */
+    forgotPassword: (email: string) => request<void>('/forgot-password', json({ email })),
+    /** Complete a reset with the token + email from the emailed link and the new password. */
+    resetPassword: (input: ResetPasswordInput) => request<void>('/reset-password', json(input)),
 
     // --- step-up confirmation ---
     confirmPassword: (password: string) => request<ConfirmationToken>('/confirm-password', json({ password })),
