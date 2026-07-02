@@ -1,5 +1,11 @@
 # lukk-core
 
+## 0.6.0
+
+### Minor Changes
+
+- 1336362: Add password reset (pairs with lukk's `features.password_reset`). `lukk-core` gains `forgotPassword(email)` and `resetPassword(input)` client methods plus a `ResetPasswordInput` type; `lukk-nuxt` gains the auto-imported `useLukkPasswordReset` composable (`sendResetLink`, `reset`, and `sending`/`resetting` flags). Both endpoints are public and route through the configured transport (BFF proxy or direct).
+
 ## 0.5.0
 
 ### Minor Changes
