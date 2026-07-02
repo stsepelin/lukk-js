@@ -53,7 +53,10 @@ export default defineEventHandler(async (event) => {
     // Confirmation token is held server-side too — never trust one from the browser.
     if (sealed.confirmation) headers['X-Lukk-Confirmation'] = sealed.confirmation
     if (access) headers.Authorization = `Bearer ${access}`
-    return fetch(target!, { method, headers, body: rawBody })
+    // Never follow an upstream 3xx: a cross-origin redirect would re-emit the custom
+    // X-Lukk-Confirmation header (undici keeps custom headers across redirects) and, on a
+    // 307/308, the request body to the redirect host (CWE-918/200). Handled below.
+    return fetch(target!, { method, headers, body: rawBody, redirect: 'manual' })
   }
 
   // The live refresh token: `sealed.refresh` until an in-request refresh rotates it.
@@ -72,6 +75,13 @@ export default defineEventHandler(async (event) => {
     else {
       await s.clear()
     }
+  }
+
+  // A trusted JSON upstream shouldn't 3xx; with redirect:'manual' one surfaces as an
+  // opaque response (status 0) — reject it rather than leak an empty/odd status downstream.
+  if (res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400)) {
+    setResponseStatus(event, 502)
+    return { message: 'Upstream redirect rejected.' }
   }
 
   const text = await res.text()

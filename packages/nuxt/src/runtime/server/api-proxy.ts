@@ -101,6 +101,11 @@ export default defineEventHandler(async (event) => {
   // headers; `streamRequest` pipes the body through instead of buffering it.
   return proxyRequest(event, base + query, {
     streamRequest: true,
+    // Never follow an upstream 3xx server-side — don't re-emit the injected bearer to a
+    // redirect host (CWE-918/200). undici returns an opaque response instead of following;
+    // onResponse turns that into a clean 502 (matching the BFF proxy) rather than the empty
+    // 200 h3 would otherwise sanitize a status-0 response into.
+    fetchOptions: { redirect: 'manual' },
     headers: {
       'accept': accept,
       'cookie': '',
@@ -110,7 +115,13 @@ export default defineEventHandler(async (event) => {
     },
     // Not a cookie/cache passthrough: strip upstream Set-Cookie, restore the rotated session,
     // and (opt-in) re-emit only allow-listed app-API cookies. Keep it out of shared caches.
-    onResponse(ev) {
+    onResponse(ev, response) {
+      // A trusted JSON upstream shouldn't 3xx; with redirect:'manual' one surfaces as an
+      // opaque (status 0) response — reject it rather than stream an empty 200 downstream.
+      if (response.type === 'opaqueredirect' || (response.status >= 300 && response.status < 400)) {
+        ev.node.res.statusCode = 502
+        return
+      }
       const upstream = toCookieArray(ev.node.res.getHeader('set-cookie'))
       ev.node.res.removeHeader('set-cookie')
       const keep = toCookieArray(sessionCookie) // the rotated session cookie (if any)

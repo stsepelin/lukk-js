@@ -286,4 +286,27 @@ describe('BFF proxy', () => {
     expect(event.status).toBe(400)
     expect(mockFetch().fetch).not.toHaveBeenCalled()
   })
+
+  it('fetches with redirect:manual so an upstream 3xx is never followed', async () => {
+    const session = makeSession({ access: 'a' })
+    mockFetch().fetch = vi.fn().mockResolvedValue(jsonRes({ ok: true }))
+    await run(makeEvent({ path: '/api/_lukk/x', method: 'POST', headers: { ...sameOrigin }, session }))
+    expect(mockFetch().fetch.mock.calls[0]![1]!.redirect).toBe('manual')
+  })
+
+  it('rejects an opaque upstream redirect (creds not re-emitted to a redirect host)', async () => {
+    const session = makeSession({ access: 'a', refresh: 'r', confirmation: 'c' })
+    mockFetch().fetch = vi.fn().mockResolvedValue({ type: 'opaqueredirect', status: 0 })
+    const event = makeEvent({ path: '/api/_lukk/x', method: 'POST', headers: { ...sameOrigin }, session })
+    expect(await run(event)).toEqual({ message: 'Upstream redirect rejected.' })
+    expect(event.status).toBe(502)
+  })
+
+  it('rejects a 3xx upstream response without chasing the Location', async () => {
+    const session = makeSession({ access: 'a', refresh: 'r' })
+    mockFetch().fetch = vi.fn().mockResolvedValue(new Response(null, { status: 302, headers: { location: 'https://evil.example/x' } }))
+    const event = makeEvent({ path: '/api/_lukk/x', method: 'POST', headers: { ...sameOrigin }, session })
+    expect(await run(event)).toEqual({ message: 'Upstream redirect rejected.' })
+    expect(event.status).toBe(502)
+  })
 })
