@@ -1,5 +1,16 @@
 # lukk-nuxt
 
+## 0.7.0
+
+### Minor Changes
+
+- d07f6eb: Add registration (pairs with lukk's `features.registration`). `lukk-core` gains a `register(input)` client method plus `RegisterInput` / `RegisterResult` / `RegistrationPending` types and an `isRegistrationPending` guard. `lukk-nuxt`'s `useLukkAuth` gains `register()`, which mints a session exactly like `login()` — handling the same 2FA-challenge outcome and the verify-first (`block_unverified_login`) no-session response.
+
+### Patch Changes
+
+- Updated dependencies [d07f6eb]
+  - lukk-core@0.7.0
+
 ## 0.6.0
 
 ### Minor Changes
