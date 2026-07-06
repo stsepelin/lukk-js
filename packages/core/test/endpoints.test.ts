@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createLukkClient, isTokenPair, type LukkClient } from '../src/client'
-import { isTwoFactorChallenge } from '../src/types'
+import { isRegistrationPending, isTwoFactorChallenge } from '../src/types'
 
 function json(body: unknown, status = 200): Response {
   return new Response(body === undefined ? '' : JSON.stringify(body), {
@@ -102,5 +102,10 @@ describe('guards', () => {
   it('isTwoFactorChallenge', () => {
     expect(isTwoFactorChallenge({ two_factor: true, challenge_token: 'c' })).toBe(true)
     expect(isTwoFactorChallenge({ access_token: 'a', expires_in: 1 })).toBe(false)
+  })
+
+  it('isRegistrationPending', () => {
+    expect(isRegistrationPending({ registered: true, requires_verification: true })).toBe(true)
+    expect(isRegistrationPending({ access_token: 'a', expires_in: 1 })).toBe(false)
   })
 })

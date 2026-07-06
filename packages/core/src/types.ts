@@ -33,17 +33,50 @@ export function isTwoFactorChallenge(r: LoginResult): r is TwoFactorChallenge {
   return (r as TwoFactorChallenge).two_factor === true
 }
 
-export interface LoginCredentials {
-  email: string
-  password: string
-}
+/**
+ * Exactly one account identifier: `email` (the default) or `username` (when the server sets
+ * `lukk.username` to a `username` column). For any other configured column, pass it through the
+ * extra fields on {@link LoginInput} / {@link RegisterInput}.
+ */
+export type LukkIdentifier = { email: string } | { username: string }
+
+export type LoginCredentials = LukkIdentifier & { password: string }
 
 /**
  * Login credentials, plus any extra fields your backend reads (e.g. `remember`, a captcha
- * token). `email`/`password` stay required; extras pass straight through to lukk, where a
- * custom `Lukk::authenticateUsing` closure can act on them.
+ * token). Requires the identifier (`email`/`username`) + `password`; extras pass straight
+ * through to lukk, where a custom `Lukk::authenticateUsing` closure can act on them.
  */
 export type LoginInput = LoginCredentials & Record<string, unknown>
+
+/** `POST /auth/register` with no session (register-only, or `block_unverified_login`): the
+ *  account exists but no tokens are issued. `requires_verification` is true when the email must
+ *  be verified before the user can log in, false when they can simply log in next. */
+export interface RegistrationPending {
+  registered: true
+  requires_verification: boolean
+}
+
+/** `POST /auth/register` result — the same token pair a login yields (auto-login), a 2FA
+ *  challenge if the new user is already enrolled, or a verify-first pending shape. */
+export type RegisterResult = LoginResult | RegistrationPending
+
+export function isRegistrationPending(r: RegisterResult): r is RegistrationPending {
+  return (r as RegistrationPending).registered === true
+}
+
+export type RegisterCredentials = LukkIdentifier & {
+  password: string
+  password_confirmation: string
+}
+
+/**
+ * Registration input. Requires the identifier (`email`/`username`) + `password` +
+ * `password_confirmation`. The stock default create also expects a `name`; that and any other
+ * extra fields (a captcha token, terms, …) pass straight through to lukk, where your
+ * `Lukk::registerUsing` / `Lukk::registerValidation` hooks read them.
+ */
+export type RegisterInput = RegisterCredentials & Record<string, unknown>
 
 /** Completing a 2FA login at `POST /auth/two-factor-challenge`. */
 export interface TwoFactorChallengeInput {

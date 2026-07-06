@@ -30,6 +30,49 @@ describe('createLukkClient', () => {
     expect(init?.method).toBe('POST')
   })
 
+  it('logs in by a username identifier (configurable lukk.username)', async () => {
+    const fetch = vi.fn(async () => json({ access_token: 'a', expires_in: 900, refresh_token: 'r' }))
+    const client = createLukkClient({ baseURL: 'https://x/auth', fetch })
+
+    await client.login({ username: 'ada', password: 'p' }) // typechecks without `email`
+
+    expect(JSON.parse((fetch.mock.calls[0]![1] as RequestInit).body as string)).toEqual({ username: 'ada', password: 'p' })
+  })
+
+  it('registers and returns (and persists) a token pair', async () => {
+    const onTokens = vi.fn()
+    const fetch = vi.fn(async () => json({ access_token: 'a', expires_in: 900, refresh_token: 'r' }))
+    const client = createLukkClient({ baseURL: 'https://x/auth', fetch, onTokens })
+
+    const result = await client.register({ email: 'e', password: 'p', password_confirmation: 'p' })
+
+    expect(result).toMatchObject({ access_token: 'a' })
+    expect(onTokens).toHaveBeenCalledOnce() // committed, like login
+    const [url, init] = fetch.mock.calls[0]!
+    expect(url).toBe('https://x/auth/register')
+    expect(JSON.parse((init as RequestInit).body as string)).toEqual({ email: 'e', password: 'p', password_confirmation: 'p' })
+  })
+
+  it('register surfaces a 2FA challenge (not persisted)', async () => {
+    const onTokens = vi.fn()
+    const fetch = vi.fn(async () => json({ two_factor: true, challenge_token: 'c' }))
+    const client = createLukkClient({ baseURL: 'https://x/auth', fetch, onTokens })
+
+    expect(await client.register({ email: 'e', password: 'p', password_confirmation: 'p' }))
+      .toEqual({ two_factor: true, challenge_token: 'c' })
+    expect(onTokens).not.toHaveBeenCalled()
+  })
+
+  it('register surfaces a verify-first pending shape (not persisted)', async () => {
+    const onTokens = vi.fn()
+    const fetch = vi.fn(async () => json({ registered: true, requires_verification: true }, 201))
+    const client = createLukkClient({ baseURL: 'https://x/auth', fetch, onTokens })
+
+    expect(await client.register({ email: 'e', password: 'p', password_confirmation: 'p' }))
+      .toEqual({ registered: true, requires_verification: true })
+    expect(onTokens).not.toHaveBeenCalled()
+  })
+
   it('resends the email-verification link', async () => {
     const fetch = vi.fn(async () => json({ status: 'verification-link-sent' }, 202))
     const client = createLukkClient({ baseURL: 'https://x/auth', fetch })

@@ -7,6 +7,8 @@ import type {
   PasskeySummary,
   PublicKeyCredentialCreationOptionsJSON,
   RecoveryCodeCount,
+  RegisterInput,
+  RegisterResult,
   ResetPasswordInput,
   TokenPair,
   TwoFactorInput,
@@ -112,6 +114,8 @@ export function createLukkClient(hooks: LukkClientHooks) {
     request,
 
     // --- session ---
+    /** Create an account and (unless verification blocks it) start a session — like login. */
+    register: (input: RegisterInput) => request<RegisterResult>('/register', json(input)).then(commit),
     login: (c: LoginInput) => request<LoginResult>('/login', json(c)).then(commit),
     twoFactorChallenge: (i: TwoFactorInput) => request<TokenPair>('/two-factor-challenge', json(i)).then(commit),
     /** Direct mode passes the refresh token; cookie/BFF mode relies on the cookie. */

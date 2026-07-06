@@ -1,4 +1,4 @@
-import { isTwoFactorChallenge, type LoginInput, type LoginResult, type LukkUser, shapeUser, userShapeWarning } from 'lukk-core'
+import { isRegistrationPending, isTwoFactorChallenge, type LoginInput, type LoginResult, type LukkUser, type RegisterInput, type RegisterResult, shapeUser, userShapeWarning } from 'lukk-core'
 import { computed, useNuxtApp, useRuntimeConfig, useState } from '#imports'
 import { ACCESS_KEY, CHALLENGE_KEY, CONFIRMATION_KEY, CONFIRMED_KEY, USER_KEY } from '../keys'
 import { useLukkFetch } from './useLukkFetch'
@@ -47,6 +47,25 @@ export function useLukkAuth() {
    */
   async function login(credentials: LoginInput): Promise<LoginResult> {
     const result = await $lukk.login(credentials)
+    if (isTwoFactorChallenge(result)) {
+      challenge.value = result.challenge_token
+      return result
+    }
+    await fetchUser()
+    return result
+  }
+
+  /**
+   * Register a new user. Mirrors {@link login}: a successful register starts the session, exactly
+   * like logging in. A 2FA-enrolled new user surfaces a challenge (`pendingTwoFactor`); if the
+   * server issues no session (register-only, or verification required), it resolves to a
+   * `{ registered, requires_verification }` shape — route the user on accordingly.
+   */
+  async function register(input: RegisterInput): Promise<RegisterResult> {
+    const result = await $lukk.register(input)
+    if (isRegistrationPending(result)) {
+      return result
+    }
     if (isTwoFactorChallenge(result)) {
       challenge.value = result.challenge_token
       return result
@@ -130,5 +149,5 @@ export function useLukkAuth() {
     if (pair) await fetchUser()
   }
 
-  return { user, loggedIn, pendingTwoFactor, login, verifyTwoFactor, verifyRecoveryCode, logout, revokeOtherSessions, fetchUser, initSession }
+  return { user, loggedIn, pendingTwoFactor, register, login, verifyTwoFactor, verifyRecoveryCode, logout, revokeOtherSessions, fetchUser, initSession }
 }
