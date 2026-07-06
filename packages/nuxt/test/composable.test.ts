@@ -43,6 +43,39 @@ describe('useLukkAuth', () => {
     expect(api).not.toHaveBeenCalled()
   })
 
+  it('registers, then loads the user (auto-login, like login)', async () => {
+    withApp({ register: vi.fn().mockResolvedValue({ access_token: 'a', expires_in: 900 }) })
+    const { user, loggedIn, register } = useLukkAuth()
+
+    const result = await register({ email: 'e', password: 'p', password_confirmation: 'p' })
+
+    expect((result as { access_token: string }).access_token).toBe('a')
+    expect(user.value).toEqual({ id: 1, name: 'Ada' })
+    expect(loggedIn.value).toBe(true)
+  })
+
+  it('register surfaces a 2FA challenge when the new user is enrolled', async () => {
+    withApp({ register: vi.fn().mockResolvedValue({ two_factor: true, challenge_token: 'c' }) })
+    const { user, pendingTwoFactor, register } = useLukkAuth()
+
+    expect(await register({ email: 'e', password: 'p', password_confirmation: 'p' }))
+      .toEqual({ two_factor: true, challenge_token: 'c' })
+    expect(pendingTwoFactor.value).toBe(true)
+    expect(user.value).toBeNull()
+    expect(api).not.toHaveBeenCalled()
+  })
+
+  it('register resolves without a session when verification is required', async () => {
+    withApp({ register: vi.fn().mockResolvedValue({ registered: true, requires_verification: true }) })
+    const { user, loggedIn, register } = useLukkAuth()
+
+    expect(await register({ email: 'e', password: 'p', password_confirmation: 'p' }))
+      .toEqual({ registered: true, requires_verification: true })
+    expect(user.value).toBeNull()
+    expect(loggedIn.value).toBe(false)
+    expect(api).not.toHaveBeenCalled()
+  })
+
   it('fetchUser loads the user via useLukkFetch (full path, no baseURL)', async () => {
     withApp({})
     const { user, fetchUser } = useLukkAuth()
