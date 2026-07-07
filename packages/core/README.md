@@ -8,6 +8,8 @@ and future framework bindings; usable directly in any TypeScript app.
 npm i lukk-core
 ```
 
+> **Pre-1.0.** `lukk-core` is `0.x` (versioned in lockstep with `lukk-nuxt`); the public API may change between minor versions per [SemVer §4](https://semver.org/#spec-item-4). Pin an exact version and read the [UPGRADE guide](https://github.com/stsepelin/lukk-js/blob/main/UPGRADE.md) before upgrading.
+
 ## What's inside
 
 - **Contract types** mirroring lukk's HTTP API — `TokenPair`, `TwoFactorChallenge`,
@@ -52,11 +54,11 @@ cookie, a server session) is the binding's call; the core just speaks to lukk.
   `credentials: 'include'` are attached only to a same-origin-as-`baseURL` target — never
   to an absolute, cross-origin URL.
 - **Refresh is single-flighted**, so a burst of 401s never replays a rotated refresh token
-  into lukk's reuse detection. See the [Architecture & security model](https://github.com/stsepelin/lukk-js/blob/main/docs/architecture.md).
+  into lukk's reuse detection. See the [Architecture & security model](https://stsepelin.github.io/lukk-docs/architecture).
 
 ## Documentation
 
-See [Using lukk-core](https://github.com/stsepelin/lukk-js/blob/main/docs/core.md) for the
+See [Using lukk-core](https://stsepelin.github.io/lukk-docs/lukk-core) for the
 full hook reference, every method, error handling, and the WebAuthn helpers.
 
 ## License

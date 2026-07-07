@@ -10,6 +10,8 @@ JavaScript/TypeScript clients for **[lukk](https://github.com/stsepelin/lukk)** 
 
 > **Unofficial companion to lukk.** Not affiliated with or endorsed by the Laravel or Nuxt teams. "Laravel" and "Nuxt" are referenced only to describe compatibility and design influence.
 
+> **Pre-1.0 — expect breaking changes.** `lukk-core` and `lukk-nuxt` are in the `0.x` series and versioned in lockstep. Both are fully tested (100% coverage), but per [semantic versioning for initial development](https://semver.org/#spec-item-4), the public API and composable surface may change between minor versions without a major bump. Pin exact versions and read the [UPGRADE guide](UPGRADE.md) (and each package's `CHANGELOG.md`) before upgrading. The 1.0 release will mark API stability.
+
 ## Features
 
 - **One composable API, every rendering mode** — the same `useLukkAuth()` works in SSR, SPA, and SSG.
@@ -41,7 +43,7 @@ See **[Transport Modes](https://stsepelin.github.io/lukk-docs/transport-modes)**
 
 ## Requirements
 
-- A [lukk](https://github.com/stsepelin/lukk)-powered Laravel API (`^0.1`)
+- A [lukk](https://github.com/stsepelin/lukk)-powered Laravel API (latest `0.x` recommended — the newest client features track the latest lukk; e.g. registration needs lukk `>= 0.4`)
 - Node `>= 20`
 - Nuxt `3` or `4` (for `lukk-nuxt`)
 
@@ -94,6 +96,18 @@ pnpm test         # 100% coverage gate on both packages
 pnpm lint
 pnpm dev          # the lukk-nuxt playground
 ```
+
+## Acknowledgements
+
+lukk-js is the client half of **[lukk](https://github.com/stsepelin/lukk)** and mirrors its HTTP contract; it also borrows liberally from the Laravel and Nuxt ecosystems. Sincere thanks to their authors and maintainers — lukk-js is an unofficial companion, not affiliated with or endorsed by any of them (see the note at the top); these are simply the works that shaped it:
+
+- **[Inertia.js](https://inertiajs.com)** — `useLukkForm` is modelled on Inertia's `useForm`: the `data` / `processing` / `errors` / `isDirty` surface, `422` error-bag binding, and `remember` semantics all follow its lead.
+- **[Nuxt](https://nuxt.com)** — the module + auto-imported composable design, and the SSR/BFF story (a Nitro proxy holding tokens server-side) build directly on Nuxt's server/client model.
+- **[Laravel Sanctum](https://laravel.com/docs/sanctum) & [Fortify](https://laravel.com/docs/fortify)** — the auth contract lukk-js speaks, and its customization philosophy, originate here (via [lukk](https://github.com/stsepelin/lukk)).
+- **[VueUse](https://vueuse.org)** — the reference for ergonomic, composition-first composable API shapes.
+- **[unjs](https://unjs.io)** — `lukk-core` and the BFF proxy are built on **[ofetch](https://github.com/unjs/ofetch)** and **[h3](https://github.com/unjs/h3)** / Nitro.
+
+And the tooling: **[changesets](https://github.com/changesets/changesets)** (releases), **[unbuild](https://github.com/unjs/unbuild)** + **[@nuxt/module-builder](https://github.com/nuxt/module-builder)** (builds), and **[Vitest](https://vitest.dev)** (the 100%-coverage gate) — plus the [Nuxt](https://nuxt.com) and [Laravel](https://laravel.com) communities that make all of this possible. 🙏
 
 ## License
 
