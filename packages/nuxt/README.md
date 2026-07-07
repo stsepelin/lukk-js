@@ -1,14 +1,16 @@
 # lukk-nuxt
 
 Nuxt module for **[lukk](https://github.com/stsepelin/lukk)** — first-party Laravel JWT
-auth for Nuxt, plus the data layer that rides on it: an [auth-aware fetch](https://github.com/stsepelin/lukk-js/blob/main/docs/transport-modes.md#use-lukk-fetch)
-and [reactive forms](https://github.com/stsepelin/lukk-js/blob/main/docs/forms.md) for your
+auth for Nuxt, plus the data layer that rides on it: an [auth-aware fetch](https://stsepelin.github.io/lukk-docs/use-lukk-fetch)
+and [reactive forms](https://stsepelin.github.io/lukk-docs/use-lukk-form) for your
 own Laravel API. SSR / SPA / SSG, Nuxt 3 **and** 4, in **BFF** or **direct** mode — one
 composable API either way.
 
 ```bash
 npm i lukk-nuxt
 ```
+
+> **Pre-1.0.** `lukk-nuxt` is `0.x` (versioned in lockstep with `lukk-core`); the public API may change between minor versions per [SemVer §4](https://semver.org/#spec-item-4). Pin an exact version and read the [UPGRADE guide](https://github.com/stsepelin/lukk-js/blob/main/UPGRADE.md) before upgrading.
 
 ## Setup
 
@@ -65,7 +67,7 @@ const form = useLukkForm({ email: '', password: '' }) // reactive form + 422 bin
 **Your Laravel API**
 
 - **`useLukkFetch`** — a typed, transport-aware fetch for your own app API: forwards the session cookie on SSR (a bare `$fetch` doesn't → silent 401), attaches the bearer in direct mode with single-flight 401 refresh, and rejects with a typed `LukkError`.
-- **[`useLukkForm`](https://github.com/stsepelin/lukk-js/blob/main/docs/forms.md)** — a reactive form (Inertia-`useForm`-style) over `useLukkFetch`: holds `data`, submits it (`post`/`put`/`patch`/`delete`/`get`), and binds a Laravel `422` bag to per-field `errors` — with `processing`/`wasSuccessful`/`recentlySuccessful`/`isDirty`, `onSuccess`/`onError`/`onFinish` hooks, chainable `reset`/`defaults`/`transform`, automatic `multipart/form-data` for `File`/`Blob` fields, and `cancel()`.
+- **[`useLukkForm`](https://stsepelin.github.io/lukk-docs/use-lukk-form)** — a reactive form (Inertia-`useForm`-style) over `useLukkFetch`: holds `data`, submits it (`post`/`put`/`patch`/`delete`/`get`), and binds a Laravel `422` bag to per-field `errors` — with `processing`/`wasSuccessful`/`recentlySuccessful`/`isDirty`, `onSuccess`/`onError`/`onFinish` hooks, chainable `reset`/`defaults`/`transform`, automatic `multipart/form-data` for `File`/`Blob` fields, and `cancel()`.
 
 Guard pages with the route middleware — `lukk-auth` (require login) or
 `lukk-guest` (bounce already-authenticated users, e.g. off `/login`):
@@ -95,13 +97,13 @@ const { data } = await useAsyncData('me', () => api('/me')) // SSR-authenticated
 ```
 
 Or read the token yourself in a Nitro route via `getLukkAccessToken(event)`. Full guide:
-[Authenticating your own API](https://github.com/stsepelin/lukk-js/blob/main/docs/transport-modes.md#bff).
+[Authenticating your own API](https://stsepelin.github.io/lukk-docs/use-lukk-fetch).
 
 ## Security
 
 No token in the browser (BFF), a `__Host-`-prefixed sealed session, origin-scoped
 credentials, and CSRF + SSRF guards on both proxies. See the
-[Architecture & security model](https://github.com/stsepelin/lukk-js/blob/main/docs/architecture.md).
+[Architecture & security model](https://stsepelin.github.io/lukk-docs/architecture).
 
 > [!NOTE]
 > **Stateless-API consumers:** make your Laravel app return JSON `401`s for `api/*`
@@ -124,7 +126,7 @@ credentials, and CSRF + SSRF guards on both proxies. See the
 ## Documentation
 
 Full guides — installation, configuration, both transport modes, forms, 2FA, passkeys,
-and step-up confirmation — live in the [lukk-js docs](https://github.com/stsepelin/lukk-js/tree/main/docs).
+and step-up confirmation — live in the [lukk docs](https://stsepelin.github.io/lukk-docs).
 
 ## License
 
