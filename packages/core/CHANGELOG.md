@@ -1,5 +1,7 @@
 # lukk-core
 
+## 0.7.1
+
 ## 0.7.0
 
 ### Minor Changes
