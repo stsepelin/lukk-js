@@ -1,9 +1,9 @@
-import type { H3Event } from 'h3'
-import { defineEventHandler, getCookie, getRequestHeader, getRequestIP, proxyRequest, setResponseStatus, unsealSession, useSession } from 'h3'
+import { defineEventHandler, getRequestHeader, getRequestIP, proxyRequest, setResponseStatus, useSession } from 'h3'
 import { useRuntimeConfig } from '#imports'
 import { LUKK_BFF_PREFIX, sessionCookieName } from '../shared'
 import { accessExpired } from './access-token'
 import { isForeignOrigin, resolveTarget } from './proxy-utils'
+import { readSealedSession } from './sealed-session'
 import { refreshOnce, type TokenSession } from './utils/refresh'
 
 // Browser-settable forwarding / client-IP headers, neutralised so a script can't
@@ -77,7 +77,7 @@ export default defineEventHandler(async (event) => {
   // which then collides with the streamed response). Only when the injected access
   // token has actually lapsed do we open the read-write session to rotate — and there
   // the seal is valid, so its id is restored (no re-mint).
-  const sealed = await readSession(event, sessionPassword, sessionName)
+  const sealed = await readSealedSession(event, sessionPassword, sessionName)
   let access = sealed.access
   if (access && sealed.refresh && accessExpired(access)) {
     const session = await useSession<TokenSession>(event, {
@@ -142,26 +142,6 @@ export default defineEventHandler(async (event) => {
     },
   })
 })
-
-/**
- * Read-only unseal of the sealed BFF session (access + refresh), for the bearer.
- * Unlike h3's `useSession`, this NEVER mints or slides the cookie — an expired,
- * tampered, or anonymous request yields `{}` and queues no `Set-Cookie` (which would
- * otherwise collide with the streamed proxy response). Local + never returns the
- * refresh token to a client — it's used only to decide whether to rotate.
- */
-async function readSession(event: H3Event, password: string, name: string): Promise<TokenSession> {
-  const sealed = getCookie(event, name)
-  if (!sealed || !password) return {}
-  try {
-    const unsealed = await unsealSession(event, { password, name }, sealed)
-    return (unsealed as { data?: TokenSession }).data ?? {}
-  }
-  catch {
-    // Tampered, expired, or wrong-secret seal → treat as no session.
-    return {}
-  }
-}
 
 /** Normalize a `Set-Cookie` header value (string | string[] | number | undefined) to an array. */
 function toCookieArray(value: number | string | string[] | undefined): string[] {
