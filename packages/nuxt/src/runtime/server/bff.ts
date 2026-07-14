@@ -1,9 +1,10 @@
 import type { H3Event } from 'h3'
 import { isTokenPair } from 'lukk-core'
-import { defineEventHandler, getCookie, getRequestHeader, readRawBody, setResponseStatus, unsealSession, useSession } from 'h3'
+import { defineEventHandler, getCookie, getRequestHeader, readRawBody, setResponseStatus, useSession } from 'h3'
 import { useRuntimeConfig } from '#imports'
 import { LUKK_BFF_PREFIX, sessionCookieName } from '../shared'
 import { isForeignOrigin, resolveTarget } from './proxy-utils'
+import { readSealedSession } from './sealed-session'
 import { warnIfSessionTooLarge } from './session-size'
 import { refreshOnce, type TokenSession } from './utils/refresh'
 
@@ -38,7 +39,7 @@ export default defineEventHandler(async (event) => {
   // frequency write paths re-unseal once (a deliberate trade: no empty-cookie mint on the hot read
   // path is worth a second iron-open when auth state actually changes).
   const hasCookie = !!getCookie(event, sessionName)
-  const sealed = await readSealed(event, sessionPassword, sessionName)
+  const sealed = await readSealedSession(event, sessionPassword, sessionName)
   let rwSession: ReturnType<typeof openSession> | null = null
   const session = () => (rwSession ??= openSession(event, sessionPassword, sessionName, cookieOptions))
 
@@ -119,20 +120,6 @@ export default defineEventHandler(async (event) => {
 /** Open the read-write sealed session (h3 mints the cookie if absent — call only when writing). */
 function openSession(event: H3Event, password: string, name: string, cookie: SessionCookieOptions) {
   return useSession<TokenSession>(event, { password, name, cookie })
-}
-
-/** Read-only unseal of the sealed session — never mints or slides the cookie. */
-async function readSealed(event: H3Event, password: string, name: string): Promise<TokenSession> {
-  const sealed = getCookie(event, name)
-  if (!sealed || !password) return {}
-  try {
-    const unsealed = await unsealSession(event, { password, name }, sealed)
-    return (unsealed as { data?: TokenSession }).data ?? {}
-  }
-  catch {
-    // Tampered, expired, or wrong-secret seal → treat as no session.
-    return {}
-  }
 }
 
 function isConfirmation(value: unknown): value is { confirmation_token: string } {

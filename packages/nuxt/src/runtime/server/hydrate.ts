@@ -1,8 +1,9 @@
 import type { H3Event } from 'h3'
-import { getCookie, sealSession, unsealSession, useSession } from 'h3'
+import { sealSession, useSession } from 'h3'
 import { useRuntimeConfig } from '#imports'
 import { sessionCookieName } from '../shared'
 import { accessExpired } from './access-token'
+import { readSealedSession } from './sealed-session'
 import { warnIfSessionTooLarge } from './session-size'
 import { refreshOnce, type TokenSession } from './utils/refresh'
 
@@ -45,7 +46,7 @@ export async function resolveHydrationAccess(event: H3Event): Promise<string | n
   // A truthy access proves `sessionPassword` was present: readSealed only returns data when it
   // unseals, and returns {} without a password — so the rotate path can assert `sessionPassword!`
   // rather than re-check an always-false branch.
-  const sealed = await readSealed(event, sessionPassword, name)
+  const sealed = await readSealedSession(event, sessionPassword, name)
   const access = sealed.access
   if (!access) return null
   if (!accessExpired(access)) return access
@@ -70,20 +71,6 @@ export async function resolveHydrationAccess(event: H3Event): Promise<string | n
   catch {
     // A throw in a plugin's setup breaks the SSR render — swallow and defer to the client restore.
     return null
-  }
-}
-
-/** Read-only unseal of the sealed session — never mints or slides the cookie. */
-async function readSealed(event: H3Event, password: string | undefined, name: string): Promise<TokenSession> {
-  const sealed = getCookie(event, name)
-  if (!sealed || !password) return {}
-  try {
-    const unsealed = await unsealSession(event, { password, name }, sealed)
-    return (unsealed as { data?: TokenSession }).data ?? {}
-  }
-  catch {
-    // Tampered, expired, or wrong-secret seal → treat as no session.
-    return {}
   }
 }
 
