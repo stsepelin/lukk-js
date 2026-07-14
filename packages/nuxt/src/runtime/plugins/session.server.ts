@@ -1,7 +1,6 @@
 import { setResponseHeader } from 'h3'
 import { useLukkAuth } from '../composables/useLukkAuth'
-import { accessExpired } from '../server/access-token'
-import { getLukkAccessToken } from '../server/utils/session'
+import { resolveHydrationAccess } from '../server/hydrate'
 import { defineNuxtPlugin } from '#imports'
 
 /**
@@ -13,14 +12,17 @@ import { defineNuxtPlugin } from '#imports'
  * Security (see docs/transport-modes.md):
  *  - Seeds ONLY the app `user` resource into the payload; the access/refresh token
  *    never leaves the server (`fetchUser` writes `user`, never the token state).
- *  - Marks the response `Cache-Control: no-store` once a user is seeded, so a shared
- *    cache/CDN can't serve one user's per-user render to another (the sealed cookie
- *    header alone does not prevent caching).
+ *  - Marks the response `Cache-Control: no-store` whenever a usable session is resolved —
+ *    NOT gated on the user seeding successfully — so a shared cache/CDN can never store
+ *    either a per-user render OR the rotated session `Set-Cookie` that `resolveHydrationAccess`
+ *    may have queued (which a `fetchUser` failure would otherwise leave cacheable). This
+ *    matches the unconditional `no-store` the BFF/app-API proxies emit.
  *  - Skips prerendered / statically-cached pages (they'd bake one user into a shared
  *    payload) — those restore on the client instead.
- *  - Hydrates only with a still-valid access token; an expired one would make the
- *    app-API proxy rotate + re-seal the session mid-render (a Set-Cookie hazard), so
- *    that case defers to the client restore.
+ *  - When the access token has aged out but the session is still refreshable,
+ *    `resolveHydrationAccess` rotates + re-seals in place (onto both the page response and
+ *    the in-process request), so a full page load stays logged-in instead of flashing
+ *    /login. An anonymous or unrefreshable session yields null and defers to the client.
  */
 export default defineNuxtPlugin({
   name: 'lukk:session-hydrate',
@@ -30,12 +32,13 @@ export default defineNuxtPlugin({
     const event = nuxtApp.ssrContext?.event
     if (!event) return
 
-    const access = await getLukkAccessToken(event)
-    if (!access || accessExpired(access)) return
+    const access = await resolveHydrationAccess(event)
+    if (!access) return
 
-    const auth = useLukkAuth()
-    await auth.fetchUser()
+    // The rotate path may have queued a fresh session Set-Cookie here, so suppress shared caching
+    // now — before fetchUser can fail and leave a rotated cookie or per-user render cacheable.
+    setResponseHeader(event, 'cache-control', 'no-store')
 
-    if (auth.loggedIn.value) setResponseHeader(event, 'cache-control', 'no-store')
+    await useLukkAuth().fetchUser()
   },
 })
