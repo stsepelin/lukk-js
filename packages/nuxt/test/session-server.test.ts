@@ -4,12 +4,12 @@ import { __test, useState } from './mocks/imports'
 
 const fetchUser = vi.fn()
 const loggedIn = { value: false }
-const getLukkAccessToken = vi.fn()
+const resolveHydrationAccess = vi.fn()
 const setResponseHeader = vi.fn()
 
 vi.mock('h3', () => ({ setResponseHeader: (...a: unknown[]) => setResponseHeader(...a) }))
 vi.mock('../src/runtime/composables/useLukkAuth', () => ({ useLukkAuth: () => ({ fetchUser, loggedIn }) }))
-vi.mock('../src/runtime/server/utils/session', () => ({ getLukkAccessToken: (...a: unknown[]) => getLukkAccessToken(...a) }))
+vi.mock('../src/runtime/server/hydrate', () => ({ resolveHydrationAccess: (...a: unknown[]) => resolveHydrationAccess(...a) }))
 
 // eslint-disable-next-line import/first
 import serverPlugin from '../src/runtime/plugins/session.server'
@@ -24,7 +24,6 @@ function token(exp: number | null): string {
   return `h.${body}.s`
 }
 const fresh = () => token(Math.floor(Date.now() / 1000) + 3600)
-const expired = () => token(Math.floor(Date.now() / 1000) - 10)
 
 function app(o: { serverRendered?: boolean, prerenderedAt?: unknown, ssrContext?: unknown } = {}) {
   return {
@@ -36,8 +35,8 @@ function app(o: { serverRendered?: boolean, prerenderedAt?: unknown, ssrContext?
 afterEach(() => { __test.reset(); loggedIn.value = false; vi.clearAllMocks() })
 
 describe('session.server (BFF SSR hydration)', () => {
-  it('seeds the user and marks the render no-store for a fresh, authenticated session', async () => {
-    getLukkAccessToken.mockResolvedValue(fresh())
+  it('seeds the user and marks the render no-store when a usable access token is resolved', async () => {
+    resolveHydrationAccess.mockResolvedValue(fresh())
     fetchUser.mockImplementation(async () => { loggedIn.value = true })
 
     await run(app())
@@ -49,47 +48,50 @@ describe('session.server (BFF SSR hydration)', () => {
     expect(useState(ACCESS_KEY, () => null).value).toBeNull()
   })
 
-  it('does not mark no-store when the user endpoint yields no user', async () => {
-    getLukkAccessToken.mockResolvedValue(fresh())
+  it('marks the render no-store even when the user endpoint yields no user (a rotated cookie may be queued)', async () => {
+    resolveHydrationAccess.mockResolvedValue(fresh())
     fetchUser.mockResolvedValue(undefined) // loggedIn stays false
 
     await run(app())
 
     expect(fetchUser).toHaveBeenCalledOnce()
-    expect(setResponseHeader).not.toHaveBeenCalled()
+    // no-store is unconditional once a usable session resolves — it must not depend on fetchUser
+    // succeeding, or a rotated session Set-Cookie could be left cacheable.
+    expect(setResponseHeader).toHaveBeenCalledWith(expect.anything(), 'cache-control', 'no-store')
   })
 
-  it('skips hydration when the access token is expired (defers to the client restore)', async () => {
-    getLukkAccessToken.mockResolvedValue(expired())
+  it('skips hydration when no usable access token is resolved (anonymous / unrefreshable)', async () => {
+    resolveHydrationAccess.mockResolvedValue(null)
     await run(app())
     expect(fetchUser).not.toHaveBeenCalled()
     expect(setResponseHeader).not.toHaveBeenCalled()
   })
 
-  it('skips when there is no sealed session (anonymous request)', async () => {
-    getLukkAccessToken.mockResolvedValue(null)
-    await run(app())
-    expect(fetchUser).not.toHaveBeenCalled()
+  it('passes the request event to the resolver', async () => {
+    resolveHydrationAccess.mockResolvedValue(null)
+    const event = { marker: true }
+    await run(app({ ssrContext: { event } }))
+    expect(resolveHydrationAccess).toHaveBeenCalledWith(event)
   })
 
   it('skips a prerendered page (would bake one user into a shared payload)', async () => {
     await run(app({ prerenderedAt: 12345 }))
-    expect(getLukkAccessToken).not.toHaveBeenCalled()
+    expect(resolveHydrationAccess).not.toHaveBeenCalled()
   })
 
   it('skips a non-server-rendered pass', async () => {
     await run(app({ serverRendered: false }))
-    expect(getLukkAccessToken).not.toHaveBeenCalled()
+    expect(resolveHydrationAccess).not.toHaveBeenCalled()
   })
 
   it('skips when the request event is absent', async () => {
     await run(app({ ssrContext: { event: undefined } }))
-    expect(getLukkAccessToken).not.toHaveBeenCalled()
+    expect(resolveHydrationAccess).not.toHaveBeenCalled()
   })
 
   it('skips when there is no ssr context at all', async () => {
     await run(app({ ssrContext: undefined }))
-    expect(getLukkAccessToken).not.toHaveBeenCalled()
+    expect(resolveHydrationAccess).not.toHaveBeenCalled()
   })
 })
 
