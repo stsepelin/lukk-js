@@ -18,13 +18,14 @@ type SessionCookieOptions = { sameSite: 'strict', secure: boolean, httpOnly: tru
  * ever holds the opaque session cookie, never a token.
  */
 export default defineEventHandler(async (event) => {
-  const { baseURL, sessionPassword, cookieSecure } = useRuntimeConfig(event).lukk as { baseURL: string, sessionPassword: string, cookieSecure?: boolean }
+  const { baseURL, sessionPassword, cookieSecure, cookieNamespace } = useRuntimeConfig(event).lukk as { baseURL: string, sessionPassword: string, cookieSecure?: boolean, cookieNamespace?: string }
   const method = event.method
 
-  // Secure/`__Host-` in prod + dev-https, relaxed for dev-http (see module cookieSecure).
-  // Default to secure when unset so a misread config can never silently drop Secure.
+  // Secure/`__Host-` in prod + dev-https, relaxed for dev-http (see module cookieSecure). Default to
+  // secure when unset so a misread config can never silently drop Secure. The name's `__Host-` prefix
+  // and the Secure attribute both derive from this one `secure` — they can't diverge.
   const secure = cookieSecure !== false
-  const sessionName = sessionCookieName(secure)
+  const sessionName = sessionCookieName(secure, cookieNamespace)
   const cookieOptions: SessionCookieOptions = { sameSite: 'strict', secure, httpOnly: true, path: '/' }
 
   // CSRF: reject a state-changing request riding the session cookie from a foreign origin.

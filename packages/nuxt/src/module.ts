@@ -68,8 +68,21 @@ export interface ModuleOptions {
    * over plain http (a browser drops a Secure cookie even on localhost, so the session
    * wouldn't persist). Set it explicitly only for an unusual setup (e.g. dev behind
    * your own TLS proxy). Never ship `false` to production.
+   *
+   * `name` namespaces the session cookie so multiple lukk apps can share a host without
+   * clobbering each other's session — cookies are scoped by host, not port, so dev on
+   * `localhost:3000` + `:3001` (or two apps under one domain via path routing) collide on
+   * the same cookie. Set a distinct slug per app (`[A-Za-z0-9._-]`):
+   * `name: 'admin'` → `__Host-lukk-admin-session` (Secure) / `lukk-admin-session` (dev http).
+   * Unset keeps the default `__Host-lukk-session` / `lukk-session`.
+   *
+   * This is de-confliction for co-hosted apps, NOT a trust boundary: apps sharing an origin
+   * (same host + path routing, or `localhost` across ports) share one cookie jar. Put distinct-
+   * trust apps on separate subdomains — where `__Host-` + the host-level Origin check give real
+   * isolation — and give each app a distinct strong `session.password`; the seal password, not the
+   * name, is the isolation boundary.
    */
-  session: { password: string, cookieSecure?: boolean }
+  session: { password: string, cookieSecure?: boolean, name?: string }
   /**
    * BFF only, optional: proxy your own app API so it's authenticated out of the
    * box. Requests to `${path}/**` are forwarded to the FIXED `target` (your
@@ -128,6 +141,11 @@ export default defineNuxtModule<ModuleOptions>({
       console.warn('[lukk-nuxt] The app-API proxy needs BOTH `api.path` and `api.target` — it was not registered.')
     }
 
+    // A `session.name` with cookie-name separators (`;`, `=`, whitespace, …) would break the cookie.
+    if (options.mode === 'bff' && options.session.name && !/^[a-z0-9._-]+$/i.test(options.session.name)) {
+      console.warn(`[lukk-nuxt] session.name "${options.session.name}" should be a simple slug ([A-Za-z0-9._-]); other characters can break the session cookie.`)
+    }
+
     // Client-visible config. In BFF mode the browser talks only to our own Nitro
     // proxy, so the lukk URL is NOT exposed to the client.
     nuxt.options.runtimeConfig.public.lukk = defu(nuxt.options.runtimeConfig.public.lukk,
@@ -160,6 +178,10 @@ export default defineNuxtModule<ModuleOptions>({
         storage: options.storage,
         sessionPassword: options.session.password,
         cookieSecure,
+        // Per-app namespace (data only). The full cookie NAME is derived at each runtime site from
+        // this + the runtime `cookieSecure`, so the `__Host-` prefix and the Secure attribute always
+        // come from ONE source and can't diverge under an independent runtime-config override.
+        cookieNamespace: options.session.name,
         apiPath,
         apiTarget: options.api.target,
         apiForceJson: options.api.forceJson,

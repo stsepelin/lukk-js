@@ -27,10 +27,12 @@ describe('getLukkAccessToken / useLukkSession', () => {
     expect(await useLukkSession(e)).toEqual({ access: 'tok' })
   })
 
-  it('reads the relaxed `lukk-session` cookie name when cookieSecure is off (dev over http)', async () => {
-    __test.runtimeConfig.lukk = { sessionPassword: 'p'.repeat(32), cookieSecure: false } as unknown as Record<string, unknown>
-    const e = { cookies: { 'lukk-session': JSON.stringify({ access: 'devtok' }) } }
-    expect(await getLukkAccessToken(e)).toBe('devtok')
+  it('reads exactly the app\'s resolved cookie name (relaxed + namespaced), ignoring another app\'s', async () => {
+    // Name derived from cookieSecure (false → relaxed) + the namespace: `lukk-admin-session`.
+    __test.runtimeConfig.lukk = { sessionPassword: 'p'.repeat(32), cookieSecure: false, cookieNamespace: 'admin' } as unknown as Record<string, unknown>
+    expect(await getLukkAccessToken({ cookies: { 'lukk-admin-session': JSON.stringify({ access: 'devtok' }) } })).toBe('devtok')
+    // A co-hosted app's default-named cookie is not read — no cross-app session bleed.
+    expect(await getLukkAccessToken({ cookies: { '__Host-lukk-session': JSON.stringify({ access: 'other' }) } })).toBeNull()
   })
 
   it('returns null when there is no session cookie (unauthenticated)', async () => {

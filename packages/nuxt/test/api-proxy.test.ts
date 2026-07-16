@@ -190,6 +190,17 @@ describe('app-API proxy', () => {
     expect(e.node.res.getHeader('set-cookie')).toEqual(['locale=en'])
   })
 
+  it('never forwards ANY lukk session cookie — its own OR a co-hosted app\'s — even if allow-listed', async () => {
+    ;(__test.runtimeConfig.lukk as Record<string, unknown>).cookieNamespace = 'admin' // → __Host-lukk-admin-session
+    ;(__test.runtimeConfig.lukk as Record<string, unknown>).apiForwardSetCookie = ['__Host-lukk-admin-session', '__Host-lukk-session', 'locale']
+    upstreamSetCookie = ['__Host-lukk-admin-session=EVIL; Path=/', '__Host-lukk-session=OTHER; Path=/', 'locale=en']
+    const e = ev({ path: '/api/me' })
+    await run(e)
+    // Both this app's namespaced session cookie AND a co-hosted app's default-named one are dropped —
+    // no lukk session cookie is ever forwardable, whatever the allow-list says. Only `locale` survives.
+    expect(e.node.res.getHeader('set-cookie')).toEqual(['locale=en'])
+  })
+
   it('carries the rotated session cookie AND allow-listed upstream cookies together', async () => {
     sessionData = { access: expiredJwt(), refresh: 'r' }
     refreshOnce.mockResolvedValue({ access: 'new-tok', refresh: 'r2' })

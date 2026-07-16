@@ -1,6 +1,6 @@
 import { defineEventHandler, getRequestHeader, getRequestIP, proxyRequest, setResponseStatus, useSession } from 'h3'
 import { useRuntimeConfig } from '#imports'
-import { LUKK_BFF_PREFIX, sessionCookieName } from '../shared'
+import { LUKK_BFF_PREFIX, isSessionCookieName, sessionCookieName } from '../shared'
 import { accessExpired } from './access-token'
 import { isForeignOrigin, resolveTarget } from './proxy-utils'
 import { readSealedSession } from './sealed-session'
@@ -30,7 +30,7 @@ const SPOOFABLE_FORWARDING = {
  * docs/transport-modes.md.
  */
 export default defineEventHandler(async (event) => {
-  const { apiPath, apiTarget, apiForceJson, baseURL, sessionPassword, apiForwardSetCookie, cookieSecure } = useRuntimeConfig(event).lukk as {
+  const { apiPath, apiTarget, apiForceJson, baseURL, sessionPassword, apiForwardSetCookie, cookieSecure, cookieNamespace } = useRuntimeConfig(event).lukk as {
     apiPath: string
     apiTarget: string
     apiForceJson: boolean
@@ -38,11 +38,13 @@ export default defineEventHandler(async (event) => {
     sessionPassword: string
     apiForwardSetCookie?: string[]
     cookieSecure?: boolean
+    cookieNamespace?: string
   }
   const forwardSetCookie = apiForwardSetCookie ?? []
-  // Secure/`__Host-` in prod + dev-https, relaxed for dev-http (see module cookieSecure).
+  // Secure/`__Host-` in prod + dev-https, relaxed for dev-http (see module cookieSecure); the name's
+  // prefix and the Secure attribute both derive from this one `secure` — they can't diverge.
   const secure = cookieSecure !== false
-  const sessionName = sessionCookieName(secure)
+  const sessionName = sessionCookieName(secure, cookieNamespace)
 
   if (isForeignOrigin(event)) {
     setResponseStatus(event, 403)
@@ -129,12 +131,13 @@ export default defineEventHandler(async (event) => {
       const upstream = toCookieArray(ev.node.res.getHeader('set-cookie'))
       ev.node.res.removeHeader('set-cookie')
       const keep = toCookieArray(sessionCookie) // the rotated session cookie (if any)
-      // Opt-in passthrough: forward only allow-listed names — and NEVER the sealed session
-      // cookie, whatever the list says (an upstream must not be able to overwrite it).
+      // Opt-in passthrough: forward only allow-listed names — and NEVER a lukk sealed session
+      // cookie (this app's OR a co-hosted app's, whatever the list says); an upstream must not be
+      // able to set/overwrite any lukk session.
       if (forwardSetCookie.length) {
         for (const cookie of upstream) {
           const name = cookieName(cookie)
-          if (name !== sessionName && forwardSetCookie.includes(name)) keep.push(cookie)
+          if (!isSessionCookieName(name) && forwardSetCookie.includes(name)) keep.push(cookie)
         }
       }
       if (keep.length) ev.node.res.setHeader('set-cookie', keep)

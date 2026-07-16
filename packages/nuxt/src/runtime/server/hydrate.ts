@@ -10,6 +10,7 @@ import { refreshOnce, type TokenSession } from './utils/refresh'
 interface LukkServerConfig {
   sessionPassword?: string
   cookieSecure?: boolean
+  cookieNamespace?: string
   baseURL?: string
 }
 
@@ -39,9 +40,9 @@ interface LukkServerConfig {
  * unrefreshable, or failed/revoked refresh; the caller then defers to the client-side restore.
  */
 export async function resolveHydrationAccess(event: H3Event): Promise<string | null> {
-  const { sessionPassword, cookieSecure, baseURL } = (useRuntimeConfig(event).lukk ?? {}) as LukkServerConfig
+  const { sessionPassword, cookieSecure, cookieNamespace, baseURL } = (useRuntimeConfig(event).lukk ?? {}) as LukkServerConfig
   const secure = cookieSecure !== false
-  const name = sessionCookieName(secure)
+  const name = sessionCookieName(secure, cookieNamespace)
 
   // A truthy access proves `sessionPassword` was present: readSealed only returns data when it
   // unseals, and returns {} without a password — so the rotate path can assert `sessionPassword!`
