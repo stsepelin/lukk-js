@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { __test } from './mocks/imports'
 
-// Track read-write session opens so a test can assert the read-only path never mints a cookie.
-const h3state = vi.hoisted(() => ({ useSessionCalls: 0 }))
+// Track read-write session opens so a test can assert the read-only path never mints a cookie,
+// plus the cookie name the writer opens the session under (to verify the per-app namespace).
+const h3state = vi.hoisted(() => ({ useSessionCalls: 0, lastSessionName: undefined as string | undefined }))
 vi.mock('h3', () => ({
   defineEventHandler: (fn: unknown) => fn,
   getRequestHeader: (event: { headers: Record<string, string> }, name: string) => event.headers[name],
@@ -16,7 +17,7 @@ vi.mock('h3', () => ({
   },
   readRawBody: async (event: { body?: string }) => event.body,
   setResponseStatus: (event: { status: number }, status: number) => { event.status = status },
-  useSession: async (event: { __session: unknown }) => { h3state.useSessionCalls++; return event.__session },
+  useSession: async (event: { __session: unknown }, config: { name?: string }) => { h3state.useSessionCalls++; h3state.lastSessionName = config?.name; return event.__session },
 }))
 
 // eslint-disable-next-line import/first
@@ -51,6 +52,7 @@ beforeEach(() => {
   __test.runtimeConfig.lukk = { baseURL: 'https://lukk/auth', sessionPassword: 'p'.repeat(32) } as unknown as Record<string, unknown>
   ;(__test.runtimeConfig as Record<string, unknown>).public = { lukk: {} }
   h3state.useSessionCalls = 0
+  h3state.lastSessionName = undefined
 })
 afterEach(() => { __test.reset(); vi.restoreAllMocks() })
 
@@ -73,6 +75,15 @@ describe('BFF proxy', () => {
     mockFetch().fetch = vi.fn().mockResolvedValue(jsonRes({ access_token: 'a', expires_in: 900 }))
     await run(makeEvent({ path: '/api/_lukk/login', method: 'POST', headers: sameOrigin, session }))
     expect(session.update).toHaveBeenCalledWith({ access: 'a', refresh: 'existing' })
+  })
+
+  it('writes the sealed session under the per-app namespaced cookie name', async () => {
+    ;(__test.runtimeConfig.lukk as Record<string, unknown>).cookieNamespace = 'admin' // → __Host-lukk-admin-session
+    const session = makeSession()
+    mockFetch().fetch = vi.fn().mockResolvedValue(jsonRes({ access_token: 'a', refresh_token: 'r', expires_in: 900 }))
+    await run(makeEvent({ path: '/api/_lukk/login', method: 'POST', headers: sameOrigin, session }))
+    // The writer opens the session under the namespaced name, so a co-hosted app can't clobber it.
+    expect(h3state.lastSessionName).toBe('__Host-lukk-admin-session')
   })
 
   it('attaches the session access + confirmation tokens, ignoring any browser-sent confirmation', async () => {

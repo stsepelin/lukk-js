@@ -134,7 +134,9 @@ describe('resolveHydrationAccess', () => {
     expect(event.node.req.headers.cookie).toBe('__Host-lukk-session=FRESH_SEAL')
   })
 
-  it('uses the relaxed cookie name + non-Secure session in http dev (cookieSecure: false)', async () => {
+  it('uses the module-resolved name + non-Secure session in http dev (relaxed lukk-session)', async () => {
+    // In dev http (cookieSecure:false) the name derives to the relaxed `lukk-session` and the reseal
+    // keeps Secure off on the cookie it writes — prefix and attribute from the one `secure`.
     configure({ cookieSecure: false })
     unsealResult = { data: { access: expiredJwt(), refresh: 'r' } }
     refreshOnce.mockResolvedValue({ access: 'NEW', refresh: 'r2' })
@@ -148,6 +150,21 @@ describe('resolveHydrationAccess', () => {
     }))
     expect(sealSession).toHaveBeenCalledWith(event, { password: 'p'.repeat(32), name: 'lukk-session' })
     expect(event.node.req.headers.cookie).toBe('lukk-session=FRESH_SEAL')
+  })
+
+  it('reseals under a per-app namespaced cookie name, ignoring a co-hosted app\'s cookie', async () => {
+    configure({ cookieNamespace: 'admin' }) // → __Host-lukk-admin-session
+    unsealResult = { data: { access: expiredJwt(), refresh: 'r' } }
+    refreshOnce.mockResolvedValue({ access: 'NEW', refresh: 'r2' })
+    // A co-hosted app's default-named cookie rides along in the header; it must be preserved,
+    // and only THIS app's namespaced cookie swapped for the fresh seal.
+    const event = ev('__Host-lukk-session=OTHERAPP; __Host-lukk-admin-session=STALE')
+
+    await resolveHydrationAccess(event)
+
+    expect(useSession).toHaveBeenCalledWith(event, expect.objectContaining({ name: '__Host-lukk-admin-session' }))
+    expect(sealSession).toHaveBeenCalledWith(event, { password: 'p'.repeat(32), name: '__Host-lukk-admin-session' })
+    expect(event.node.req.headers.cookie).toBe('__Host-lukk-session=OTHERAPP; __Host-lukk-admin-session=FRESH_SEAL')
   })
 
   it('returns null (defers to the client) when the refresh fails or the session was revoked', async () => {

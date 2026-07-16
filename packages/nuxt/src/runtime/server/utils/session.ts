@@ -20,8 +20,8 @@ export async function useLukkSession(event: H3Event): Promise<{ access: string |
 
 /** The current user's lukk access token from the sealed BFF session, or null. */
 export async function getLukkAccessToken(event: H3Event): Promise<string | null> {
-  const { sessionPassword, cookieSecure } = useRuntimeConfig(event).lukk as { sessionPassword?: string, cookieSecure?: boolean }
-  const name = sessionCookieName(cookieSecure !== false)
+  const { sessionPassword, cookieSecure, cookieNamespace } = useRuntimeConfig(event).lukk as { sessionPassword?: string, cookieSecure?: boolean, cookieNamespace?: string }
+  const name = sessionCookieName(cookieSecure !== false, cookieNamespace)
   const { access } = await readSealedSession(event, sessionPassword, name)
   return typeof access === 'string' ? access : null
 }

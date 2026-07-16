@@ -58,6 +58,30 @@ describe('lukk-nuxt module', () => {
     expect((nuxt.options.runtimeConfig.lukk as { cookieSecure: boolean }).cookieSecure).toBe(false)
   })
 
+  it('passes session.name through as cookieNamespace (the cookie name is derived per-request from it + cookieSecure)', () => {
+    // The full name is resolved at each runtime site (see shared/bff/hydrate tests) so its `__Host-`
+    // prefix stays coupled to the runtime cookieSecure; the module only forwards the namespace.
+    const unset = setup({ baseURL: 'https://api/auth', mode: 'bff' })
+    expect((unset.options.runtimeConfig.lukk as { cookieNamespace?: string }).cookieNamespace).toBeUndefined()
+    const named = setup({ baseURL: 'https://api/auth', mode: 'bff', session: { password: 'x'.repeat(32), name: 'admin' } })
+    expect((named.options.runtimeConfig.lukk as { cookieNamespace?: string }).cookieNamespace).toBe('admin')
+  })
+
+  it('warns on a session.name that is not a cookie-safe slug, but not on a valid one / when unset', () => {
+    const warned = (name: string | undefined) => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      setup({ baseURL: 'https://api/auth', mode: 'bff', session: { password: 'x'.repeat(32), name } })
+      const hit = warn.mock.calls.some(c => String(c[0]).includes('session.name'))
+      warn.mockRestore()
+      return hit
+    }
+    expect(warned('admin')).toBe(false) // valid slug
+    expect(warned('admin.app')).toBe(false) // '.' is a valid cookie-name char
+    expect(warned('a b')).toBe(true) // whitespace breaks the cookie name
+    expect(warned('a;b')).toBe(true) // ';' is a cookie separator
+    expect(warned(undefined)).toBe(false) // unset → no warning
+  })
+
   it('skips the proxy and exposes the URL + user endpoint in direct mode', () => {
     const nuxt = setup({ baseURL: 'https://api/auth', mode: 'direct', user: { endpoint: '/me' } })
     expect(kit.addServerHandler).not.toHaveBeenCalled()
