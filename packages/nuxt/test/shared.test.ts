@@ -1,5 +1,43 @@
 import { describe, expect, it } from 'vitest'
-import { isSessionCookieName, LUKK_SESSION_COOKIE, sessionCookieName } from '../src/runtime/shared'
+import { isResolvableBase, isSessionCookieName, LUKK_SESSION_COOKIE, redactCredentials, sessionCookieName } from '../src/runtime/shared'
+
+describe('redactCredentials', () => {
+  it('masks userinfo, matching the URL parser at the LAST @ before the path', () => {
+    expect(redactCredentials('https://user:hunter2@api.example.com/auth')).toBe('https://***@api.example.com/auth')
+    // A `@` inside the password is legal; stopping at the first one would leak the rest of it.
+    expect(redactCredentials('https://u:p@ss@api.example.com/auth')).toBe('https://***@api.example.com/auth')
+    expect(redactCredentials('https://u:p@ss@api.example.com/auth')).not.toContain('ss@api')
+  })
+
+  it('leaves a credential-free base untouched', () => {
+    expect(redactCredentials('https://api.example.com/auth')).toBe('https://api.example.com/auth')
+    expect(redactCredentials('undefined/auth')).toBe('undefined/auth')
+  })
+})
+
+describe('isResolvableBase', () => {
+  it('accepts an absolute http(s) URL, with or without a path', () => {
+    expect(isResolvableBase('https://api.example.com/auth')).toBe(true)
+    expect(isResolvableBase('http://localhost:3000')).toBe(true)
+  })
+
+  it('rejects the "undefined/..." shape of an unset build-time env var', () => {
+    expect(isResolvableBase('undefined/admin/auth')).toBe(false)
+  })
+
+  it('rejects a relative path — the server has nothing to resolve it against', () => {
+    expect(isResolvableBase('/auth')).toBe(false)
+    expect(isResolvableBase('')).toBe(false)
+  })
+
+  it('rejects a base missing its scheme, even though `new URL` parses it', () => {
+    // `new URL('localhost:3000/auth')` SUCCEEDS — scheme `localhost:`, null origin — so it's the
+    // scheme check, not the parse, that catches a base which forgot its `https://`.
+    expect(() => new URL('localhost:3000/auth')).not.toThrow()
+    expect(isResolvableBase('localhost:3000/auth')).toBe(false)
+    expect(isResolvableBase('ftp://files.example.com')).toBe(false)
+  })
+})
 
 describe('sessionCookieName', () => {
   it('uses the hardened __Host- name when the cookie is Secure', () => {

@@ -261,11 +261,13 @@ describe('BFF proxy', () => {
   })
 
   // --- path containment (SSRF / traversal) ---
-  it('rejects a path that escapes the lukk base (traversal)', async () => {
+  it('rejects a path that escapes the lukk base (traversal), with the generic invalid-path 400', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
     const session = makeSession({ access: 'tok' })
     mockFetch().fetch = vi.fn()
     const event = makeEvent({ path: '/api/_lukk/../../admin', session })
-    await run(event)
+    // A genuine escape must stay generic — only the config fault gets the descriptive message.
+    expect(await run(event)).toEqual({ message: 'Invalid path.' })
     expect(event.status).toBe(400)
     expect(mockFetch().fetch).not.toHaveBeenCalled()
   })
@@ -288,13 +290,21 @@ describe('BFF proxy', () => {
     expect(mockFetch().fetch).not.toHaveBeenCalled()
   })
 
-  it('rejects when the configured base URL is invalid', async () => {
-    __test.runtimeConfig.lukk = { baseURL: 'not-a-url', sessionPassword: 'p'.repeat(32) } as unknown as Record<string, unknown>
-    const session = makeSession({ access: 'tok' })
+  it('reports a misconfigured baseURL as a config fault, NOT as "Invalid path."', async () => {
+    // Regression (the production incident): a baked-in "undefined/auth" answered `Invalid path.`,
+    // which sent operators hunting a client/backend route mismatch that didn't exist. The path was
+    // fine — the baseURL wasn't. The offending value is logged server-side, never returned.
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    __test.runtimeConfig.lukk = { baseURL: 'undefined/auth', sessionPassword: 'p'.repeat(32) } as unknown as Record<string, unknown>
     mockFetch().fetch = vi.fn()
-    const event = makeEvent({ path: '/api/_lukk/x', session })
-    await run(event)
-    expect(event.status).toBe(400)
+
+    const event = makeEvent({ path: '/api/_lukk/forgot-password', session: makeSession() })
+    const body = await run(event) as { message: string }
+
+    expect(event.status).toBe(500) // a deployment fault, so it must page someone — not a 4xx
+    expect(body.message).toContain('Proxy target could not be resolved')
+    expect(body.message).not.toBe('Invalid path.')
+    expect(String(error.mock.calls[0]![0])).toContain('undefined/auth')
     expect(mockFetch().fetch).not.toHaveBeenCalled()
   })
 
