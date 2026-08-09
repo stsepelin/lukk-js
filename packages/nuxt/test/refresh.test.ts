@@ -19,4 +19,20 @@ describe('refreshOnce with an unusable baseURL', () => {
     expect(fetchSpy).not.toHaveBeenCalled()
     expect(String(error.mock.calls[0]![0])).toContain('undefined/auth')
   })
+
+  it('masks credentials and reports once per value, like the proxy path', async () => {
+    // An UNUSABLE base can still carry credentials — this one fails on the port, not the userinfo —
+    // and this path runs per SSR render and per app-API request with an aged token, so logging the
+    // raw value on every attempt would spill credentials into server logs repeatedly.
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const base = `https://user:hunter2@api.example.com:99999/auth-${Math.random()}`
+
+    for (let i = 0; i < 4; i++) {
+      expect(await refreshOnce({ id: 'sid', data: { refresh: 'rt' } }, base)).toBeNull()
+    }
+
+    expect(error).toHaveBeenCalledOnce()
+    expect(String(error.mock.calls[0]![0])).not.toContain('hunter2')
+    expect(String(error.mock.calls[0]![0])).toContain('***@api.example.com')
+  })
 })

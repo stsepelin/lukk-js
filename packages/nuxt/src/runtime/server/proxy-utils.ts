@@ -54,6 +54,22 @@ export function resolveTarget(base: string, subpath: string): string | null {
  */
 /** Bases already reported, so a broken deploy logs once per value instead of once per request. */
 const reportedBases = new Set<string>()
+
+/**
+ * Report an unusable proxy base ONCE per value, with any `user:pass@` masked.
+ *
+ * Both are load-bearing. The base is fixed server config, so the message is identical on every
+ * request — logging per request lets a broken deploy (or an unauthenticated caller) drown the log.
+ * And an *unusable* base can still carry credentials: `https://u:pw@host:99999/auth` fails on the
+ * port and `ftp://u:pw@host/auth` on the scheme, so the raw value must never reach a log.
+ *
+ * Shared by every path that resolves an upstream URL, so they can't drift on either property.
+ */
+export function reportUnusableBase(label: string, base: string): void {
+  if (reportedBases.has(base)) return
+  reportedBases.add(base)
+  console.error(`[lukk] ${label} is not an absolute http(s) URL (got ${JSON.stringify(redactCredentials(base))}) — cannot resolve the upstream URL. Check the build-time environment variables for this deploy.`)
+}
 /** Cap on escape-rejection lines per process — an unauthenticated caller controls the rate. */
 const ESCAPE_LOG_LIMIT = 50
 let escapesLogged = 0
@@ -63,12 +79,7 @@ export function rejectUnresolvedTarget(event: H3Event, base: string, label: stri
     // A deployment fault, not a bad request — answer 5xx so uptime alerting, CDNs and health checks
     // treat a total auth outage as the server error it is, instead of filing it as client noise.
     setResponseStatus(event, 500)
-    // Fixed server config, so the message is identical on every request: log it once rather than
-    // once per request for as long as the deploy stays broken.
-    if (!reportedBases.has(base)) {
-      reportedBases.add(base)
-      console.error(`[lukk] ${label} is not an absolute http(s) URL (got ${JSON.stringify(redactCredentials(base))}) — cannot resolve the proxy target. Check the build-time environment variables for this deploy.`)
-    }
+    reportUnusableBase(label, base)
     return { message: 'Proxy target could not be resolved — check the lukk baseURL configuration.' }
   }
   setResponseStatus(event, 400)

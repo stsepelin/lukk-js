@@ -1,4 +1,4 @@
-import { resolveTarget } from '../proxy-utils'
+import { reportUnusableBase, resolveTarget } from '../proxy-utils'
 
 export interface TokenSession {
   access?: string
@@ -25,11 +25,14 @@ export function refreshOnce(session: { id?: string, data: TokenSession }, baseUR
 }
 
 async function rawRefresh(refreshToken: string, baseURL: string): Promise<TokenSession | null> {
+  // `/refresh` is a fixed literal that cannot escape, so a null here means only one thing: an
+  // unusable `baseURL` (the module rejects one at build; reachable via a post-build runtime
+  // override). Treat it as "not refreshable" rather than fetching `null` and throwing something
+  // unreadable — and report it through the shared reporter, which masks credentials and logs once
+  // per value, since this path runs per SSR render and per app-API request with an aged token.
   const target = resolveTarget(baseURL, '/refresh')
-  // Unusable `baseURL` (the module rejects one at build; reachable only via a runtime override).
-  // Treat as "not refreshable" rather than fetching `null` and throwing something unreadable.
   if (!target) {
-    console.error(`[lukk] Cannot refresh: lukk \`baseURL\` is not an absolute http(s) URL (got ${JSON.stringify(baseURL)}).`)
+    reportUnusableBase('lukk `baseURL`', baseURL)
     return null
   }
   const res = await fetch(target, {
