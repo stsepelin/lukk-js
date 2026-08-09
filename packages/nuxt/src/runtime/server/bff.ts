@@ -3,7 +3,7 @@ import { isTokenPair } from 'lukk-core'
 import { defineEventHandler, getCookie, getRequestHeader, readRawBody, setResponseStatus, useSession } from 'h3'
 import { useRuntimeConfig } from '#imports'
 import { LUKK_BFF_PREFIX, sessionCookieName } from '../shared'
-import { isForeignOrigin, resolveTarget } from './proxy-utils'
+import { isForeignOrigin, rejectUnresolvedTarget, resolveTarget } from './proxy-utils'
 import { readSealedSession } from './sealed-session'
 import { warnIfSessionTooLarge } from './session-size'
 import { refreshOnce, type TokenSession } from './utils/refresh'
@@ -47,10 +47,7 @@ export default defineEventHandler(async (event) => {
   // Resolve + contain the upstream URL to same-origin-under-base (defeats traversal / authority-smuggling).
   const subpath = event.path.slice(LUKK_BFF_PREFIX.length).split('?')[0] || '/'
   const target = resolveTarget(baseURL, subpath)
-  if (!target) {
-    setResponseStatus(event, 400)
-    return { message: 'Invalid path.' }
-  }
+  if (!target) return rejectUnresolvedTarget(event, baseURL, 'lukk `baseURL`', subpath)
 
   const rawBody = method === 'GET' || method === 'HEAD' ? undefined : await readRawBody(event)
 

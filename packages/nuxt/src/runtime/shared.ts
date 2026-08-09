@@ -4,6 +4,36 @@
 export const LUKK_BFF_PREFIX = '/api/_lukk'
 
 /**
+ * Whether a proxy base (`baseURL`, `api.target`) is one the SERVER can actually resolve and
+ * fetch: absolute, with an http(s) scheme. Shared by the module's build-time validation and
+ * `resolveTarget`, so "accepted at build" and "resolvable at request time" can't drift.
+ *
+ * The scheme check is not redundant: `new URL('localhost:3000/auth')` SUCCEEDS, parsing
+ * `localhost:` as the scheme with a null origin — so a base that merely forgot its `https://`
+ * passes a bare `new URL()` and then fails deep in the proxy.
+ */
+export function isResolvableBase(base: string): boolean {
+  try {
+    const { protocol } = new URL(base)
+    return protocol === 'http:' || protocol === 'https:'
+  }
+  catch {
+    return false
+  }
+}
+
+/**
+ * Mask any `user:pass@` in a base before it reaches a log. These messages surface in CI build logs
+ * (often publicly readable), in the `nuxt dev` error overlay, and in server logs.
+ *
+ * The match is greedy up to the LAST `@` before the path, matching how the URL parser splits
+ * userinfo — stopping at the first would leave a password fragment behind for `//u:p@ss@host/`.
+ */
+export function redactCredentials(value: string): string {
+  return value.replace(/\/\/[^/\s]*@/, '//***@')
+}
+
+/**
  * The default sealed server-side token session cookie name (BFF mode, Secure, no namespace).
  * The `__Host-` prefix makes the browser enforce its hardening (Secure, Path=/, no Domain),
  * which requires HTTPS — so it's the name used whenever the cookie is Secure and no per-app

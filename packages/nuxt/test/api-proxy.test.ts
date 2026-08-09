@@ -344,9 +344,26 @@ describe('app-API proxy', () => {
 
   it('rejects a path that escapes the fixed target (SSRF / traversal)', async () => {
     __test.runtimeConfig.lukk = { ...__test.runtimeConfig.lukk, apiTarget: 'https://laravel.test/v1' } as unknown as Record<string, unknown>
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const e = ev({ path: '/api/../../etc/passwd' })
-    await run(e)
+    const body = await run(e) as { message: string }
     expect(e.status).toBe(400)
+    expect(body).toEqual({ message: 'Invalid path.' })
     expect(proxyRequest).not.toHaveBeenCalled()
+    warn.mockRestore()
+  })
+
+  it('reports a misconfigured api.target as a config fault, not as "Invalid path."', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    __test.runtimeConfig.lukk = { ...__test.runtimeConfig.lukk, apiTarget: 'undefined/api' } as unknown as Record<string, unknown>
+
+    const e = ev({ path: '/api/me' })
+    const body = await run(e) as { message: string }
+
+    expect(e.status).toBe(500) // a deployment fault, so it must page someone — not a 4xx
+    expect(body.message).toContain('Proxy target could not be resolved')
+    expect(String(error.mock.calls[0]![0])).toContain('undefined/api')
+    expect(proxyRequest).not.toHaveBeenCalled()
+    error.mockRestore()
   })
 })

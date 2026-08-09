@@ -25,7 +25,13 @@ export function refreshOnce(session: { id?: string, data: TokenSession }, baseUR
 }
 
 async function rawRefresh(refreshToken: string, baseURL: string): Promise<TokenSession | null> {
-  const target = resolveTarget(baseURL, '/refresh')!
+  const target = resolveTarget(baseURL, '/refresh')
+  // Unusable `baseURL` (the module rejects one at build; reachable only via a runtime override).
+  // Treat as "not refreshable" rather than fetching `null` and throwing something unreadable.
+  if (!target) {
+    console.error(`[lukk] Cannot refresh: lukk \`baseURL\` is not an absolute http(s) URL (got ${JSON.stringify(baseURL)}).`)
+    return null
+  }
   const res = await fetch(target, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },

@@ -2,7 +2,7 @@ import { defineEventHandler, getRequestHeader, getRequestIP, proxyRequest, setRe
 import { useRuntimeConfig } from '#imports'
 import { LUKK_BFF_PREFIX, isSessionCookieName, sessionCookieName } from '../shared'
 import { accessExpired } from './access-token'
-import { isForeignOrigin, resolveTarget } from './proxy-utils'
+import { isForeignOrigin, rejectUnresolvedTarget, resolveTarget } from './proxy-utils'
 import { readSealedSession } from './sealed-session'
 import { refreshOnce, type TokenSession } from './utils/refresh'
 
@@ -68,11 +68,9 @@ export default defineEventHandler(async (event) => {
   }
 
   // Subpath after the mount, contained to the fixed target by `resolveTarget`.
-  const base = resolveTarget(apiTarget, path.slice(apiPath.length) || '/')
-  if (!base) {
-    setResponseStatus(event, 400)
-    return { message: 'Invalid path.' }
-  }
+  const subpath = path.slice(apiPath.length) || '/'
+  const base = resolveTarget(apiTarget, subpath)
+  if (!base) return rejectUnresolvedTarget(event, apiTarget, 'lukk `api.target`', subpath)
 
   // Read the sealed session READ-ONLY first (never minting or sliding a cookie — h3's
   // useSession would re-seal a fresh *empty* session for an expired/tampered seal,

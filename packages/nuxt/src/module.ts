@@ -9,14 +9,77 @@ import {
 } from '@nuxt/kit'
 import { defu } from 'defu'
 import type { LukkMode } from 'lukk-core'
-import { LUKK_BFF_PREFIX } from './runtime/shared'
+import { LUKK_BFF_PREFIX, isResolvableBase, redactCredentials } from './runtime/shared'
 
 export { LUKK_BFF_PREFIX, LUKK_SESSION_COOKIE } from './runtime/shared'
 
-/** The origin of an absolute URL (drops any path, e.g. lukk's `/auth` prefix). */
+/**
+ * The origin of an absolute URL (drops any path, e.g. lukk's `/auth` prefix). A validated
+ * root-relative base (direct mode) has no origin to take — the app's own is `''` for a
+ * same-origin fetch, and returning the path verbatim would aim the app API at lukk's prefix.
+ */
 function originOf(url: string): string {
   try { return new URL(url).origin }
-  catch { return url }
+  catch { return '' }
+}
+
+/** A same-origin base the BROWSER resolves against the page (`direct` mode only). */
+function isRootRelative(value: string): boolean {
+  return value.startsWith('/') && !value.startsWith('//')
+}
+
+/** Whether a URL points at this machine — a dev value that shouldn't reach a production build. */
+function isLoopback(url: string): boolean {
+  try {
+    // `URL.hostname` keeps IPv6 brackets and lowercases, so `[::1]` is the form that ever matches.
+    const { hostname } = new URL(url)
+    return hostname === 'localhost' || hostname.endsWith('.localhost')
+      || /^127\./.test(hostname) || hostname === '[::1]' || hostname === '0.0.0.0'
+  }
+  catch {
+    return false
+  }
+}
+
+/** A base whose query/fragment would swallow the request path (`/auth?x=1` + `/login`). */
+function carriesQueryOrFragment(url: string): boolean {
+  try {
+    const { search, hash } = new URL(url)
+    return !!search || !!hash
+  }
+  catch {
+    return false
+  }
+}
+
+/**
+ * Fail the BUILD on a base URL that could never work, instead of letting it surface as an opaque
+ * request-time `400` (which reads as a routing bug, not a config one). The classic fault is an
+ * unset build-time env var interpolating into a template string as `"undefined/auth"` — a
+ * non-empty string, so a falsiness check misses it, and it's baked into the bundle, so it's
+ * knowable here. See `isResolvableBase` for why a bare `new URL()` isn't enough.
+ *
+ * `relativeOk` covers the browser-resolved bases (`direct` mode), where a root-relative `/auth`
+ * is a legitimate same-origin setup. A server-fetched base has no valid relative form.
+ */
+function baseError(value: string, label: string, relativeOk: boolean): string | null {
+  if (!isResolvableBase(value) && !(relativeOk && isRootRelative(value))) {
+    return `[lukk-nuxt] ${label} "${redactCredentials(value)}" is not a valid absolute URL. It must start with http:// or https://`
+      + `${relativeOk ? ', or be a root-relative path like "/auth"' : ''}. `
+      + 'A common cause is an unset build-time env var interpolating as "undefined" '
+      + '(e.g. `${process.env.API_URL}/auth`). If you build once and supply the URL per environment, '
+      + 'leave it empty and set NUXT_LUKK_BASE_URL at runtime instead.'
+  }
+  // The request path is appended to the base, so a query/fragment absorbs it: `/auth?t=1` + `/login`
+  // resolves to `/auth?t=1/login`, meaning every route silently hits the same upstream endpoint —
+  // including `/logout`, which would clear the local session while the token family stays live.
+  // Unlike a loopback base, this has no legitimate use, so it's an error rather than a warning.
+  if (carriesQueryOrFragment(value)) {
+    return `[lukk-nuxt] ${label} "${redactCredentials(value)}" carries a query or fragment. `
+      + 'The request path is appended after it, so every call would resolve to the wrong URL. '
+      + 'Use only the scheme, host and path.'
+  }
+  return null
 }
 
 export interface ModuleOptions {
@@ -126,10 +189,6 @@ export default defineNuxtModule<ModuleOptions>({
     // Normalize the app-proxy mount once (a trailing slash would make `/api//**`).
     const apiPath = options.api.path.replace(/\/$/, '')
 
-    if (!options.baseURL) {
-      console.warn('[lukk-nuxt] `baseURL` is not set — point it at your lukk auth URL.')
-    }
-
     // BFF mode seals tokens with this secret; fail loudly at build, not per-request.
     if (options.mode === 'bff' && !options.session.password && !process.env.NUXT_LUKK_SESSION_PASSWORD) {
       console.warn('[lukk-nuxt] BFF mode needs a session secret (≥ 32 chars) — set `session.password` or NUXT_LUKK_SESSION_PASSWORD.')
@@ -188,6 +247,60 @@ export default defineNuxtModule<ModuleOptions>({
         apiForwardSetCookie: options.api.forwardSetCookie,
       },
     )
+
+    // Validate the EFFECTIVE config, after the merges above — a consumer can set `runtimeConfig`
+    // directly and defu gives that precedence, so checking only the module option would bless a
+    // value the app never uses. (A runtime `NUXT_*` env override still lands after the build;
+    // the proxies report that one honestly at request time.)
+    const serverLukk = nuxt.options.runtimeConfig.lukk as { baseURL: string, apiTarget: string }
+    const publicLukk = nuxt.options.runtimeConfig.public.lukk as { baseURL: string, apiBaseURL: string }
+    // Direct mode's base is browser-resolved (the public copy); BFF's is server-fetched.
+    const isDirect = options.mode === 'direct'
+    const effectiveBase = isDirect ? publicLukk.baseURL : serverLukk.baseURL
+
+    // `nuxt prepare` runs every module setup just to generate types — the Nuxt starters wire it into
+    // `postinstall`, and it legitimately runs before a deploy's secrets exist. Throwing there would
+    // make `pnpm install` fail on a fresh clone, so only a real build is fatal.
+    const fail = (message: string): void => {
+      if (nuxt.options._prepare) return console.error(message)
+      throw new Error(message)
+    }
+
+    if (!effectiveBase) {
+      console.warn('[lukk-nuxt] `baseURL` is not set — point it at your lukk auth URL.')
+    }
+    else {
+      const error = baseError(effectiveBase, '`baseURL`', isDirect)
+      if (error) fail(error)
+      // Legitimate for local prod-mode testing, but also the shape of a dev `.env` reaching a real
+      // deploy — where SSR then calls the server's own loopback. Only the operator can tell those
+      // apart, so warn rather than throw.
+      if (!nuxt.options.dev && isLoopback(effectiveBase)) {
+        console.warn(`[lukk-nuxt] \`baseURL\` points at ${originOf(effectiveBase)} in a production build — a dev value may have leaked into this deploy.`)
+      }
+    }
+
+    // BFF fetches `api.target` server-side through the same `resolveTarget` path as `baseURL`, so
+    // it fails identically. In direct mode it's the browser's app-API base instead, where a
+    // same-origin `/api` is legitimate — but `"undefined/api"` is just as broken.
+    const effectiveTarget = isDirect ? options.api.target : serverLukk.apiTarget
+    if (effectiveTarget && (isDirect || apiPath)) {
+      const error = baseError(effectiveTarget, '`api.target`', isDirect)
+      if (error) fail(error)
+    }
+
+    // `apiBaseURL` is what `useLukkFetch` scopes the bearer against (`isSameOrigin`), and it's
+    // written through defu — so a consumer setting it directly would otherwise bypass every check
+    // above and could aim credentialed requests (cookies + bearer) at another origin.
+    if (publicLukk.apiBaseURL) {
+      const error = baseError(publicLukk.apiBaseURL, '`api.target` (apiBaseURL)', true)
+      if (error) fail(error)
+    }
+
+    // BFF deliberately keeps the lukk URL server-side; an override would ship it in the SSR payload.
+    if (!isDirect && publicLukk.baseURL) {
+      console.warn('[lukk-nuxt] `runtimeConfig.public.lukk.baseURL` is set in bff mode — the lukk URL is meant to stay server-side and will be exposed to the browser.')
+    }
 
     // Auto-imported composables: useLukkAuth, useLukkTwoFactor, useLukkPasskeys, ...
     addImportsDir(resolver.resolve('./runtime/composables'))
