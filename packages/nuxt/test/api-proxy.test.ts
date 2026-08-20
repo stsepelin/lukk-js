@@ -70,7 +70,7 @@ function ev(o: { path: string, method?: string, headers?: Record<string, string>
     headers: o.headers ?? {},
     status: 200,
     ip: '203.0.113.7' as string | undefined,
-    node: { res: {
+    node: { req: { socket: { remoteAddress: '203.0.113.7' } }, res: {
       statusCode: 200,
       getHeader: vi.fn((k: string) => headers[k]),
       setHeader: vi.fn((k: string, v: unknown) => { headers[k] = v }),
@@ -113,6 +113,30 @@ describe('app-API proxy', () => {
         }),
       }),
     )
+  })
+
+  it('blanks the step-up confirmation header a client tried to smuggle through', async () => {
+    // Symmetric with `authorization`: in BFF mode the browser never legitimately holds a step-up
+    // token, so one arriving from the client must not reach the app API — where a consumer may gate
+    // routes on lukk's confirmation middleware. `bff.ts` is immune (it builds its headers from
+    // scratch); this proxy forwards unknown headers by default, so it has to blank this one.
+    ;(__test.runtimeConfig as Record<string, unknown>).public = { lukk: { confirmationHeader: 'X-Step-Up' } }
+    await run(ev({ path: '/api/me', headers: { 'x-step-up': 'forged-token' } }))
+    expect(proxyRequest.mock.calls[0]![2]!.headers!['x-step-up']).toBe('')
+  })
+
+  it('blanks the default confirmation header when public config carries none', async () => {
+    await run(ev({ path: '/api/me', headers: { 'x-lukk-confirmation': 'forged-token' } }))
+    expect(proxyRequest.mock.calls[0]![2]!.headers!['x-lukk-confirmation']).toBe('')
+  })
+
+  it('injects the SERVER-held step-up token, so a confirm-gated app route stays reachable', async () => {
+    // Blanking alone would have made an app-API route behind lukk's confirm middleware unreachable
+    // through this proxy — it only "worked" before via the header the browser set. Injecting from
+    // the sealed session is how the auth proxy has always done it.
+    sessionData = { access: 'tok', confirmation: 'server-ct' }
+    await run(ev({ path: '/api/me', headers: { 'x-lukk-confirmation': 'forged-token' } }))
+    expect(proxyRequest.mock.calls[0]![2]!.headers!['x-lukk-confirmation']).toBe('server-ct')
   })
 
   it('forwards the browser Accept when forceJson is disabled', async () => {
@@ -211,9 +235,40 @@ describe('app-API proxy', () => {
     expect(e.node.res.getHeader('set-cookie')).toEqual(['__Host-lukk-session=rotated', 'locale=en'])
   })
 
+  it('forwards the visitor IP from a trusted clientIpHeader, not the socket address', async () => {
+    // Behind nginx/Cloudflare the socket address is the PROXY, so an upstream keying `throttle:5,1`
+    // on `$request->ip()` throttles every visitor as one identity. Opting into a trusted header is
+    // what lets the API tell visitors apart.
+    ;(__test.runtimeConfig.lukk as Record<string, unknown>).clientIpHeader = 'cf-connecting-ip'
+    await run(ev({ path: '/api/me', headers: { 'cf-connecting-ip': '198.51.100.23' } }))
+    expect(proxyRequest).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({
+      headers: expect.objectContaining({ 'x-forwarded-for': '198.51.100.23' }),
+    }))
+  })
+
+  it('ignores a client-supplied x-forwarded-for even when a trusted header is configured', async () => {
+    ;(__test.runtimeConfig.lukk as Record<string, unknown>).clientIpHeader = 'cf-connecting-ip'
+    await run(ev({ path: '/api/me', headers: { 'x-forwarded-for': '1.2.3.4', 'cf-connecting-ip': '198.51.100.23' } }))
+    const { headers } = proxyRequest.mock.calls[0]![2]!
+    expect(headers!['x-forwarded-for']).toBe('198.51.100.23')
+    // The browser's own chain is replaced, never merged — so it can't prepend a forged identity.
+    expect(headers!['x-forwarded-for']).not.toContain('1.2.3.4')
+  })
+
+  it('falls back to the socket address when the trusted header is missing or malformed', async () => {
+    ;(__test.runtimeConfig.lukk as Record<string, unknown>).clientIpHeader = 'cf-connecting-ip'
+    await run(ev({ path: '/api/me', headers: { 'x-forwarded-for': '1.2.3.4' } }))
+    expect(proxyRequest.mock.calls[0]![2]!.headers!['x-forwarded-for']).toBe('203.0.113.7')
+    proxyRequest.mockClear()
+    await run(ev({ path: '/api/me', headers: { 'cf-connecting-ip': 'not-an-ip' } }))
+    expect(proxyRequest.mock.calls[0]![2]!.headers!['x-forwarded-for']).toBe('203.0.113.7')
+  })
+
   it('sets an empty XFF when the connection IP is unknown', async () => {
+    // The shape on every non-Node preset: the mock socket carries no address, so `clientIpHeader`
+    // is the only way the upstream ever learns the caller there.
     const e = ev({ path: '/api/x' })
-    e.ip = undefined
+    e.node.req.socket.remoteAddress = ''
     await run(e)
     expect(proxyRequest).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ headers: expect.objectContaining({ 'x-forwarded-for': '' }) }))
   })

@@ -13,7 +13,7 @@ let upstream: Server
 let auth: Server
 let proxy: Server
 let proxyURL = ''
-let received: { method?: string, contentType?: string, accept?: string, authorization?: string, body: Buffer } = { body: Buffer.alloc(0) }
+let received: { method?: string, contentType?: string, accept?: string, authorization?: string, xForwardedFor?: string, visitorCountry?: string, body: Buffer } = { body: Buffer.alloc(0) }
 let refreshCalls = 0
 
 const port = (s: Server) => (s.address() as { port: number }).port
@@ -43,7 +43,7 @@ beforeAll(async () => {
         res.end(JSON.stringify({ ok: true }))
         return
       }
-      received = { method: req.method, contentType: req.headers['content-type'], accept: req.headers.accept, authorization: req.headers.authorization, body: Buffer.concat(chunks) }
+      received = { method: req.method, contentType: req.headers['content-type'], accept: req.headers.accept, authorization: req.headers.authorization, xForwardedFor: req.headers['x-forwarded-for'] as string | undefined, visitorCountry: req.headers['x-visitor-country'] as string | undefined, body: Buffer.concat(chunks) }
       res.setHeader('content-type', 'application/json')
       res.end(JSON.stringify({ ok: true }))
     })
@@ -143,5 +143,44 @@ describe('api-proxy integration (real h3 + upstream)', () => {
     expect(res.headers.get('content-disposition')).toContain('attachment')
     expect(res.headers.get('cache-control')).toBe('private, no-store') // hardened by onResponse
     expect(Buffer.from(await res.arrayBuffer()).toString()).toBe('%PDF-1.4 binary') // binary intact
+  })
+
+  it('forwards an app-defined request header the proxy does not know about', async () => {
+    // Documented contract: request headers lukk doesn't explicitly strip or overwrite reach the
+    // upstream. Apps depend on this to carry per-visitor data a proxy hop would otherwise destroy
+    // (e.g. geo-IP copied off CF-* onto a prefix Cloudflare won't re-stamp). Pinned here so an
+    // allowlist refactor can't silently regress it into "wrong country, no error, tests green".
+    const res = await fetch(`${proxyURL}/api/me`, { headers: { 'x-visitor-country': 'EE' } })
+
+    expect(res.status).toBe(200)
+    expect(received.visitorCountry).toBe('EE')
+  })
+
+  it('forwards the socket address, not a client-supplied one, with no trusted header configured', async () => {
+    const res = await fetch(`${proxyURL}/api/me`, { headers: { 'x-forwarded-for': '1.2.3.4' } })
+
+    expect(res.status).toBe(200)
+    expect(received.xForwardedFor).toBe('127.0.0.1') // the loopback socket, not the forged value
+  })
+
+  it('forwards the VISITOR address end-to-end when a trusted clientIpHeader is configured', async () => {
+    // The reported defect: behind a reverse proxy the socket address is the proxy, so the upstream
+    // sees every visitor as one identity and `throttle:5,1` becomes 5/min globally. Verified the way
+    // the report measured it — by echoing the received header from a real upstream.
+    const cfg = __test.runtimeConfig.lukk as Record<string, unknown>
+    cfg.clientIpHeader = 'cf-connecting-ip'
+    try {
+      const res = await fetch(`${proxyURL}/api/me`, {
+        headers: { 'cf-connecting-ip': '198.51.100.23', 'x-forwarded-for': '1.2.3.4' },
+      })
+
+      expect(res.status).toBe(200)
+      expect(received.xForwardedFor).toBe('198.51.100.23')
+      // The client's own chain never leaks through, in either mode.
+      expect(received.xForwardedFor).not.toContain('1.2.3.4')
+    }
+    finally {
+      delete cfg.clientIpHeader
+    }
   })
 })

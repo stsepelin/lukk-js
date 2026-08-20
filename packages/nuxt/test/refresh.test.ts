@@ -36,3 +36,26 @@ describe('refreshOnce with an unusable baseURL', () => {
     expect(String(error.mock.calls[0]![0])).toContain('***@api.example.com')
   })
 })
+
+describe('refreshOnce client identity', () => {
+  const ok = () => new Response(JSON.stringify({ access_token: 'a', refresh_token: 'r2' }), { status: 200 })
+
+  it('forwards the visitor IP so lukk\'s /refresh throttle keys on them, not on this server', async () => {
+    // `lukk-refresh` is `->by($request->ip())` at 30/60s. In BFF mode every proxied 401 and every
+    // SSR hydration refreshes through here, so without the visitor's address they all share one
+    // bucket and a busy deployment throttles itself.
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(ok())
+
+    await refreshOnce({ id: `s-${Math.random()}`, data: { refresh: 'rt' } }, 'https://lukk/auth', '198.51.100.23')
+
+    expect(fetchSpy.mock.calls[0]![1]!.headers).toMatchObject({ 'X-Forwarded-For': '198.51.100.23' })
+  })
+
+  it('sends no X-Forwarded-For when no visitor address is known', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(ok())
+
+    await refreshOnce({ id: `s-${Math.random()}`, data: { refresh: 'rt' } }, 'https://lukk/auth')
+
+    expect((fetchSpy.mock.calls[0]![1]!.headers as Record<string, string>)['X-Forwarded-For']).toBeUndefined()
+  })
+})

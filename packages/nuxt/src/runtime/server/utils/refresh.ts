@@ -13,18 +13,18 @@ export interface TokenSession {
 const inflightRefresh = new Map<string, Promise<TokenSession | null>>()
 
 /** Single-flight the server-side refresh per session, returning the new token pair. */
-export function refreshOnce(session: { id?: string, data: TokenSession }, baseURL: string): Promise<TokenSession | null> {
+export function refreshOnce(session: { id?: string, data: TokenSession }, baseURL: string, clientIp = ''): Promise<TokenSession | null> {
   const id = session.id
   // No id → don't key the map (an empty key would collapse distinct sessions).
-  if (!id) return rawRefresh(session.data.refresh!, baseURL)
+  if (!id) return rawRefresh(session.data.refresh!, baseURL, clientIp)
   const existing = inflightRefresh.get(id)
   if (existing) return existing
-  const run = rawRefresh(session.data.refresh!, baseURL).finally(() => inflightRefresh.delete(id))
+  const run = rawRefresh(session.data.refresh!, baseURL, clientIp).finally(() => inflightRefresh.delete(id))
   inflightRefresh.set(id, run)
   return run
 }
 
-async function rawRefresh(refreshToken: string, baseURL: string): Promise<TokenSession | null> {
+async function rawRefresh(refreshToken: string, baseURL: string, clientIp: string): Promise<TokenSession | null> {
   // `/refresh` is a fixed literal that cannot escape, so a null here means only one thing: an
   // unusable `baseURL` (the module rejects one at build; reachable via a post-build runtime
   // override). Treat it as "not refreshable" rather than fetching `null` and throwing something
@@ -35,9 +35,15 @@ async function rawRefresh(refreshToken: string, baseURL: string): Promise<TokenS
     reportUnusableBase('lukk `baseURL`', baseURL)
     return null
   }
+  // lukk rate-limits `/refresh` on `$request->ip()` too (30/60s by default), and this is the
+  // highest-volume auth call in BFF mode — every proxied 401 and every SSR hydration lands here.
+  // Without the visitor's address all of them share one bucket, so a busy deployment throttles
+  // itself; with it, login and the refresh that follows also key on the same identity.
+  const headers: Record<string, string> = { 'Content-Type': 'application/json', 'Accept': 'application/json' }
+  if (clientIp) headers['X-Forwarded-For'] = clientIp
   const res = await fetch(target, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+    headers,
     body: JSON.stringify({ refresh_token: refreshToken }),
     // Never follow an upstream 3xx: a 307/308 preserves this POST body, which would
     // re-send the rotating refresh token to the redirect host (CWE-918/200). An opaque
