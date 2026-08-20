@@ -110,7 +110,7 @@ describe('resolveHydrationAccess', () => {
 
   it('rotates an expired-but-refreshable session, reseals it, and mirrors the fresh seal into the request cookie', async () => {
     unsealResult = { data: { access: expiredJwt(), refresh: 'r' } }
-    refreshOnce.mockResolvedValue({ access: 'NEW_ACCESS', refresh: 'r2' })
+    refreshOnce.mockResolvedValue({ pair: { access: 'NEW_ACCESS', refresh: 'r2' }, retryable: false })
     const event = ev('locale=en; __Host-lukk-session=STALE;') // trailing ';' → empty segment dropped
 
     const result = await resolveHydrationAccess(event)
@@ -128,7 +128,7 @@ describe('resolveHydrationAccess', () => {
 
   it('mirrors just the fresh seal when the request carried no cookie header', async () => {
     unsealResult = { data: { access: expiredJwt(), refresh: 'r' } }
-    refreshOnce.mockResolvedValue({ access: 'NEW', refresh: 'r2' })
+    refreshOnce.mockResolvedValue({ pair: { access: 'NEW', refresh: 'r2' }, retryable: false })
     const event = ev()
 
     expect(await resolveHydrationAccess(event)).toBe('NEW')
@@ -140,7 +140,7 @@ describe('resolveHydrationAccess', () => {
     // keeps Secure off on the cookie it writes — prefix and attribute from the one `secure`.
     configure({ cookieSecure: false })
     unsealResult = { data: { access: expiredJwt(), refresh: 'r' } }
-    refreshOnce.mockResolvedValue({ access: 'NEW', refresh: 'r2' })
+    refreshOnce.mockResolvedValue({ pair: { access: 'NEW', refresh: 'r2' }, retryable: false })
     const event = ev('lukk-session=STALE')
 
     await resolveHydrationAccess(event)
@@ -156,7 +156,7 @@ describe('resolveHydrationAccess', () => {
   it('reseals under a per-app namespaced cookie name, ignoring a co-hosted app\'s cookie', async () => {
     configure({ cookieNamespace: 'admin' }) // → __Host-lukk-admin-session
     unsealResult = { data: { access: expiredJwt(), refresh: 'r' } }
-    refreshOnce.mockResolvedValue({ access: 'NEW', refresh: 'r2' })
+    refreshOnce.mockResolvedValue({ pair: { access: 'NEW', refresh: 'r2' }, retryable: false })
     // A co-hosted app's default-named cookie rides along in the header; it must be preserved,
     // and only THIS app's namespaced cookie swapped for the fresh seal.
     const event = ev('__Host-lukk-session=OTHERAPP; __Host-lukk-admin-session=STALE')
@@ -173,7 +173,7 @@ describe('resolveHydrationAccess', () => {
     // call in BFF mode. Without the visitor's address they all share lukk's one 30/60s bucket.
     configure({ clientIpHeader: 'cf-connecting-ip' })
     unsealResult = { data: { access: expiredJwt(), refresh: 'r' } }
-    refreshOnce.mockResolvedValue({ access: 'NEW', refresh: 'r2' })
+    refreshOnce.mockResolvedValue({ pair: { access: 'NEW', refresh: 'r2' }, retryable: false })
     const event = ev()
     ;(event as unknown as { headers: Record<string, string> }).headers = { 'cf-connecting-ip': '198.51.100.23' }
 
@@ -184,7 +184,7 @@ describe('resolveHydrationAccess', () => {
 
   it('returns null (defers to the client) when the refresh fails or the session was revoked', async () => {
     unsealResult = { data: { access: expiredJwt(), refresh: 'r' } }
-    refreshOnce.mockResolvedValue(null)
+    refreshOnce.mockResolvedValue({ pair: null, retryable: false })
 
     expect(await resolveHydrationAccess(ev())).toBeNull()
     expect(sessionUpdate).not.toHaveBeenCalled()

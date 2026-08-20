@@ -15,7 +15,7 @@ describe('refreshOnce with an unusable baseURL', () => {
 
     const result = await refreshOnce({ id: 'sid', data: { refresh: 'rt' } }, 'undefined/auth')
 
-    expect(result).toBeNull()
+    expect(result.pair).toBeNull()
     expect(fetchSpy).not.toHaveBeenCalled()
     expect(String(error.mock.calls[0]![0])).toContain('undefined/auth')
   })
@@ -28,7 +28,7 @@ describe('refreshOnce with an unusable baseURL', () => {
     const base = `https://user:hunter2@api.example.com:99999/auth-${Math.random()}`
 
     for (let i = 0; i < 4; i++) {
-      expect(await refreshOnce({ id: 'sid', data: { refresh: 'rt' } }, base)).toBeNull()
+      expect((await refreshOnce({ id: 'sid', data: { refresh: 'rt' } }, base)).pair).toBeNull()
     }
 
     expect(error).toHaveBeenCalledOnce()

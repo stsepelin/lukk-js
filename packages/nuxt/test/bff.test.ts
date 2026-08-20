@@ -101,6 +101,24 @@ describe('BFF proxy', () => {
     expect(mockFetch().fetch.mock.calls[0]![1]!.headers['X-Forwarded-For']).toBeUndefined()
   })
 
+  it('keeps the session when a refresh is THROTTLED, and clears it only on a real rejection', async () => {
+    // A 429 leaves the refresh token unconsumed and still valid. Treating it like a revocation turned
+    // a transient throttle into an unrecoverable logout — and forwarding the real client IP makes
+    // /refresh the highest-volume throttled call, so this is the path most likely to hit it.
+    const throttled = makeSession({ access: 'old', refresh: 'rt' })
+    mockFetch().fetch = vi.fn(async (url: string) =>
+      String(url).endsWith('/refresh') ? jsonRes({ message: 'Too Many Requests' }, 429) : jsonRes({ message: 'unauth' }, 401))
+    await run(makeEvent({ path: '/api/_lukk/data', session: throttled }))
+    expect(throttled.clear).not.toHaveBeenCalled()
+    expect(throttled.data.refresh).toBe('rt') // still there to retry with
+
+    // A 401 from lukk means the token really is revoked/reused — that ends the session.
+    const revoked = makeSession({ access: 'old', refresh: 'rt' })
+    mockFetch().fetch = vi.fn().mockResolvedValue(jsonRes({ message: 'unauth' }, 401))
+    await run(makeEvent({ path: '/api/_lukk/data', session: revoked }))
+    expect(revoked.clear).toHaveBeenCalled()
+  })
+
   it('keeps the existing refresh token when a response omits it', async () => {
     const session = makeSession({ refresh: 'existing' })
     mockFetch().fetch = vi.fn().mockResolvedValue(jsonRes({ access_token: 'a', expires_in: 900 }))

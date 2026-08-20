@@ -227,7 +227,7 @@ describe('app-API proxy', () => {
 
   it('carries the rotated session cookie AND allow-listed upstream cookies together', async () => {
     sessionData = { access: expiredJwt(), refresh: 'r' }
-    refreshOnce.mockResolvedValue({ access: 'new-tok', refresh: 'r2' })
+    refreshOnce.mockResolvedValue({ pair: { access: 'new-tok', refresh: 'r2' }, retryable: false })
     ;(__test.runtimeConfig.lukk as Record<string, unknown>).apiForwardSetCookie = ['locale']
     upstreamSetCookie = ['locale=en']
     const e = ev({ path: '/api/me' })
@@ -317,7 +317,7 @@ describe('app-API proxy', () => {
 
   it('proactively refreshes an expired access token, injects the new one, and carries the rotated session cookie through', async () => {
     sessionData = { access: expiredJwt(), refresh: 'r' }
-    refreshOnce.mockResolvedValue({ access: 'new-tok', refresh: 'r2' })
+    refreshOnce.mockResolvedValue({ pair: { access: 'new-tok', refresh: 'r2' }, retryable: false })
     const e = ev({ path: '/api/me' })
     await run(e)
     expect(refreshOnce).toHaveBeenCalledOnce()
@@ -330,7 +330,7 @@ describe('app-API proxy', () => {
   it('lets a failed refresh fall through to an upstream 401 (revoked session), keeping the stale bearer', async () => {
     const stale = expiredJwt()
     sessionData = { access: stale, refresh: 'r' }
-    refreshOnce.mockResolvedValue(null)
+    refreshOnce.mockResolvedValue({ pair: null, retryable: false })
     const e = ev({ path: '/api/me' })
     await run(e)
     expect(proxyRequest).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ headers: expect.objectContaining({ authorization: `Bearer ${stale}` }) }))
@@ -339,19 +339,19 @@ describe('app-API proxy', () => {
 
   it('treats a malformed or exp-less access token as expired and refreshes', async () => {
     sessionData = { access: 'not-a-jwt', refresh: 'r' }
-    refreshOnce.mockResolvedValue({ access: 'new-tok', refresh: 'r2' })
+    refreshOnce.mockResolvedValue({ pair: { access: 'new-tok', refresh: 'r2' }, retryable: false })
     await run(ev({ path: '/api/a' }))
     expect(refreshOnce).toHaveBeenCalledOnce()
 
     refreshOnce.mockClear()
     sessionData = { access: jwt({ sub: 'no-exp' }), refresh: 'r' }
-    refreshOnce.mockResolvedValue({ access: 'new-tok', refresh: 'r2' })
+    refreshOnce.mockResolvedValue({ pair: { access: 'new-tok', refresh: 'r2' }, retryable: false })
     await run(ev({ path: '/api/b' }))
     expect(refreshOnce).toHaveBeenCalledOnce()
 
     refreshOnce.mockClear()
     sessionData = { access: 'h.@@not-json@@.s', refresh: 'r' } // undecodable payload → treated as expired
-    refreshOnce.mockResolvedValue({ access: 'new-tok', refresh: 'r2' })
+    refreshOnce.mockResolvedValue({ pair: { access: 'new-tok', refresh: 'r2' }, retryable: false })
     await run(ev({ path: '/api/c' }))
     expect(refreshOnce).toHaveBeenCalledOnce()
   })

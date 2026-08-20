@@ -62,7 +62,7 @@ export async function resolveHydrationAccess(event: H3Event): Promise<string | n
       name,
       cookie: { sameSite: 'strict', secure, httpOnly: true, path: '/' },
     })
-    const pair = await refreshOnce(session, baseURL, visitorIp(event, clientIpHeader))
+    const { pair } = await refreshOnce(session, baseURL, visitorIp(event, clientIpHeader))
     if (!pair?.access) return null
 
     await session.update(pair)
