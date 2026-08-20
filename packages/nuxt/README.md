@@ -121,6 +121,7 @@ credentials, and CSRF + SSRF guards on both proxies. See the
 | `api.path` / `api.target` | `''` | BFF-only: proxy `${path}/**` → fixed `target`, injecting the bearer server-side. |
 | `api.forceJson` | `true` | Force `Accept: application/json` on proxied requests → clean JSON `401`/`422` from Laravel. |
 | `confirmationHeader` | `'X-Lukk-Confirmation'` | Header carrying the step-up token. |
+| `clientIpHeader` | `''` | BFF-only, opt-in: a header your trusted edge SETS with the real client IP (`'cf-connecting-ip'`), forwarded upstream as `X-Forwarded-For` so per-IP rate limiting sees the visitor, not the proxy. |
 | `session.password` | env `NUXT_LUKK_SESSION_PASSWORD` | BFF sealed-session secret (≥ 32 chars). |
 
 ## Documentation
