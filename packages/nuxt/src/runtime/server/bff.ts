@@ -79,14 +79,16 @@ export default defineEventHandler(async (event) => {
 
   if (res.status === 401 && sealed.refresh) {
     const s = await session()
-    const pair = await refreshOnce(s, baseURL, clientIp)
+    const { pair, retryable } = await refreshOnce(s, baseURL, clientIp)
     if (pair) {
       await s.update(pair)
       warnIfSessionTooLarge(s)
       currentRefresh = pair.refresh
       res = await callLukk(pair.access)
     }
-    else {
+    // Clear ONLY on a definitive rejection. A throttled or failed refresh leaves the token valid, and
+    // discarding the session there turns a transient 429 into an unrecoverable logout.
+    else if (!retryable) {
       await s.clear()
     }
   }

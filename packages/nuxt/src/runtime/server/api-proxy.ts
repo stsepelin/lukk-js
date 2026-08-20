@@ -93,7 +93,7 @@ export default defineEventHandler(async (event) => {
     // Proactive refresh: rotate ONCE (shared single-flight with the BFF proxy) so a
     // streamed request isn't spent on a guaranteed 401. A revoked session still
     // surfaces naturally: the refresh fails → null → the stale bearer → upstream 401.
-    const pair = await refreshOnce(session, baseURL, clientIp)
+    const { pair } = await refreshOnce(session, baseURL, clientIp)
     if (pair) {
       await session.update(pair)
       access = pair.access
