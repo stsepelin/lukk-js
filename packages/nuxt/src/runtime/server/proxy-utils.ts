@@ -40,18 +40,6 @@ export function resolveTarget(base: string, subpath: string): string | null {
   return target.toString()
 }
 
-/**
- * Answer a request whose upstream URL `resolveTarget` refused, telling the two causes apart.
- *
- * An unusable BASE is a deployment fault — a `baseURL`/`api.target` that isn't an absolute
- * http(s) URL, classically an unset build-time env var baked in as `"undefined/auth"`. An
- * escaping SUBPATH is a traversal attempt. Both answer 400 with a body that never echoes config,
- * but the cause is logged server-side and the config case says so: reporting a misconfigured base
- * as "Invalid path." sends operators hunting for a route mismatch that doesn't exist.
- *
- * The module validates both bases at build, so the config branch is only reachable when runtime
- * config is overridden after the build (e.g. `NUXT_LUKK_BASE_URL`).
- */
 /** Bases already reported, so a broken deploy logs once per value instead of once per request. */
 const reportedBases = new Set<string>()
 
@@ -70,10 +58,23 @@ export function reportUnusableBase(label: string, base: string): void {
   reportedBases.add(base)
   console.error(`[lukk] ${label} is not an absolute http(s) URL (got ${JSON.stringify(redactCredentials(base))}) — cannot resolve the upstream URL. Check the build-time environment variables for this deploy.`)
 }
+
 /** Cap on escape-rejection lines per process — an unauthenticated caller controls the rate. */
 const ESCAPE_LOG_LIMIT = 50
 let escapesLogged = 0
 
+/**
+ * Answer a request whose upstream URL `resolveTarget` refused, telling the two causes apart.
+ *
+ * An unusable BASE is a deployment fault — a `baseURL`/`api.target` that isn't an absolute
+ * http(s) URL, classically an unset build-time env var baked in as `"undefined/auth"`. An
+ * escaping SUBPATH is a traversal attempt. Both answer 400 with a body that never echoes config,
+ * but the cause is logged server-side and the config case says so: reporting a misconfigured base
+ * as "Invalid path." sends operators hunting for a route mismatch that doesn't exist.
+ *
+ * The module validates both bases at build, so the config branch is only reachable when runtime
+ * config is overridden after the build (e.g. `NUXT_LUKK_BASE_URL`).
+ */
 export function rejectUnresolvedTarget(event: H3Event, base: string, label: string, subpath: string): { message: string } {
   if (!isResolvableBase(base)) {
     // A deployment fault, not a bad request — answer 5xx so uptime alerting, CDNs and health checks
@@ -109,4 +110,58 @@ export function isForeignOrigin(event: H3Event): boolean {
   catch {
     return true
   }
+}
+
+const IPV4 = /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/
+
+/**
+ * The canonical form of an exact IPv4/IPv6 address, or `''`.
+ *
+ * Deliberately not `node:net`'s `isIP`. It does resolve on the worker/edge presets — Nitro aliases
+ * it to unenv — but the shim's `isIPv6` is a full-form-only regex that rejects EVERY compressed
+ * address (`::1`, `2001:db8::1`) while accepting `999.999.999.999`. Silently dropping all IPv6
+ * visitors on edge is worse than not using it, so IPv6 goes through the WHATWG host parser instead:
+ * its IPv6 grammar and bracketed serialization are normative, so this behaves identically on Node,
+ * Bun, Deno and workerd. The charset guard runs FIRST because the parser reads trailing junk as a
+ * path — `http://[::1]/x]` has host `[::1]`, so `::1]/x` would otherwise pass as an address.
+ *
+ * Returning the parser's canonical form matters beyond tidiness: this value becomes an upstream
+ * rate-limit key, and `2001:0db8:0000:...:0001` and `2001:db8::1` are the same host but would
+ * otherwise get separate buckets.
+ */
+function normalizeIp(value: string): string {
+  if (IPV4.test(value)) return value
+  if (value.length > 45 || /[^0-9a-f:.]/i.test(value)) return '' // longer than any IPv6 literal
+  try { return new URL(`http://[${value}]`).hostname.slice(1, -1) }
+  catch { return '' }
+}
+
+/**
+ * The VISITOR's address, from a header the operator's trusted edge sets — or `''` when there isn't
+ * one to be had.
+ *
+ * It never falls back to the socket address. Behind any reverse proxy that address is the PROXY, so
+ * an upstream keying rate limits on it sees every visitor as one identity (`throttle:5,1` becomes
+ * 5/min globally). A caller that would rather say nothing than assert a wrong identity — the auth
+ * paths, whose value becomes a rate-limit key at lukk — needs to tell "no visitor known" apart from
+ * "this server"; one that must always assert something composes the fallback itself.
+ *
+ * **A list is rejected outright**, and that is the security-critical part. A header the edge SETS
+ * carries exactly one address; Node joins duplicates with `", "` and the CLIENT's copy arrives
+ * FIRST, so on an edge that appends (or merely fails to strip the client's copy) the leftmost entry
+ * is attacker-chosen. Taking it would let a visitor forge `$request->ip()` upstream — worse than the
+ * shared-bucket problem this option exists to fix. Refusing a list turns that misconfiguration into
+ * a visible loss of function instead of a silent spoof. The module also warns at build when an
+ * append-style header (`x-forwarded-for`, `forwarded`) is named.
+ *
+ * Trusting a header is only sound if the request cannot reach this server EXCEPT through that edge.
+ * There is no socket-peer check here (unlike Laravel's `TrustProxies`), so if the origin is directly
+ * reachable — a leaked origin IP, no firewall on the CDN's ranges — a client can simply set the
+ * header itself. Lock the origin down before enabling this.
+ */
+export function visitorIp(event: H3Event, clientIpHeader?: string): string {
+  if (!clientIpHeader) return ''
+  const raw = getRequestHeader(event, clientIpHeader)?.trim()
+  if (!raw || raw.includes(',')) return ''
+  return normalizeIp(raw)
 }

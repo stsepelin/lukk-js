@@ -3,6 +3,7 @@ import { sealSession, useSession } from 'h3'
 import { useRuntimeConfig } from '#imports'
 import { sessionCookieName } from '../shared'
 import { accessExpired } from './access-token'
+import { visitorIp } from './proxy-utils'
 import { readSealedSession } from './sealed-session'
 import { warnIfSessionTooLarge } from './session-size'
 import { refreshOnce, type TokenSession } from './utils/refresh'
@@ -11,6 +12,7 @@ interface LukkServerConfig {
   sessionPassword?: string
   cookieSecure?: boolean
   cookieNamespace?: string
+  clientIpHeader?: string
   baseURL?: string
 }
 
@@ -40,7 +42,7 @@ interface LukkServerConfig {
  * unrefreshable, or failed/revoked refresh; the caller then defers to the client-side restore.
  */
 export async function resolveHydrationAccess(event: H3Event): Promise<string | null> {
-  const { sessionPassword, cookieSecure, cookieNamespace, baseURL } = (useRuntimeConfig(event).lukk ?? {}) as LukkServerConfig
+  const { sessionPassword, cookieSecure, cookieNamespace, clientIpHeader, baseURL } = (useRuntimeConfig(event).lukk ?? {}) as LukkServerConfig
   const secure = cookieSecure !== false
   const name = sessionCookieName(secure, cookieNamespace)
 
@@ -60,7 +62,7 @@ export async function resolveHydrationAccess(event: H3Event): Promise<string | n
       name,
       cookie: { sameSite: 'strict', secure, httpOnly: true, path: '/' },
     })
-    const pair = await refreshOnce(session, baseURL)
+    const pair = await refreshOnce(session, baseURL, visitorIp(event, clientIpHeader))
     if (!pair?.access) return null
 
     await session.update(pair)

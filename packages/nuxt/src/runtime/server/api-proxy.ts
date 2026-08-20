@@ -1,8 +1,8 @@
-import { defineEventHandler, getRequestHeader, getRequestIP, proxyRequest, setResponseStatus, useSession } from 'h3'
+import { defineEventHandler, getRequestHeader, proxyRequest, setResponseStatus, useSession } from 'h3'
 import { useRuntimeConfig } from '#imports'
 import { LUKK_BFF_PREFIX, isSessionCookieName, sessionCookieName } from '../shared'
 import { accessExpired } from './access-token'
-import { isForeignOrigin, rejectUnresolvedTarget, resolveTarget } from './proxy-utils'
+import { isForeignOrigin, rejectUnresolvedTarget, resolveTarget, visitorIp } from './proxy-utils'
 import { readSealedSession } from './sealed-session'
 import { refreshOnce, type TokenSession } from './utils/refresh'
 
@@ -30,7 +30,7 @@ const SPOOFABLE_FORWARDING = {
  * docs/transport-modes.md.
  */
 export default defineEventHandler(async (event) => {
-  const { apiPath, apiTarget, apiForceJson, baseURL, sessionPassword, apiForwardSetCookie, cookieSecure, cookieNamespace } = useRuntimeConfig(event).lukk as {
+  const { apiPath, apiTarget, apiForceJson, baseURL, sessionPassword, apiForwardSetCookie, cookieSecure, cookieNamespace, clientIpHeader } = useRuntimeConfig(event).lukk as {
     apiPath: string
     apiTarget: string
     apiForceJson: boolean
@@ -39,8 +39,12 @@ export default defineEventHandler(async (event) => {
     apiForwardSetCookie?: string[]
     cookieSecure?: boolean
     cookieNamespace?: string
+    clientIpHeader?: string
   }
   const forwardSetCookie = apiForwardSetCookie ?? []
+  // Defaulted only for the field: the module always writes `public.lukk`, same as it writes `lukk`.
+  const { confirmationHeader = 'X-Lukk-Confirmation' } = useRuntimeConfig(event).public.lukk as { confirmationHeader?: string }
+  const clientIp = visitorIp(event, clientIpHeader)
   // Secure/`__Host-` in prod + dev-https, relaxed for dev-http (see module cookieSecure); the name's
   // prefix and the Secure attribute both derive from this one `secure` — they can't diverge.
   const secure = cookieSecure !== false
@@ -88,7 +92,7 @@ export default defineEventHandler(async (event) => {
     // Proactive refresh: rotate ONCE (shared single-flight with the BFF proxy) so a
     // streamed request isn't spent on a guaranteed 401. A revoked session still
     // surfaces naturally: the refresh fails → null → the stale bearer → upstream 401.
-    const pair = await refreshOnce(session, baseURL)
+    const pair = await refreshOnce(session, baseURL, clientIp)
     if (pair) {
       await session.update(pair)
       access = pair.access
@@ -111,10 +115,25 @@ export default defineEventHandler(async (event) => {
     // 200 h3 would otherwise sanitize a status-0 response into.
     fetchOptions: { redirect: 'manual' },
     headers: {
+      // FIRST, so a pathological `confirmationHeader` rename can never clobber a header set below.
+      // Symmetric with `authorization`: the step-up token is a credential the browser must never
+      // hold, so a client-set one is replaced — with the SERVER-held token when the session has one.
+      // Blanking alone would have made an app-API route behind lukk's confirm middleware
+      // unreachable; injecting makes it work the same way it does through the auth proxy, from the
+      // sealed session rather than from whatever the browser claimed.
+      [confirmationHeader.toLowerCase()]: sealed.confirmation ?? '',
       'accept': accept,
       'cookie': '',
       'authorization': access ? `Bearer ${access}` : '',
-      'x-forwarded-for': getRequestIP(event, { xForwardedFor: false }) ?? '',
+      // The visitor when a trusted `clientIpHeader` is set, else our socket address — this proxy has
+      // always asserted something, and the socket is first-hand fact about this hop. Read straight
+      // off the socket rather than via `getRequestIP`: that consults `event.context.clientAddress`
+      // BEFORE honouring `xForwardedFor: false`, so any middleware populating it from a header
+      // would silently reinstate spoofing. (On non-Node presets the mock socket is empty and this
+      // yields '' — there, `clientIpHeader` is the only way the upstream learns the caller.)
+      // `x-forwarded-for` is deliberately NOT in SPOOFABLE_FORWARDING: the spread must not blank it,
+      // and h3 REPLACES the client's own header with this value rather than appending to it.
+      'x-forwarded-for': clientIp || event.node.req.socket?.remoteAddress || '',
       ...SPOOFABLE_FORWARDING,
     },
     // Not a cookie/cache passthrough: strip upstream Set-Cookie, restore the rotated session,

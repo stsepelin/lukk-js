@@ -6,7 +6,7 @@ vi.mock('h3', () => ({
 }))
 
 // eslint-disable-next-line import/first
-import { rejectUnresolvedTarget, resolveTarget } from '../src/runtime/server/proxy-utils'
+import { rejectUnresolvedTarget, resolveTarget, visitorIp } from '../src/runtime/server/proxy-utils'
 
 const ev = () => ({ status: 200 } as { status: number })
 
@@ -101,5 +101,65 @@ describe('rejectUnresolvedTarget', () => {
     // Every request is still rejected; only the log line is bounded per process.
     expect(warn.mock.calls.length).toBeLessThanOrEqual(50)
     expect(String(warn.mock.calls.at(-1)?.[0])).toContain('further path rejections will not be logged')
+  })
+})
+
+describe('visitorIp', () => {
+  const req = (headers: Record<string, string>) => ({ headers } as never)
+
+  it('yields nothing when no header is trusted, whatever the browser sent', () => {
+    // The default. A client's own `x-forwarded-for` is never read, so it can't dictate identity.
+    expect(visitorIp(req({ 'x-forwarded-for': '1.2.3.4' }))).toBe('')
+    expect(visitorIp(req({ 'cf-connecting-ip': '1.2.3.4' }))).toBe('')
+  })
+
+  it('reads the visitor address from the configured trusted header', () => {
+    expect(visitorIp(req({ 'cf-connecting-ip': '203.0.113.9' }), 'cf-connecting-ip')).toBe('203.0.113.9')
+    expect(visitorIp(req({ 'x-real-ip': '2001:db8::1' }), 'x-real-ip')).toBe('2001:db8::1')
+  })
+
+  it('REJECTS a list, because the client\'s copy arrives leftmost', () => {
+    // The spoof this guards: a header the edge SETS is single-valued, but Node joins duplicates with
+    // ", " and the CLIENT's copy comes FIRST. On an edge that appends (or fails to strip the
+    // client's), taking the leftmost entry would hand a visitor `$request->ip()` upstream — worse
+    // than the shared bucket this option fixes. Refusing turns that into a visible loss of function.
+    expect(visitorIp(req({ 'cf-connecting-ip': '6.6.6.6, 198.51.100.23' }), 'cf-connecting-ip')).toBe('')
+    expect(visitorIp(req({ 'x-forwarded-for': '203.0.113.9, 70.0.0.1' }), 'x-forwarded-for')).toBe('')
+  })
+
+  it('rejects anything that is not an exact IP', () => {
+    // The value can become an upstream rate-limit key or feed an IP allowlist, so a charset check
+    // ("looks vaguely like an address") is not enough.
+    for (const bad of ['deadbeef', '......', '::::', '1.2.3.4.5.6', '256.1.1.1', '1.2.3.4:80', 'fe80::1%eth0'])
+      expect(visitorIp(req({ 'cf-connecting-ip': bad }), 'cf-connecting-ip')).toBe('')
+    // The URL parser reads trailing junk as a path (`http://[::1]/x]` has host `[::1]`), so the
+    // charset guard has to run first or `::1]/x` would sail through as an address.
+    for (const bad of ['::1]/foo', '::1]?x', '::1]#x'])
+      expect(visitorIp(req({ 'cf-connecting-ip': bad }), 'cf-connecting-ip')).toBe('')
+  })
+
+  it('canonicalises IPv6 so one host cannot occupy several rate-limit buckets', () => {
+    const ip = (v: string) => visitorIp(req({ 'cf-connecting-ip': v }), 'cf-connecting-ip')
+    // Same host, two spellings — upstream keys on the string, so they must normalise to one.
+    expect(ip('2001:0db8:0000:0000:0000:0000:0000:0001')).toBe('2001:db8::1')
+    expect(ip('2001:db8::1')).toBe('2001:db8::1')
+    expect(ip('::ffff:127.0.0.1')).toBe('::ffff:7f00:1')
+    // IPv4 is already canonical and passes through untouched.
+    expect(ip('198.51.100.23')).toBe('198.51.100.23')
+  })
+
+  it('cannot be steered by a header other than the configured one', () => {
+    expect(visitorIp(req({ 'x-forwarded-for': '1.2.3.4', 'cf-connecting-ip': '203.0.113.9' }), 'cf-connecting-ip')).toBe('203.0.113.9')
+  })
+
+  it('yields nothing — never the socket address — when the trusted header is absent or malformed', () => {
+    // Callers that must assert something compose the socket fallback themselves; the auth paths
+    // deliberately stay silent instead of handing lukk this server's address as a rate-limit key.
+    expect(visitorIp(req({}), 'cf-connecting-ip')).toBe('')
+    expect(visitorIp(req({ 'cf-connecting-ip': '' }), 'cf-connecting-ip')).toBe('')
+    expect(visitorIp(req({ 'cf-connecting-ip': 'not an ip' }), 'cf-connecting-ip')).toBe('')
+    expect(visitorIp(req({ 'cf-connecting-ip': 'a'.repeat(60) }), 'cf-connecting-ip')).toBe('')
+    // Anything header-injectable is rejected outright rather than forwarded.
+    expect(visitorIp(req({ 'cf-connecting-ip': '1.2.3.4\r\nX-Admin: 1' }), 'cf-connecting-ip')).toBe('')
   })
 })

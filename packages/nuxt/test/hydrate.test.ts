@@ -20,6 +20,7 @@ vi.mock('h3', () => ({
   unsealSession: (...a: unknown[]) => unsealSession(...a),
   useSession: (...a: unknown[]) => useSession(...a),
   sealSession: (...a: unknown[]) => sealSession(...a),
+  getRequestHeader: (event: { headers?: Record<string, string> }, name: string) => event.headers?.[name],
 }))
 
 const refreshOnce = vi.fn<(s: unknown, b: string) => Promise<TokenSession | null>>()
@@ -116,7 +117,7 @@ describe('resolveHydrationAccess', () => {
 
     expect(result).toBe('NEW_ACCESS')
     // Rotates through the shared single-flight, keyed on the real session (id from the seal).
-    expect(refreshOnce).toHaveBeenCalledWith(sessionObj, 'https://lukk/auth')
+    expect(refreshOnce).toHaveBeenCalledWith(sessionObj, 'https://lukk/auth', '')
     // Reseals onto the RESPONSE (h3 update → Set-Cookie the browser receives).
     expect(sessionUpdate).toHaveBeenCalledWith({ access: 'NEW_ACCESS', refresh: 'r2' })
     // Mirrors the fresh seal into the in-process REQUEST cookie: the stale session is swapped,
@@ -165,6 +166,20 @@ describe('resolveHydrationAccess', () => {
     expect(useSession).toHaveBeenCalledWith(event, expect.objectContaining({ name: '__Host-lukk-admin-session' }))
     expect(sealSession).toHaveBeenCalledWith(event, { password: 'p'.repeat(32), name: '__Host-lukk-admin-session' })
     expect(event.node.req.headers.cookie).toBe('__Host-lukk-session=OTHERAPP; __Host-lukk-admin-session=FRESH_SEAL')
+  })
+
+  it('carries the visitor IP into the SSR refresh, so lukk\'s /refresh throttle keys on them', async () => {
+    // Every authenticated full page load whose token aged out lands here — the highest-volume auth
+    // call in BFF mode. Without the visitor's address they all share lukk's one 30/60s bucket.
+    configure({ clientIpHeader: 'cf-connecting-ip' })
+    unsealResult = { data: { access: expiredJwt(), refresh: 'r' } }
+    refreshOnce.mockResolvedValue({ access: 'NEW', refresh: 'r2' })
+    const event = ev()
+    ;(event as unknown as { headers: Record<string, string> }).headers = { 'cf-connecting-ip': '198.51.100.23' }
+
+    await resolveHydrationAccess(event)
+
+    expect(refreshOnce).toHaveBeenCalledWith(sessionObj, 'https://lukk/auth', '198.51.100.23')
   })
 
   it('returns null (defers to the client) when the refresh fails or the session was revoked', async () => {

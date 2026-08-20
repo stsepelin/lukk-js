@@ -16,6 +16,7 @@ vi.mock('h3', () => ({
     return event.__session ? { data: event.__session.data } : {}
   },
   readRawBody: async (event: { body?: string }) => event.body,
+  getRequestIP: (event: { ip?: string }) => event.ip,
   setResponseStatus: (event: { status: number }, status: number) => { event.status = status },
   useSession: async (event: { __session: unknown }, config: { name?: string }) => { h3state.useSessionCalls++; h3state.lastSessionName = config?.name; return event.__session },
 }))
@@ -36,7 +37,7 @@ function makeSession(initial: TokenSession = {}, id = 'sid') {
 }
 
 function makeEvent(o: { path: string, method?: string, body?: string, headers?: Record<string, string>, session: ReturnType<typeof makeSession>, cookiePresent?: boolean, sealTampered?: boolean, sealNoData?: boolean }) {
-  return { path: o.path, method: o.method ?? 'GET', body: o.body, headers: o.headers ?? {}, __session: o.session, __cookiePresent: o.cookiePresent ?? true, __sealTampered: o.sealTampered ?? false, __sealNoData: o.sealNoData ?? false, status: 200 }
+  return { path: o.path, method: o.method ?? 'GET', body: o.body, headers: o.headers ?? {}, ip: '203.0.113.7', __session: o.session, __cookiePresent: o.cookiePresent ?? true, __sealTampered: o.sealTampered ?? false, __sealNoData: o.sealNoData ?? false, status: 200 }
 }
 
 function jsonRes(body: unknown, status = 200): Response {
@@ -68,6 +69,36 @@ describe('BFF proxy', () => {
     const init = mockFetch().fetch.mock.calls[0]![1]!
     expect(init.headers['Content-Type']).toBe('application/json')
     expect(init.headers.Authorization).toBeUndefined()
+  })
+
+  it('sends no X-Forwarded-For to lukk by default', async () => {
+    // Unset, our socket address is all we know and it identifies this server, not the visitor —
+    // asserting it would be a misleading identity, so we say nothing at all.
+    const session = makeSession()
+    mockFetch().fetch = vi.fn().mockResolvedValue(jsonRes({ ok: true }))
+    await run(makeEvent({ path: '/api/_lukk/forgot-password', method: 'POST', headers: { ...sameOrigin, 'cf-connecting-ip': '198.51.100.23' }, session }))
+    expect(mockFetch().fetch.mock.calls[0]![1]!.headers['X-Forwarded-For']).toBeUndefined()
+  })
+
+  it('forwards the visitor IP to lukk when a trusted clientIpHeader is configured', async () => {
+    // lukk throttles forgot-password / login / two-factor-challenge on `$request->ip()`; without
+    // this every visitor shares one bucket, so one user can lock out all the others.
+    ;(__test.runtimeConfig.lukk as Record<string, unknown>).clientIpHeader = 'cf-connecting-ip'
+    const session = makeSession()
+    mockFetch().fetch = vi.fn().mockResolvedValue(jsonRes({ ok: true }))
+    await run(makeEvent({ path: '/api/_lukk/forgot-password', method: 'POST', headers: { ...sameOrigin, 'x-forwarded-for': '1.2.3.4', 'cf-connecting-ip': '198.51.100.23' }, session }))
+    expect(mockFetch().fetch.mock.calls[0]![1]!.headers['X-Forwarded-For']).toBe('198.51.100.23')
+  })
+
+  it('stays silent when the trusted header is configured but absent from the request', async () => {
+    // An origin hit that bypassed the CDN, an internal caller, a health check. Guarding on CONFIG
+    // rather than on "did we actually find a visitor" would send lukk our own socket address here —
+    // the misleading rate-limit identity this path exists to avoid.
+    ;(__test.runtimeConfig.lukk as Record<string, unknown>).clientIpHeader = 'cf-connecting-ip'
+    const session = makeSession()
+    mockFetch().fetch = vi.fn().mockResolvedValue(jsonRes({ ok: true }))
+    await run(makeEvent({ path: '/api/_lukk/login', method: 'POST', headers: sameOrigin, session }))
+    expect(mockFetch().fetch.mock.calls[0]![1]!.headers['X-Forwarded-For']).toBeUndefined()
   })
 
   it('keeps the existing refresh token when a response omits it', async () => {

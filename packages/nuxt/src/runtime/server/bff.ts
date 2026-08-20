@@ -3,7 +3,7 @@ import { isTokenPair } from 'lukk-core'
 import { defineEventHandler, getCookie, getRequestHeader, readRawBody, setResponseStatus, useSession } from 'h3'
 import { useRuntimeConfig } from '#imports'
 import { LUKK_BFF_PREFIX, sessionCookieName } from '../shared'
-import { isForeignOrigin, rejectUnresolvedTarget, resolveTarget } from './proxy-utils'
+import { isForeignOrigin, rejectUnresolvedTarget, resolveTarget, visitorIp } from './proxy-utils'
 import { readSealedSession } from './sealed-session'
 import { warnIfSessionTooLarge } from './session-size'
 import { refreshOnce, type TokenSession } from './utils/refresh'
@@ -18,7 +18,7 @@ type SessionCookieOptions = { sameSite: 'strict', secure: boolean, httpOnly: tru
  * ever holds the opaque session cookie, never a token.
  */
 export default defineEventHandler(async (event) => {
-  const { baseURL, sessionPassword, cookieSecure, cookieNamespace } = useRuntimeConfig(event).lukk as { baseURL: string, sessionPassword: string, cookieSecure?: boolean, cookieNamespace?: string }
+  const { baseURL, sessionPassword, cookieSecure, cookieNamespace, clientIpHeader } = useRuntimeConfig(event).lukk as { baseURL: string, sessionPassword: string, cookieSecure?: boolean, cookieNamespace?: string, clientIpHeader?: string }
   const method = event.method
 
   // Secure/`__Host-` in prod + dev-https, relaxed for dev-http (see module cookieSecure). Default to
@@ -49,6 +49,10 @@ export default defineEventHandler(async (event) => {
   const target = resolveTarget(baseURL, subpath)
   if (!target) return rejectUnresolvedTarget(event, baseURL, 'lukk `baseURL`', subpath)
 
+  const clientIp = visitorIp(event, clientIpHeader)
+  // The option mirrors lukk's own `confirm.header`, so a rename has to reach lukk too — hardcoding
+  // the default here would silently break step-up for anyone who changed it on both sides.
+  const { confirmationHeader = 'X-Lukk-Confirmation' } = useRuntimeConfig(event).public.lukk as { confirmationHeader?: string }
   const rawBody = method === 'GET' || method === 'HEAD' ? undefined : await readRawBody(event)
 
   function callLukk(access: string | undefined): Promise<Response> {
@@ -56,8 +60,13 @@ export default defineEventHandler(async (event) => {
     const contentType = getRequestHeader(event, 'content-type')
     if (contentType) headers['Content-Type'] = contentType
     // Confirmation token is held server-side too — never trust one from the browser.
-    if (sealed.confirmation) headers['X-Lukk-Confirmation'] = sealed.confirmation
+    if (sealed.confirmation) headers[confirmationHeader] = sealed.confirmation
     if (access) headers.Authorization = `Bearer ${access}`
+    // lukk throttles login / forgot-password / two-factor-challenge on `$request->ip()`, which for a
+    // BFF-proxied call is this server — collapsing every visitor onto one bucket. Strictly the
+    // VISITOR's address: with no trusted header, or none on this request, we say nothing rather than
+    // hand lukk our own address to use as a rate-limit key.
+    if (clientIp) headers['X-Forwarded-For'] = clientIp
     // Never follow an upstream 3xx: a cross-origin redirect would re-emit the custom
     // X-Lukk-Confirmation header (undici keeps custom headers across redirects) and, on a
     // 307/308, the request body to the redirect host (CWE-918/200). Handled below.
@@ -70,7 +79,7 @@ export default defineEventHandler(async (event) => {
 
   if (res.status === 401 && sealed.refresh) {
     const s = await session()
-    const pair = await refreshOnce(s, baseURL)
+    const pair = await refreshOnce(s, baseURL, clientIp)
     if (pair) {
       await s.update(pair)
       warnIfSessionTooLarge(s)

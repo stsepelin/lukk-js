@@ -166,6 +166,23 @@ export interface ModuleOptions {
    * cookie is never forwardable regardless of this list.
    */
   api: { path: string, target: string, forceJson: boolean, forwardSetCookie: string[] }
+  /**
+   * BFF only, opt-in: the request header your TRUSTED edge sets with the real client IP
+   * (`'cf-connecting-ip'`, `'x-real-ip'`, …). Both proxies then forward that address upstream as
+   * `X-Forwarded-For`, so your API can identify the visitor.
+   *
+   * Unset (the default) every browser-settable forwarding header is blanked and the socket address
+   * is forwarded instead — safe, but behind ANY reverse proxy that address is the proxy, so an
+   * upstream keying rate limits on it throttles all visitors as one identity (`throttle:5,1`
+   * becomes 5/min globally). Enable this only when a hop you control sets the header.
+   *
+   * It must be a header your edge **sets**, overwriting whatever the client sent. One the edge
+   * merely appends to (the usual `x-forwarded-for` chain) leaves the leftmost entry
+   * client-controlled and is spoofable. The upstream must also trust this hop (Laravel's
+   * `TrustProxies`) for `$request->ip()` to read it.
+   * @default '' (off)
+   */
+  clientIpHeader: string
 }
 
 export default defineNuxtModule<ModuleOptions>({
@@ -183,6 +200,7 @@ export default defineNuxtModule<ModuleOptions>({
     user: { endpoint: '' },
     session: { password: '' },
     api: { path: '', target: '', forceJson: true, forwardSetCookie: [] },
+    clientIpHeader: '',
   },
   setup(options, nuxt) {
     const resolver = createResolver(import.meta.url)
@@ -198,6 +216,19 @@ export default defineNuxtModule<ModuleOptions>({
     // proxy is only registered when BOTH are present, so this would silently do nothing.
     if (options.mode === 'bff' && !!apiPath !== !!options.api.target) {
       console.warn('[lukk-nuxt] The app-API proxy needs BOTH `api.path` and `api.target` — it was not registered.')
+    }
+
+    // The one real footgun in this option: an append-style header keeps the client's own entry
+    // leftmost, so trusting it hands `$request->ip()` straight back to the browser — the exact
+    // spoofing the default blanking exists to prevent.
+    if (options.mode === 'bff' && ['x-forwarded-for', 'forwarded'].includes(options.clientIpHeader.toLowerCase())) {
+      console.warn(`[lukk-nuxt] clientIpHeader "${options.clientIpHeader}" is append-style: its leftmost entry is client-controlled, so a visitor can spoof their address. Use one your own edge SETS — cf-connecting-ip behind Cloudflare, or x-real-ip if your nginx sets it.`)
+    }
+
+    // Dead config in direct mode: there is no proxy hop, so the browser reaches the API itself and
+    // its own address is the one the API sees.
+    if (options.mode === 'direct' && options.clientIpHeader) {
+      console.warn('[lukk-nuxt] `clientIpHeader` only applies in bff mode — in direct mode the browser calls the API itself, so it has no effect.')
     }
 
     // A `session.name` with cookie-name separators (`;`, `=`, whitespace, …) would break the cookie.
@@ -245,6 +276,9 @@ export default defineNuxtModule<ModuleOptions>({
         apiTarget: options.api.target,
         apiForceJson: options.api.forceJson,
         apiForwardSetCookie: options.api.forwardSetCookie,
+        // Canonicalised for readability in the resolved config; h3 lower-cases the lookup itself,
+        // so matching does not depend on this.
+        clientIpHeader: options.clientIpHeader.toLowerCase(),
       },
     )
 
@@ -264,6 +298,12 @@ export default defineNuxtModule<ModuleOptions>({
     const fail = (message: string): void => {
       if (nuxt.options._prepare) return console.error(message)
       throw new Error(message)
+    }
+
+    // An empty or non-token value becomes a computed header key that `Headers.set` rejects, 502ing
+    // every proxied request with nothing pointing at the cause.
+    if (!/^[a-z0-9!#$%&'*+.^_`|~-]+$/i.test(options.confirmationHeader)) {
+      fail(`[lukk-nuxt] confirmationHeader "${options.confirmationHeader}" is not a valid HTTP header name. Use a token such as X-Lukk-Confirmation.`)
     }
 
     if (!effectiveBase) {

@@ -281,6 +281,46 @@ describe('lukk-nuxt module', () => {
     expect(warned({ baseURL: '/auth', mode: 'direct' })).toBe(false)
   })
 
+  it('passes clientIpHeader through lower-cased, and defaults to off', () => {
+    // Node lower-cases incoming header names, so the runtime lookup only matches lower-case.
+    const off = setup({ baseURL: 'https://api/auth', mode: 'bff' })
+    expect((off.options.runtimeConfig.lukk as { clientIpHeader: string }).clientIpHeader).toBe('')
+    const on = setup({ baseURL: 'https://api/auth', mode: 'bff', clientIpHeader: 'CF-Connecting-IP' })
+    expect((on.options.runtimeConfig.lukk as { clientIpHeader: string }).clientIpHeader).toBe('cf-connecting-ip')
+  })
+
+  it('warns when clientIpHeader names an append-style header (spoofable), not a set-style one', () => {
+    const warned = (clientIpHeader: string) => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      setup({ baseURL: 'https://api/auth', mode: 'bff', clientIpHeader })
+      const hit = warn.mock.calls.some(c => String(c[0]).includes('append-style'))
+      warn.mockRestore()
+      return hit
+    }
+    // Trusting an append-style chain re-opens the very spoofing the default blanking prevents.
+    expect(warned('x-forwarded-for')).toBe(true)
+    expect(warned('X-Forwarded-For')).toBe(true)
+    expect(warned('forwarded')).toBe(true)
+    expect(warned('cf-connecting-ip')).toBe(false)
+    expect(warned('')).toBe(false)
+  })
+
+  it('warns that clientIpHeader is dead config in direct mode', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    setup({ baseURL: 'https://api/auth', mode: 'direct', clientIpHeader: 'cf-connecting-ip' })
+    // No proxy hop in direct mode — the browser reaches the API itself, so the API already sees it.
+    expect(warn.mock.calls.some(c => String(c[0]).includes('only applies in bff mode'))).toBe(true)
+    warn.mockRestore()
+  })
+
+  it('fails the build on a confirmationHeader that is not a valid HTTP header name', () => {
+    // It becomes a computed header key; `Headers.set` rejects '' or a spaced value, which would
+    // 502 EVERY proxied request with nothing pointing at the cause.
+    expect(() => setup({ baseURL: 'https://api/auth', mode: 'bff', confirmationHeader: '' })).toThrow(/not a valid HTTP header name/)
+    expect(() => setup({ baseURL: 'https://api/auth', mode: 'bff', confirmationHeader: 'X Lukk' })).toThrow(/not a valid HTTP header name/)
+    expect(() => setup({ baseURL: 'https://api/auth', mode: 'bff', confirmationHeader: 'X-Step-Up' })).not.toThrow()
+  })
+
   it('warns when baseURL is empty', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     setup({ baseURL: '', mode: 'direct' })
