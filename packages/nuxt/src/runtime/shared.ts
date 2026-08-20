@@ -71,3 +71,39 @@ export function sessionCookieName(secure: boolean, name?: string): string {
 export function isSessionCookieName(name: string): boolean {
   return /^(__Host-)?lukk-([\w.-]+-)?session$/.test(name)
 }
+
+/** The default step-up header, and the fallback when a configured one is unusable. */
+export const LUKK_CONFIRMATION_HEADER = 'X-Lukk-Confirmation'
+
+const HEADER_TOKEN = /^[a-z0-9!#$%&'*+.^_`|~-]+$/i
+
+/**
+ * Header names the proxies set themselves. A step-up header colliding with one of these breaks
+ * something either way, and silently: in the app-API proxy the confirmation token is overwritten by
+ * the fixed header, so step-up stops working; in the auth proxy the token is written FIRST and would
+ * clobber `Accept`/`Content-Type`, so lukk misreads the request instead.
+ */
+const RESERVED_HEADERS = new Set([
+  'accept', 'authorization', 'content-type', 'cookie', 'host', 'x-forwarded-for',
+  'x-forwarded-host', 'x-forwarded-proto', 'x-forwarded-port', 'forwarded', 'x-real-ip',
+  'x-client-ip', 'true-client-ip', 'cf-connecting-ip', 'fastly-client-ip', 'x-cluster-client-ip',
+])
+
+/** Whether a configured step-up header is a valid token and not one the proxies set themselves. */
+export function isUsableConfirmationHeader(name: string): boolean {
+  const lower = name.toLowerCase()
+  return HEADER_TOKEN.test(lower) && !RESERVED_HEADERS.has(lower)
+}
+
+/**
+ * The step-up header the proxies actually use, falling back to the default when the effective value
+ * is unusable.
+ *
+ * The module rejects a bad value at build, but that only covers `nuxt.config`: this is public
+ * runtime config, so `NUXT_PUBLIC_LUKK_CONFIRMATION_HEADER` can replace it after the build. An
+ * invalid name there would make `Headers.set` throw on EVERY proxied request — taking the whole app
+ * API down over a step-up misconfiguration — so degrade to the default and lose only step-up.
+ */
+export function confirmationHeaderName(configured?: string): string {
+  return configured && isUsableConfirmationHeader(configured) ? configured : LUKK_CONFIRMATION_HEADER
+}

@@ -9,7 +9,7 @@ import {
 } from '@nuxt/kit'
 import { defu } from 'defu'
 import type { LukkMode } from 'lukk-core'
-import { LUKK_BFF_PREFIX, isResolvableBase, redactCredentials } from './runtime/shared'
+import { LUKK_BFF_PREFIX, isResolvableBase, isUsableConfirmationHeader, redactCredentials } from './runtime/shared'
 
 export { LUKK_BFF_PREFIX, LUKK_SESSION_COOKIE } from './runtime/shared'
 
@@ -301,9 +301,10 @@ export default defineNuxtModule<ModuleOptions>({
     }
 
     // An empty or non-token value becomes a computed header key that `Headers.set` rejects, 502ing
-    // every proxied request with nothing pointing at the cause.
-    if (!/^[a-z0-9!#$%&'*+.^_`|~-]+$/i.test(options.confirmationHeader)) {
-      fail(`[lukk-nuxt] confirmationHeader "${options.confirmationHeader}" is not a valid HTTP header name. Use a token such as X-Lukk-Confirmation.`)
+    // every proxied request; a name the proxies set themselves silently breaks step-up (or, in the
+    // auth proxy, clobbers Accept/Content-Type). Both fail loudly here rather than at request time.
+    if (!isUsableConfirmationHeader(options.confirmationHeader)) {
+      fail(`[lukk-nuxt] confirmationHeader "${options.confirmationHeader}" must be a valid HTTP header name that the proxies don't already set (not Authorization, Accept, Content-Type, Cookie, or a forwarding header). Use a token such as X-Lukk-Confirmation.`)
     }
 
     if (!effectiveBase) {

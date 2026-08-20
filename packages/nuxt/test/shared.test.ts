@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isResolvableBase, isSessionCookieName, LUKK_SESSION_COOKIE, redactCredentials, sessionCookieName } from '../src/runtime/shared'
+import { confirmationHeaderName, isResolvableBase, isSessionCookieName, LUKK_SESSION_COOKIE, redactCredentials, sessionCookieName } from '../src/runtime/shared'
 
 describe('redactCredentials', () => {
   it('masks userinfo, matching the URL parser at the LAST @ before the path', () => {
@@ -71,5 +71,25 @@ describe('isSessionCookieName', () => {
   it('does not match a non-lukk or look-alike cookie name', () => {
     for (const n of ['locale', 'lukksession', '__Host-lukk-session-extra', 'session', 'lukk-', 'xlukk-session'])
       expect(isSessionCookieName(n)).toBe(false)
+  })
+})
+
+describe('confirmationHeaderName', () => {
+  it('keeps a usable configured name', () => {
+    expect(confirmationHeaderName('X-Step-Up')).toBe('X-Step-Up')
+  })
+
+  it('falls back to the default for a name the build could never have seen', () => {
+    // Public runtime config, so `NUXT_PUBLIC_LUKK_CONFIRMATION_HEADER` can replace it after the
+    // build. An invalid name would make `Headers.set` throw on EVERY proxied request — the whole
+    // app API down over a step-up typo — so degrade and lose only step-up.
+    expect(confirmationHeaderName('')).toBe('X-Lukk-Confirmation')
+    expect(confirmationHeaderName(undefined)).toBe('X-Lukk-Confirmation')
+    expect(confirmationHeaderName('X Step Up')).toBe('X-Lukk-Confirmation')
+  })
+
+  it('falls back for a header the proxies set themselves, in either collision direction', () => {
+    for (const reserved of ['Authorization', 'accept', 'Content-Type', 'cookie', 'x-forwarded-for', 'CF-Connecting-IP'])
+      expect(confirmationHeaderName(reserved)).toBe('X-Lukk-Confirmation')
   })
 })

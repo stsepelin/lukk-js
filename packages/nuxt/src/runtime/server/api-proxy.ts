@@ -1,6 +1,6 @@
 import { defineEventHandler, getRequestHeader, proxyRequest, setResponseStatus, useSession } from 'h3'
 import { useRuntimeConfig } from '#imports'
-import { LUKK_BFF_PREFIX, isSessionCookieName, sessionCookieName } from '../shared'
+import { LUKK_BFF_PREFIX, confirmationHeaderName, isSessionCookieName, sessionCookieName } from '../shared'
 import { accessExpired } from './access-token'
 import { isForeignOrigin, rejectUnresolvedTarget, resolveTarget, visitorIp } from './proxy-utils'
 import { readSealedSession } from './sealed-session'
@@ -42,8 +42,9 @@ export default defineEventHandler(async (event) => {
     clientIpHeader?: string
   }
   const forwardSetCookie = apiForwardSetCookie ?? []
-  // Defaulted only for the field: the module always writes `public.lukk`, same as it writes `lukk`.
-  const { confirmationHeader = 'X-Lukk-Confirmation' } = useRuntimeConfig(event).public.lukk as { confirmationHeader?: string }
+  // Resolved through the shared guard: a post-build runtime override could otherwise name an
+  // invalid or proxy-owned header and break every request here (see `confirmationHeaderName`).
+  const confirmationHeader = confirmationHeaderName((useRuntimeConfig(event).public.lukk as { confirmationHeader?: string }).confirmationHeader)
   const clientIp = visitorIp(event, clientIpHeader)
   // Secure/`__Host-` in prod + dev-https, relaxed for dev-http (see module cookieSecure); the name's
   // prefix and the Secure attribute both derive from this one `secure` — they can't diverge.

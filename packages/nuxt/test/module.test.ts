@@ -313,12 +313,18 @@ describe('lukk-nuxt module', () => {
     warn.mockRestore()
   })
 
-  it('fails the build on a confirmationHeader that is not a valid HTTP header name', () => {
-    // It becomes a computed header key; `Headers.set` rejects '' or a spaced value, which would
-    // 502 EVERY proxied request with nothing pointing at the cause.
-    expect(() => setup({ baseURL: 'https://api/auth', mode: 'bff', confirmationHeader: '' })).toThrow(/not a valid HTTP header name/)
-    expect(() => setup({ baseURL: 'https://api/auth', mode: 'bff', confirmationHeader: 'X Lukk' })).toThrow(/not a valid HTTP header name/)
-    expect(() => setup({ baseURL: 'https://api/auth', mode: 'bff', confirmationHeader: 'X-Step-Up' })).not.toThrow()
+  it('fails the build on an unusable confirmationHeader', () => {
+    const bad = (confirmationHeader: string) => () => setup({ baseURL: 'https://api/auth', mode: 'bff', confirmationHeader })
+    // It becomes a computed header key; `Headers.set` rejects '' or a spaced value, which would 502
+    // EVERY proxied request with nothing pointing at the cause.
+    expect(bad('')).toThrow(/must be a valid HTTP header name/)
+    expect(bad('X Lukk')).toThrow(/must be a valid HTTP header name/)
+    // A name the proxies set themselves breaks silently instead: the app-API proxy overwrites the
+    // token (step-up stops working), and the auth proxy would clobber Accept/Content-Type.
+    expect(bad('Authorization')).toThrow(/must be a valid HTTP header name/)
+    expect(bad('accept')).toThrow(/must be a valid HTTP header name/)
+    expect(bad('X-Forwarded-For')).toThrow(/must be a valid HTTP header name/)
+    expect(bad('X-Step-Up')).not.toThrow()
   })
 
   it('warns when baseURL is empty', () => {

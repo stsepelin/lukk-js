@@ -2,7 +2,7 @@ import type { H3Event } from 'h3'
 import { isTokenPair } from 'lukk-core'
 import { defineEventHandler, getCookie, getRequestHeader, readRawBody, setResponseStatus, useSession } from 'h3'
 import { useRuntimeConfig } from '#imports'
-import { LUKK_BFF_PREFIX, sessionCookieName } from '../shared'
+import { LUKK_BFF_PREFIX, confirmationHeaderName, sessionCookieName } from '../shared'
 import { isForeignOrigin, rejectUnresolvedTarget, resolveTarget, visitorIp } from './proxy-utils'
 import { readSealedSession } from './sealed-session'
 import { warnIfSessionTooLarge } from './session-size'
@@ -52,7 +52,7 @@ export default defineEventHandler(async (event) => {
   const clientIp = visitorIp(event, clientIpHeader)
   // The option mirrors lukk's own `confirm.header`, so a rename has to reach lukk too — hardcoding
   // the default here would silently break step-up for anyone who changed it on both sides.
-  const { confirmationHeader = 'X-Lukk-Confirmation' } = useRuntimeConfig(event).public.lukk as { confirmationHeader?: string }
+  const confirmationHeader = confirmationHeaderName((useRuntimeConfig(event).public.lukk as { confirmationHeader?: string }).confirmationHeader)
   const rawBody = method === 'GET' || method === 'HEAD' ? undefined : await readRawBody(event)
 
   function callLukk(access: string | undefined): Promise<Response> {
