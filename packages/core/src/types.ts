@@ -98,6 +98,15 @@ export interface ResetPasswordInput {
   password_confirmation: string
 }
 
+/** Changing a password at `POST /auth/password` while signed in. Unlike the reset flow there is no
+ *  emailed token — `current_password` IS the proof, so a stolen access token alone can't take the
+ *  account over. `password` must differ from `current_password`. */
+export interface ChangePasswordInput {
+  current_password: string
+  password: string
+  password_confirmation: string
+}
+
 /** `POST /auth/two-factor` enrolment response (shown once). */
 export interface TwoFactorEnrollment {
   otpauth_uri: string
