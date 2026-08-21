@@ -1,0 +1,26 @@
+version: 2
+
+updates:
+  # The advisories that prompted this all lived in the dev tree — `nuxt` and what it pulls in.
+  # Nothing reaches a consumer (the module ships `@nuxt/kit`, `defu` and `ofetch`), but a lockfile
+  # nobody bumps is how 18 open alerts accumulate in the first place.
+  #
+  # Grouped so the weekly noise is one PR, and split dev/prod so a runtime bump — the only kind
+  # that can affect a consumer's install — arrives on its own and gets read.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      production:
+        dependency-type: production
+      development:
+        dependency-type: development
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ['*']
