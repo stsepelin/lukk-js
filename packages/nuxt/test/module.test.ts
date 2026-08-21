@@ -355,7 +355,9 @@ describe('session secret and user endpoint validation', () => {
   it('refuses a session secret shorter than iron will accept', () => {
     // The length was documented and enforced nowhere. iron rejects it at write time, so the old
     // failure mode was safe but awful: every login and refresh 500s, discovered in production.
-    expect(() => setup({ ...base, session: { password: 'a'.repeat(31) } })).toThrow(/at least 32/)
+    expect(() => setup({ ...base, session: { password: 'a'.repeat(31) } })).toThrow(/at least 32 characters/)
+    // Nothing derived from the secret — not even its length — reaches the message.
+    expect(() => setup({ ...base, session: { password: 'a'.repeat(31) } })).not.toThrow(/31/)
     expect(() => setup({ ...base, session: { password: 'a'.repeat(32) } })).not.toThrow()
   })
 

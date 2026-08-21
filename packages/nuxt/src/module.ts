@@ -312,8 +312,11 @@ export default defineNuxtModule<ModuleOptions>({
       // A SHORT password was documented as a requirement and enforced nowhere. iron rejects it at
       // write time, so the old failure mode was safe but awful: every login and refresh 500s, and
       // you find out in production rather than at build.
+      // Nothing DERIVED from the secret goes into the message — not even its length. `fail` logs
+      // under `nuxt prepare`, and build logs are routinely public (CI, error overlays); leaking the
+      // length of a secret narrows a search space for free. CodeQL flags the taint flow too.
       else if (password.length < 32) {
-        fail(`[lukk-nuxt] the session secret is ${password.length} characters — it must be at least 32. `
+        fail('[lukk-nuxt] the session secret is too short — it must be at least 32 characters. '
           + 'It is the confidentiality boundary for the sealed session cookie, the BFF equivalent of Laravel\'s APP_KEY.')
       }
     }
