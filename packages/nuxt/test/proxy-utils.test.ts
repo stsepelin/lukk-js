@@ -6,7 +6,7 @@ vi.mock('h3', () => ({
 }))
 
 // eslint-disable-next-line import/first
-import { hopByHopHeaders, isForeignOrigin, rejectUnresolvedTarget, resolveTarget, viaHeader, visitorIp } from '../src/runtime/server/proxy-utils'
+import { hopByHopHeaders, isForeignOrigin, rejectUnresolvedTarget, reportProxyFailure, resolveTarget, viaHeader, visitorIp } from '../src/runtime/server/proxy-utils'
 
 const ev = () => ({ status: 200 } as { status: number })
 
@@ -258,5 +258,21 @@ describe('isForeignOrigin', () => {
 
   it('rejects an unparseable Origin', () => {
     expect(post({ origin: 'not a url', host: 'app.test' })).toBe(true)
+  })
+})
+
+describe('reportProxyFailure', () => {
+  it('caps the number of distinct failures it will ever log', async () => {
+    // The dedup key includes the cause, so a cause embedding something variable (a request id, a
+    // timestamp) would grow the Set without bound — the same log amplification in a different
+    // costume, plus a slow leak. The last line it emits says it has stopped.
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    for (let i = 0; i < 30; i++) {
+      reportProxyFailure('https://api.test', Object.assign(new Error('x'), { cause: { message: `distinct-${i}` } }))
+    }
+
+    expect(error).toHaveBeenCalledTimes(20)
+    expect(String(error.mock.calls[19]![0])).toContain('further proxy failures will not be logged')
   })
 })

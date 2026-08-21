@@ -10,4 +10,4 @@
 
 Those names are now skipped rather than blanked. Nothing is lost: `fetch` manages the connection itself and never forwards them regardless. Blanking still applies to everything else a `Connection` header can legitimately name, which is the case the feature exists for.
 
-Also logs the underlying cause when a proxy fetch fails. The `502` was previously undiagnosable — an unreachable upstream and an illegal outgoing request looked identical — which is what made this cost a bisect rather than a glance at the logs.
+Also logs the underlying cause when a proxy fetch fails — once per distinct target and cause, since an outage fails every request identically. The `502` was previously undiagnosable — an unreachable upstream and an illegal outgoing request looked identical — which is what made this cost a bisect rather than a glance at the logs.

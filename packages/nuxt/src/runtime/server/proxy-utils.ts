@@ -59,6 +59,39 @@ export function reportUnusableBase(label: string, base: string): void {
   console.error(`[lukk] ${label} is not an absolute http(s) URL (got ${JSON.stringify(redactCredentials(base))}) — cannot resolve the upstream URL. Check the build-time environment variables for this deploy.`)
 }
 
+/**
+ * Proxy failures already reported, keyed on target + cause, plus a cap on distinct keys.
+ *
+ * An upstream outage fails EVERY request with the same cause, so logging per request turns a
+ * downstream problem into a log-cost problem and buries whatever else is happening. Keying on the
+ * cause rather than suppressing outright means a *different* failure still surfaces — the point of
+ * the message is to distinguish "can't reach the upstream" from "built an illegal request", and a
+ * blanket once-per-process would hide the second behind the first.
+ *
+ * The cap bounds the Set itself: a cause that embeds something variable would otherwise grow it
+ * without limit, which is the same amplification in a different costume.
+ */
+const reportedProxyFailures = new Set<string>()
+const PROXY_FAILURE_LOG_LIMIT = 20
+
+/** Report a failed proxy fetch once per distinct target+cause. */
+export function reportProxyFailure(target: string, error: unknown): void {
+  const cause = (error as { cause?: { message?: string } })?.cause?.message
+  const key = `${target}|${cause ?? ''}`
+
+  if (reportedProxyFailures.has(key) || reportedProxyFailures.size >= PROXY_FAILURE_LOG_LIMIT) return
+  reportedProxyFailures.add(key)
+
+  const suppressed = reportedProxyFailures.size === PROXY_FAILURE_LOG_LIMIT
+    ? ' (further proxy failures will not be logged)'
+    : ''
+
+  // h3 swallows a failed fetch into an opaque 502 with the reason only on `error.cause`, which
+  // Nuxt doesn't surface — so without this an unreachable upstream and an illegal outgoing request
+  // look identical, and diagnosing one means instrumenting h3 by hand.
+  console.error(`[lukk] app-API proxy failed for ${redactCredentials(target)}${cause ? ` — ${cause}` : ''}${suppressed}`)
+}
+
 /** Cap on escape-rejection lines per process — an unauthenticated caller controls the rate. */
 const ESCAPE_LOG_LIMIT = 50
 let escapesLogged = 0

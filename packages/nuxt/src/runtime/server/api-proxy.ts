@@ -2,7 +2,7 @@ import { defineEventHandler, getRequestHeader, proxyRequest, setResponseStatus, 
 import { useRuntimeConfig } from '#imports'
 import { LUKK_BFF_PREFIX, confirmationHeaderName, isSessionCookieName, sessionCookieName } from '../shared'
 import { accessExpired } from './access-token'
-import { hopByHopHeaders, isForeignOrigin, rejectUnresolvedTarget, resolveTarget, SPOOFABLE_FORWARDING, viaHeader, visitorIp } from './proxy-utils'
+import { hopByHopHeaders, isForeignOrigin, reportProxyFailure, rejectUnresolvedTarget, resolveTarget, SPOOFABLE_FORWARDING, viaHeader, visitorIp } from './proxy-utils'
 import { readSealedSession } from './sealed-session'
 import { refreshOnce, type TokenSession } from './utils/refresh'
 
@@ -176,8 +176,9 @@ export default defineEventHandler(async (event) => {
       }
     },
   }).catch((error: unknown) => {
-    const cause = (error as { cause?: { message?: string } })?.cause?.message
-    console.error(`[lukk] app-API proxy failed for ${base}${cause ? ` — ${cause}` : ''}`)
+    // Once per distinct target+cause — an outage fails every request identically, and this file's
+    // sibling reporters already learned that lesson (see `reportUnusableBase`).
+    reportProxyFailure(base, error)
 
     throw error
   })
