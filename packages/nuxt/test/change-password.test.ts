@@ -52,3 +52,41 @@ describe('useLukkChangePassword', () => {
     expect(changePassword).toHaveBeenCalledOnce()
   })
 })
+
+describe('overlapping calls', () => {
+  it('refuses a second change while one is in flight, without sending it', async () => {
+    // Not just flag bookkeeping: the second request would carry a `current_password` the first has
+    // already replaced, so lukk reads it as a wrong password and spends one of the account's
+    // consecutive-failure attempts. Verified server-side — a duplicate submit burns an attempt.
+    let release: () => void = () => {}
+    const changePassword = vi.fn(() => new Promise<void>((r) => { release = r }))
+    __test.nuxtApp = { $lukk: { changePassword } }
+    const pw = useLukkChangePassword()
+
+    const first = pw.changePassword(input)
+    await expect(pw.changePassword(input)).rejects.toMatchObject({ status: 409 })
+
+    // The decisive assertion: the second call never reached the network.
+    expect(changePassword).toHaveBeenCalledOnce()
+
+    release()
+    await first
+    expect(pw.changing.value).toBe(false)
+  })
+
+  it('allows a retry once the first settles, including after a failure', async () => {
+    // Refusing concurrent calls must not wedge the composable — a user who mistypes their current
+    // password has to be able to try again.
+    const changePassword = vi.fn()
+      .mockRejectedValueOnce({ status: 422, message: 'The provided password is incorrect.' })
+      .mockResolvedValueOnce(undefined)
+    __test.nuxtApp = { $lukk: { changePassword } }
+    const pw = useLukkChangePassword()
+
+    await expect(pw.changePassword(input)).rejects.toMatchObject({ status: 422 })
+    expect(pw.changing.value).toBe(false)
+
+    await pw.changePassword(input)
+    expect(changePassword).toHaveBeenCalledTimes(2)
+  })
+})

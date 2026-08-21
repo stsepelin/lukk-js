@@ -25,8 +25,23 @@ export function useLukkChangePassword() {
   /**
    * Change the password. Rejects with a `LukkError` on failure — `422` carries Laravel's validation
    * bag, so {@link useLukkForm} maps it onto your fields.
+   *
+   * A call made while one is already in flight is refused **without a request**. That is not
+   * bookkeeping for the flag above: the second request would carry a `current_password` the first
+   * has already replaced, so lukk reads it as a wrong password and spends one of the account's
+   * consecutive-failure attempts. A double-submit would quietly eat the user's lockout budget and
+   * report a `422` for a change that had in fact just succeeded.
+   *
+   * Refusing also makes `changing` correct by construction — there is never more than one in
+   * flight, so a single boolean cannot go stale. (The sibling composables need no equivalent: a
+   * reset link or a verification resend is idempotent and verifies no secret, so a duplicate there
+   * costs nothing.)
    */
   async function changePassword(input: ChangePasswordInput): Promise<void> {
+    if (changing.value) {
+      throw Object.assign(new Error('A password change is already in progress.'), { status: 409 })
+    }
+
     changing.value = true
     try {
       await $lukk.changePassword(input)
