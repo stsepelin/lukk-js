@@ -422,3 +422,58 @@ describe('app-API proxy', () => {
     error.mockRestore()
   })
 })
+
+describe('proxy failure diagnostics', () => {
+  it('surfaces the underlying cause, and still lets the failure propagate', async () => {
+    // h3 swallows a failed fetch into an opaque 502 with the reason only on `error.cause`, which
+    // Nuxt doesn't surface — so an unreachable upstream and an illegal outgoing request look
+    // identical. Shipping 0.10.0 with exactly that cost a user a bisect.
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const boom = Object.assign(new Error('fetch failed'), { cause: { message: `cause-${Math.random()}` } })
+    proxyRequest.mockRejectedValueOnce(boom)
+
+    await expect(run(ev({ path: '/api/x', headers: { ...sameOrigin } }))).rejects.toBe(boom)
+
+    expect(error).toHaveBeenCalledOnce()
+    expect(String(error.mock.calls[0]![0])).toContain(boom.cause.message)
+  })
+
+  it('logs once per distinct cause, not once per request', async () => {
+    // An upstream outage fails EVERY request with the same cause. Logging per request turns a
+    // downstream problem into a log-cost problem and buries whatever else is happening — the same
+    // reasoning `reportUnusableBase` and the escape logger in this file already encode.
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const cause = { message: `outage-${Math.random()}` }
+
+    for (let i = 0; i < 5; i++) {
+      proxyRequest.mockRejectedValueOnce(Object.assign(new Error('fetch failed'), { cause }))
+      await expect(run(ev({ path: '/api/x', headers: { ...sameOrigin } }))).rejects.toThrow()
+    }
+
+    expect(error).toHaveBeenCalledOnce()
+  })
+
+  it('still reports a DIFFERENT failure — suppression must not hide a new one', async () => {
+    // The message exists to tell "can't reach the upstream" apart from "built an illegal request".
+    // A blanket once-per-process would hide the second behind the first.
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    for (const message of [`first-${Math.random()}`, `second-${Math.random()}`]) {
+      proxyRequest.mockRejectedValueOnce(Object.assign(new Error('fetch failed'), { cause: { message } }))
+      await expect(run(ev({ path: '/api/x', headers: { ...sameOrigin } }))).rejects.toThrow()
+    }
+
+    expect(error).toHaveBeenCalledTimes(2)
+  })
+
+  it('stays useful when the failure carries no cause', async () => {
+    // A bare network error has no `cause`; the message must not trail an "undefined".
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    proxyRequest.mockRejectedValueOnce(new Error(`bare-${Math.random()}`))
+
+    await expect(run(ev({ path: '/api/x', headers: { ...sameOrigin } }))).rejects.toThrow()
+
+    expect(String(error.mock.calls[0]![0])).toContain('app-API proxy failed')
+    expect(String(error.mock.calls[0]![0])).not.toContain('undefined')
+  })
+})

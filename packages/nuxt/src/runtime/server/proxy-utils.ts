@@ -59,6 +59,39 @@ export function reportUnusableBase(label: string, base: string): void {
   console.error(`[lukk] ${label} is not an absolute http(s) URL (got ${JSON.stringify(redactCredentials(base))}) — cannot resolve the upstream URL. Check the build-time environment variables for this deploy.`)
 }
 
+/**
+ * Proxy failures already reported, keyed on target + cause, plus a cap on distinct keys.
+ *
+ * An upstream outage fails EVERY request with the same cause, so logging per request turns a
+ * downstream problem into a log-cost problem and buries whatever else is happening. Keying on the
+ * cause rather than suppressing outright means a *different* failure still surfaces — the point of
+ * the message is to distinguish "can't reach the upstream" from "built an illegal request", and a
+ * blanket once-per-process would hide the second behind the first.
+ *
+ * The cap bounds the Set itself: a cause that embeds something variable would otherwise grow it
+ * without limit, which is the same amplification in a different costume.
+ */
+const reportedProxyFailures = new Set<string>()
+const PROXY_FAILURE_LOG_LIMIT = 20
+
+/** Report a failed proxy fetch once per distinct target+cause. */
+export function reportProxyFailure(target: string, error: unknown): void {
+  const cause = (error as { cause?: { message?: string } })?.cause?.message
+  const key = `${target}|${cause ?? ''}`
+
+  if (reportedProxyFailures.has(key) || reportedProxyFailures.size >= PROXY_FAILURE_LOG_LIMIT) return
+  reportedProxyFailures.add(key)
+
+  const suppressed = reportedProxyFailures.size === PROXY_FAILURE_LOG_LIMIT
+    ? ' (further proxy failures will not be logged)'
+    : ''
+
+  // h3 swallows a failed fetch into an opaque 502 with the reason only on `error.cause`, which
+  // Nuxt doesn't surface — so without this an unreachable upstream and an illegal outgoing request
+  // look identical, and diagnosing one means instrumenting h3 by hand.
+  console.error(`[lukk] app-API proxy failed for ${redactCredentials(target)}${cause ? ` — ${cause}` : ''}${suppressed}`)
+}
+
 /** Cap on escape-rejection lines per process — an unauthenticated caller controls the rate. */
 const ESCAPE_LOG_LIMIT = 50
 let escapesLogged = 0
@@ -249,6 +282,20 @@ const HOP_BY_HOP: readonly string[] = [
 ]
 
 /**
+ * Headers `fetch` refuses to let you set — blank or not.
+ *
+ * undici throws `UND_ERR_INVALID_ARG` ("invalid keep-alive header") rather than ignoring the
+ * assignment, so putting one of these in the outgoing header bag makes the proxy fetch fail
+ * outright. They also never need blanking: fetch manages the connection itself and will not forward
+ * them whatever the inbound request said.
+ *
+ * This matters because `Connection: keep-alive` is what every HTTP/1.1 client sends, and the
+ * standard nginx reverse-proxy config for a Nitro app sets `Connection: upgrade` unconditionally —
+ * so the names parsed out of that header routinely include one of these.
+ */
+const UNSETTABLE: ReadonlySet<string> = new Set(['connection', 'keep-alive', 'upgrade', 'transfer-encoding'])
+
+/**
  * The hop-by-hop headers to blank for THIS request: the fixed set above, plus every field named in
  * the request's own `Connection` header.
  *
@@ -270,7 +317,7 @@ export function hopByHopHeaders(event: H3Event, keep: readonly string[] = []): R
   const blanked: Record<string, string> = {}
 
   for (const name of [...HOP_BY_HOP, ...named]) {
-    if (!protectedNames.has(name)) blanked[name] = ''
+    if (!protectedNames.has(name) && !UNSETTABLE.has(name)) blanked[name] = ''
   }
 
   return blanked

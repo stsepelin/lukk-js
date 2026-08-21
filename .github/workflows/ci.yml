@@ -35,6 +35,12 @@ jobs:
       - run: pnpm typecheck
       # Both packages' `test` enforces the 100% coverage threshold (vitest --coverage).
       - run: pnpm test
+      # The integration suite drives the real handlers over real sockets. It is NOT part of
+      # `pnpm test` (vitest excludes test/integration/**), and for a long time nothing ran it —
+      # which is how a bug that fails 11 of its 13 cases shipped in 0.10.0. Anything that depends
+      # on genuine HTTP (a `Connection` header, undici's forbidden-header rules, multipart transit)
+      # is invisible to the mocked unit suite and only shows up here.
+      - run: pnpm --filter lukk-nuxt test:integration
       - run: pnpm build
 
   nuxt-floor:
