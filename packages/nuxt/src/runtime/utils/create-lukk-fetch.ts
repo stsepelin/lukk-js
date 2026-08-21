@@ -98,5 +98,9 @@ export type RequestFetch = (request: string, opts?: FetchOptions) => Promise<unk
 
 export function createRequestFetch(requestFetch: RequestFetch, deps: LukkFetchDeps): $Fetch {
   const options = lukkFetchOptions(deps)
-  return ((request: string, opts: FetchOptions = {}) => requestFetch(request, { ...options, ...opts })) as $Fetch
+  // `redirect` sits AFTER the caller's opts, mirroring `lukk-core`'s ordering: a caller passing
+  // `redirect: 'follow'` would otherwise re-enable chasing a 3xx, and this fetch attaches the
+  // sealed session cookie on the server.
+  return ((request: string, opts: FetchOptions = {}) =>
+    requestFetch(request, { ...options, ...opts, redirect: 'manual' })) as $Fetch
 }

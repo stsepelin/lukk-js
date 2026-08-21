@@ -438,3 +438,23 @@ describe('useLukkForm', () => {
     expect(useLukkForm({ email: '' }).data.email).toBe('')
   })
 })
+
+describe('hostile validation bag', () => {
+  it('ignores a __proto__ / constructor field rather than re-parenting the error bag', async () => {
+    // `__proto__` assigns through Vue's reactive proxy to Object.prototype's accessor, which
+    // re-parents the bag. Nothing global is polluted, but such a field is never a real validation
+    // error — it can only be an attempt.
+    const form = useLukkForm({ email: '' })
+    api.mockRejectedValueOnce(val422({
+      __proto__: [JSON.stringify({ isAdmin: true })],
+      constructor: ['x'],
+      email: ['Required'],
+    }))
+
+    await expect(form.submit('post', '/save')).rejects.toMatchObject({ status: 422 })
+
+    expect(({} as Record<string, unknown>).isAdmin).toBeUndefined()
+    expect(form.errors.email).toBe('Required')
+    expect(Object.keys(form.errors)).toEqual(['email'])
+  })
+})

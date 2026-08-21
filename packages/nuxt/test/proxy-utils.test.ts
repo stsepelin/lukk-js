@@ -6,7 +6,7 @@ vi.mock('h3', () => ({
 }))
 
 // eslint-disable-next-line import/first
-import { rejectUnresolvedTarget, resolveTarget, visitorIp } from '../src/runtime/server/proxy-utils'
+import { hopByHopHeaders, isForeignOrigin, rejectUnresolvedTarget, resolveTarget, viaHeader, visitorIp } from '../src/runtime/server/proxy-utils'
 
 const ev = () => ({ status: 200 } as { status: number })
 
@@ -161,5 +161,102 @@ describe('visitorIp', () => {
     expect(visitorIp(req({ 'cf-connecting-ip': 'a'.repeat(60) }), 'cf-connecting-ip')).toBe('')
     // Anything header-injectable is rejected outright rather than forwarded.
     expect(visitorIp(req({ 'cf-connecting-ip': '1.2.3.4\r\nX-Admin: 1' }), 'cf-connecting-ip')).toBe('')
+  })
+})
+
+describe('hopByHopHeaders', () => {
+  it('blanks the standard hop-by-hop set h3 does not already drop', () => {
+    // h3's proxyRequest drops connection/keep-alive/upgrade/transfer-encoding; these are the rest
+    // of RFC 9110 §7.6.1, plus proxy-authorization, which is credential material for this hop only.
+    const blanked = hopByHopHeaders({ headers: {} } as never)
+
+    for (const name of ['te', 'trailer', 'proxy-connection', 'proxy-authenticate', 'proxy-authorization'])
+      expect(blanked[name]).toBe('')
+  })
+
+  it('blanks the fields the client named in Connection', () => {
+    // The half h3 misses: it drops `Connection` itself but forwards the fields it named, so a
+    // header explicitly marked single-hop reaches the upstream with the instruction to strip it gone.
+    const blanked = hopByHopHeaders({ headers: { connection: 'X-Custom-Thing, x-another' } } as never)
+
+    expect(blanked['x-custom-thing']).toBe('')
+    expect(blanked['x-another']).toBe('')
+  })
+
+  it('refuses to let Connection strip a header the proxy sets itself', () => {
+    // Otherwise a client could name `authorization` and have the injected bearer token removed on
+    // the way through — turning a header it cannot read into one it can delete.
+    const blanked = hopByHopHeaders(
+      { headers: { connection: 'authorization, x-forwarded-for, x-lukk-confirmation' } } as never,
+      ['authorization', 'x-forwarded-for', 'X-Lukk-Confirmation'],
+    )
+
+    expect(blanked).not.toHaveProperty('authorization')
+    expect(blanked).not.toHaveProperty('x-forwarded-for')
+    expect(blanked).not.toHaveProperty('x-lukk-confirmation')
+  })
+
+  it('ignores empty entries in a malformed Connection header', () => {
+    // `toHaveProperty('')` can't express this — an empty path is not a valid property path.
+    expect(Object.keys(hopByHopHeaders({ headers: { connection: ' , ,, ' } } as never))).not.toContain('')
+  })
+})
+
+describe('viaHeader', () => {
+  it('identifies this hop with a pseudonym, not the internal hostname', () => {
+    // RFC 9110 §7.6.3 permits a pseudonym; the alternative leaks the BFF's hostname upstream.
+    expect(viaHeader({ headers: {}, node: { req: { httpVersion: '1.1' } } } as never)).toBe('1.1 lukk-nuxt')
+  })
+
+  it('appends to an existing Via rather than replacing the chain', () => {
+    expect(viaHeader({ headers: { via: '1.1 edge' }, node: { req: { httpVersion: '2.0' } } } as never))
+      .toBe('1.1 edge, 2.0 lukk-nuxt')
+  })
+
+  it('falls back to 1.1 where there is no node request', () => {
+    // workerd, Deno and Bun presets have no `node.req`.
+    expect(viaHeader({ headers: {} } as never)).toBe('1.1 lukk-nuxt')
+  })
+})
+
+describe('isForeignOrigin', () => {
+  const post = (headers: Record<string, string>, secure = true) =>
+    isForeignOrigin({ method: 'POST', headers } as never, secure)
+
+  it('compares the scheme against cookieSecure, not against the transport', () => {
+    // NOT inferred from the socket. TLS almost always terminates at a proxy, so the socket Nitro
+    // sees is plain either way — and in Node a plain-HTTP socket has no `encrypted` property at
+    // all, so socket introspection answers identically for a production request and for `nuxi dev`
+    // over http. Getting that backwards 403s every non-GET in dev.
+    expect(post({ origin: 'https://app.test', host: 'app.test' })).toBe(false)
+    expect(post({ origin: 'http://app.test', host: 'app.test' })).toBe(true)
+  })
+
+  it('accepts an http origin when the session cookie is not Secure (dev over plain http)', () => {
+    // With `cookieSecure: false` there is no scheme to insist on — and this is the exact
+    // configuration `nuxi dev` produces, where a wrong answer breaks login for everyone.
+    expect(post({ origin: 'http://localhost:3000', host: 'localhost:3000' }, false)).toBe(false)
+    expect(post({ origin: 'https://localhost:3000', host: 'localhost:3000' }, false)).toBe(false)
+    // The host still has to match.
+    expect(post({ origin: 'http://evil.test', host: 'localhost:3000' }, false)).toBe(true)
+  })
+
+  it('treats a browser-declared cross-site or same-site request as foreign', () => {
+    // Sent by every browser and by no other client, so when present it is decisive. `same-site` is
+    // a different subdomain — still not us, and the `__Host-` cookie is host-locked anyway.
+    expect(post({ 'sec-fetch-site': 'cross-site', 'origin': 'https://app.test', 'host': 'app.test' })).toBe(true)
+    expect(post({ 'sec-fetch-site': 'same-site', 'origin': 'https://app.test', 'host': 'app.test' })).toBe(true)
+    expect(post({ 'sec-fetch-site': 'same-origin', 'origin': 'https://app.test', 'host': 'app.test' })).toBe(false)
+  })
+
+  it('leaves a non-browser caller alone, and never gates a safe method', () => {
+    // No Origin on a non-GET means no browser, hence no sealed cookie to ride. SameSite=Strict is
+    // the primary layer; this is the second.
+    expect(post({ host: 'app.test' })).toBe(false)
+    expect(isForeignOrigin({ method: 'GET', headers: { origin: 'https://evil.test' } } as never)).toBe(false)
+  })
+
+  it('rejects an unparseable Origin', () => {
+    expect(post({ origin: 'not a url', host: 'app.test' })).toBe(true)
   })
 })

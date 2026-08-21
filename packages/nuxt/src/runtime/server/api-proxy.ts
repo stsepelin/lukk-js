@@ -2,24 +2,9 @@ import { defineEventHandler, getRequestHeader, proxyRequest, setResponseStatus, 
 import { useRuntimeConfig } from '#imports'
 import { LUKK_BFF_PREFIX, confirmationHeaderName, isSessionCookieName, sessionCookieName } from '../shared'
 import { accessExpired } from './access-token'
-import { isForeignOrigin, rejectUnresolvedTarget, resolveTarget, visitorIp } from './proxy-utils'
+import { hopByHopHeaders, isForeignOrigin, rejectUnresolvedTarget, resolveTarget, SPOOFABLE_FORWARDING, viaHeader, visitorIp } from './proxy-utils'
 import { readSealedSession } from './sealed-session'
 import { refreshOnce, type TokenSession } from './utils/refresh'
-
-// Browser-settable forwarding / client-IP headers, neutralised so a script can't
-// spoof `$request->ip()` upstream. See docs/transport-modes.md.
-const SPOOFABLE_FORWARDING = {
-  'x-forwarded-host': '',
-  'x-forwarded-proto': '',
-  'x-forwarded-port': '',
-  'forwarded': '',
-  'x-real-ip': '',
-  'x-client-ip': '',
-  'true-client-ip': '',
-  'cf-connecting-ip': '',
-  'fastly-client-ip': '',
-  'x-cluster-client-ip': '',
-} as const
 
 /**
  * Optional BFF app-API proxy. Forwards same-origin `${apiPath}/**` to the fixed
@@ -51,7 +36,7 @@ export default defineEventHandler(async (event) => {
   const secure = cookieSecure !== false
   const sessionName = sessionCookieName(secure, cookieNamespace)
 
-  if (isForeignOrigin(event)) {
+  if (isForeignOrigin(event, secure)) {
     setResponseStatus(event, 403)
     return { message: 'Cross-origin request rejected.' }
   }
@@ -89,6 +74,11 @@ export default defineEventHandler(async (event) => {
       password: sessionPassword,
       name: sessionName,
       cookie: { sameSite: 'strict', secure, httpOnly: true, path: '/' },
+      // h3 otherwise accepts a sealed session from the `x-<name>-session` REQUEST HEADER in
+      // preference to the cookie — an auth channel outside `__Host-`, Secure, HttpOnly and
+      // SameSite=Strict. Nothing here reads it (readSealedSession is cookie-only), but leaving the
+      // door open on a session primitive is not worth the two words it costs to close.
+      sessionHeader: false,
     })
     // Proactive refresh: rotate ONCE (shared single-flight with the BFF proxy) so a
     // streamed request isn't spent on a guaranteed 401. A revoked session still
@@ -135,17 +125,30 @@ export default defineEventHandler(async (event) => {
       // `x-forwarded-for` is deliberately NOT in SPOOFABLE_FORWARDING: the spread must not blank it,
       // and h3 REPLACES the client's own header with this value rather than appending to it.
       'x-forwarded-for': clientIp || event.node.req.socket?.remoteAddress || '',
+      // RFC 9110 §7.6.3: a proxy adds itself to Via. A pseudonym, not the internal hostname.
+      'via': viaHeader(event),
+      // h3 will read a sealed session from `x-<cookie name>-session` unless told not to (see the
+      // `sessionHeader: false` on every useSession call). Blank it on the way upstream too, so the
+      // app API can never be handed one either.
+      [`x-${sessionName.toLowerCase()}-session`]: '',
       ...SPOOFABLE_FORWARDING,
+      // Last, so it can blank anything the client named in `Connection` (RFC 9110 §7.6.1) — but
+      // never the headers this proxy sets itself, or a client could use `Connection` to strip its
+      // own `authorization` and the step-up token on the way through.
+      ...hopByHopHeaders(event, ['authorization', 'cookie', 'x-forwarded-for', 'via', 'accept', 'content-type', confirmationHeader]),
     },
     // Not a cookie/cache passthrough: strip upstream Set-Cookie, restore the rotated session,
     // and (opt-in) re-emit only allow-listed app-API cookies. Keep it out of shared caches.
     onResponse(ev, response) {
-      // A trusted JSON upstream shouldn't 3xx; with redirect:'manual' one surfaces as an
-      // opaque (status 0) response — reject it rather than stream an empty 200 downstream.
-      if (response.type === 'opaqueredirect' || (response.status >= 300 && response.status < 400)) {
-        ev.node.res.statusCode = 502
-        return
-      }
+      // `sendProxy` copies the upstream's response headers — Set-Cookie included — BEFORE this
+      // runs, so the strip and the rotated-cookie restore below must happen on every path. The
+      // 3xx branch used to return first: harmless on Node, where undici filters an opaque redirect
+      // down to zero headers, but on workerd/Deno `redirect: 'manual'` yields a real 3xx WITH
+      // headers — there the upstream's Set-Cookie (possibly a forged lukk session, defeating the
+      // guard below) reached the browser and a just-rotated session cookie was dropped, stranding
+      // it on a consumed refresh token.
+      const redirected = response.type === 'opaqueredirect' || (response.status >= 300 && response.status < 400)
+
       const upstream = toCookieArray(ev.node.res.getHeader('set-cookie'))
       ev.node.res.removeHeader('set-cookie')
       const keep = toCookieArray(sessionCookie) // the rotated session cookie (if any)
@@ -160,6 +163,13 @@ export default defineEventHandler(async (event) => {
       }
       if (keep.length) ev.node.res.setHeader('set-cookie', keep)
       ev.node.res.setHeader('cache-control', 'private, no-store')
+
+      // A trusted JSON upstream shouldn't 3xx — reject it rather than stream an empty 200 (or a
+      // Location) downstream. Last, so the header hygiene above has already run.
+      if (redirected) {
+        ev.node.res.statusCode = 502
+        ev.node.res.removeHeader('location')
+      }
     },
   })
 })

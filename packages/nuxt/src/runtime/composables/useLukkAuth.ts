@@ -48,7 +48,11 @@ export function useLukkAuth() {
   async function login(credentials: LoginInput): Promise<LoginResult> {
     const result = await $lukk.login(credentials)
     if (isTwoFactorChallenge(result)) {
-      challenge.value = result.challenge_token
+      // Client-only, for the reason ACCESS_KEY is: a `useState` written during SSR serialises
+      // into `__NUXT_DATA__`. A challenge token is a live single-use credential, and at this point
+      // in the flow no session cookie exists yet — so `no-store` never fires and a CDN may cache
+      // the page with it embedded.
+      if (import.meta.client) challenge.value = result.challenge_token
       return result
     }
     await fetchUser()
@@ -67,7 +71,7 @@ export function useLukkAuth() {
       return result
     }
     if (isTwoFactorChallenge(result)) {
-      challenge.value = result.challenge_token
+      if (import.meta.client) challenge.value = result.challenge_token
       return result
     }
     await fetchUser()

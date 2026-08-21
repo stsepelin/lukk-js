@@ -1,3 +1,4 @@
+import { isSameOrigin } from 'lukk-core'
 import { ofetch } from 'ofetch'
 import { navigateTo, useNuxtApp, useRequestFetch, useRequestHeaders, useRuntimeConfig, useState } from '#imports'
 import { ACCESS_KEY } from '../keys'
@@ -39,7 +40,11 @@ export function useLukkFetch() {
     getCookieHeader: () => cookie,
     getBearer: () => (isDirect ? access.value : null),
     refresh: () => nuxtApp.$lukkRefresh?.() ?? Promise.resolve(null),
-    onRedirect: location => navigateTo(location, { external: true }),
+    // `external: true` opts out of Nuxt's absolute-URL block, so contain it ourselves: only follow
+    // a redirect that stays on the API's own origin. Unreachable today (the browser sees an opaque
+    // redirect, and the BFF proxy turns an upstream 3xx into a 502) — but this is the one place a
+    // server-controlled string becomes a navigation, and it shouldn't rely on the callers.
+    onRedirect: location => isSameOrigin(cfg.apiBaseURL, location) ? navigateTo(location, { external: true }) : undefined,
     fetchImpl: ofetch,
   }
 

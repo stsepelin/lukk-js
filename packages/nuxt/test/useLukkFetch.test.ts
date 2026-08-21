@@ -72,4 +72,16 @@ describe('useLukkFetch', () => {
     expect(__test.navigated).toBe('/login')
     expect(__test.navigatedOptions).toEqual({ external: true })
   })
+
+  it('refuses to follow a redirect off the API origin', () => {
+    // `external: true` opts out of Nuxt's absolute-URL block, so this is the one place a
+    // server-controlled string becomes a navigation. Contain it here rather than trust the caller.
+    __test.runtimeConfig.public.lukk = { mode: 'direct', apiBaseURL: 'https://api.example.com' }
+    useLukkFetch()
+    __test.navigated = undefined
+
+    deps().onRedirect('https://evil.test/steal')
+
+    expect(__test.navigated).toBeUndefined()
+  })
 })

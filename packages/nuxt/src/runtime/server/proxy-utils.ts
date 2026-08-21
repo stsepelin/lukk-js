@@ -99,13 +99,38 @@ export function rejectUnresolvedTarget(event: H3Event, base: string, label: stri
  * `Origin` whose host isn't this app's. The proxies are same-origin by design,
  * so a foreign Origin means a cross-site request riding the session cookie.
  */
-export function isForeignOrigin(event: H3Event): boolean {
+export function isForeignOrigin(event: H3Event, secure = true): boolean {
   if (event.method === 'GET' || event.method === 'HEAD') return false
+
+  // Browsers send this on every request and non-browsers send it never, so when it IS present and
+  // says cross-site, that is decisive — including for a request whose `Origin` we'd otherwise have
+  // to reason about.
+  if (['cross-site', 'same-site'].includes(getRequestHeader(event, 'sec-fetch-site') ?? '')) return true
+
   const origin = getRequestHeader(event, 'origin')
+  // Absent Origin is left permissive: every browser sends it on a non-GET, so this is a non-browser
+  // caller — which has no sealed cookie to ride. `SameSite=Strict` is the primary layer here; this
+  // check is the second one.
   if (!origin) return false
+
   const host = getRequestHeader(event, 'host')
+
   try {
-    return new URL(origin).host !== host
+    const url = new URL(origin)
+
+    if (url.host !== host) return true
+
+    // Compare the SCHEME against `cookieSecure`, NOT against the transport. TLS almost always
+    // terminates at a proxy, so the socket Nitro sees is plain either way — and in Node a
+    // plain-HTTP socket has no `encrypted` property at all, so any attempt to infer the scheme
+    // from it answers the same for a production request and for `nuxi dev` over http. Getting that
+    // backwards 403s every non-GET in dev.
+    //
+    // `cookieSecure` is decided once at build and never sniffed from a header, and it is exactly
+    // the right question: when the session cookie is Secure, a page served over http cannot be
+    // holding one, so an http Origin is either credential-less (harmless) or a downgrade attempt.
+    // When it is off — dev over plain http — there is no scheme to insist on.
+    return secure && url.protocol !== 'https:'
   }
   catch {
     return true
@@ -164,4 +189,106 @@ export function visitorIp(event: H3Event, clientIpHeader?: string): string {
   const raw = getRequestHeader(event, clientIpHeader)?.trim()
   if (!raw || raw.includes(',')) return ''
   return normalizeIp(raw)
+}
+
+/**
+ * Headers a browser can set that name a client address, blanked before the app-API proxy forwards.
+ *
+ * The upstream decides which of these to trust (Laravel's `TrustProxies` honours a configured mask
+ * and CDNs read their own), so any one arriving from the BROWSER is an attempt to choose the
+ * upstream's idea of `$request->ip()` — the value that becomes a rate-limit and lockout key. The
+ * proxy asserts `x-forwarded-for` itself and blanks the rest.
+ *
+ * Blanked rather than deleted: `proxyRequest` merges over the inbound headers, and an empty string
+ * replaces where an absent key would leave the client's value in place.
+ */
+export const SPOOFABLE_FORWARDING: Record<string, string> = {
+  'x-forwarded-host': '',
+  'x-forwarded-proto': '',
+  'x-forwarded-port': '',
+  'x-forwarded-server': '',
+  'x-forwarded': '',
+  'x-original-forwarded-for': '',
+  'x-http-forwarded-for': '',
+  'forwarded': '',
+  'x-real-ip': '',
+  'x-client-ip': '',
+  'x-remote-ip': '',
+  'x-remote-addr': '',
+  'x-originating-ip': '',
+  'client-ip': '',
+  'true-client-ip': '',
+  'cf-connecting-ip': '',
+  'cf-connecting-ipv6': '',
+  'cf-pseudo-ipv4': '',
+  'fastly-client-ip': '',
+  'x-cluster-client-ip': '',
+  'x-azure-clientip': '',
+  'x-azure-socketip': '',
+  'fly-client-ip': '',
+  'x-vercel-forwarded-for': '',
+  'x-vercel-proxied-for': '',
+  'x-appengine-user-ip': '',
+  'do-connecting-ip': '',
+  'oai-host': '',
+}
+
+/**
+ * Hop-by-hop headers, which a proxy MUST NOT forward (RFC 9110 §7.6.1).
+ *
+ * h3's `proxyRequest` already drops `connection`, `keep-alive`, `upgrade` and `transfer-encoding`;
+ * these are the rest of the standard set, plus `proxy-authorization`, which is credential material
+ * scoped to this hop alone.
+ */
+const HOP_BY_HOP: readonly string[] = [
+  'te',
+  'trailer',
+  'proxy-connection',
+  'proxy-authenticate',
+  'proxy-authorization',
+]
+
+/**
+ * The hop-by-hop headers to blank for THIS request: the fixed set above, plus every field named in
+ * the request's own `Connection` header.
+ *
+ * That second part is the half h3 doesn't do. RFC 9110 §7.6.1 requires a proxy to parse `Connection`
+ * and "remove any header field(s) from the message with the same name as the connection-option" —
+ * h3 drops `Connection` itself but forwards the fields it named, so a header the client explicitly
+ * marked as single-hop reaches the upstream with the instruction to strip it gone.
+ *
+ * Names the proxy sets deliberately are never blanked by this: a client cannot use `Connection` to
+ * strip its own `authorization`, the injected step-up header, or the asserted `x-forwarded-for`.
+ */
+export function hopByHopHeaders(event: H3Event, keep: readonly string[] = []): Record<string, string> {
+  const named = (getRequestHeader(event, 'connection') ?? '')
+    .split(',')
+    .map(name => name.trim().toLowerCase())
+    .filter(Boolean)
+
+  const protectedNames = new Set(keep.map(name => name.toLowerCase()))
+  const blanked: Record<string, string> = {}
+
+  for (const name of [...HOP_BY_HOP, ...named]) {
+    if (!protectedNames.has(name)) blanked[name] = ''
+  }
+
+  return blanked
+}
+
+/**
+ * The `Via` header this proxy adds to the request it forwards (RFC 9110 §7.6.3).
+ *
+ * A pseudonym rather than a host name: §7.6.3 explicitly permits one, and the alternative leaks the
+ * internal hostname of the BFF to the upstream. Request direction only — sending `Via` back to the
+ * browser would advertise the proxy's presence and version to anything that asks, for no benefit
+ * the browser can use.
+ */
+export function viaHeader(event: H3Event): string {
+  const received = getRequestHeader(event, 'via')?.trim()
+  // Via records the protocol version of the message RECEIVED (RFC 9110 §7.6.3). Optional-chained:
+  // the non-Node presets (workerd, Deno, Bun) have no `node.req`, and neither do unit tests.
+  const hop = `${event.node?.req?.httpVersion ?? '1.1'} lukk-nuxt`
+
+  return received ? `${received}, ${hop}` : hop
 }

@@ -348,3 +348,29 @@ describe('lukk-nuxt module', () => {
     expect(warned({ mode: 'bff' })).toBe(false) // neither (valid BFF-without-proxy)
   })
 })
+
+describe('session secret and user endpoint validation', () => {
+  const base = { baseURL: 'https://api.example.com/auth', mode: 'bff' }
+
+  it('refuses a session secret shorter than iron will accept', () => {
+    // The length was documented and enforced nowhere. iron rejects it at write time, so the old
+    // failure mode was safe but awful: every login and refresh 500s, discovered in production.
+    expect(() => setup({ ...base, session: { password: 'a'.repeat(31) } })).toThrow(/at least 32 characters/)
+    // Nothing derived from the secret — not even its length — reaches the message.
+    expect(() => setup({ ...base, session: { password: 'a'.repeat(31) } })).not.toThrow(/31/)
+    expect(() => setup({ ...base, session: { password: 'a'.repeat(32) } })).not.toThrow()
+  })
+
+  it('validates user.endpoint like every other base, and pins it same-origin in bff mode', () => {
+    // It had no validation at all — not even the "undefined/me" unset-env-var check — while being
+    // fetched with an EMPTY base and the sealed session cookie attached, on every SSR render.
+    const session = { password: 'a'.repeat(32) }
+
+    expect(() => setup({ ...base, session, user: { endpoint: 'undefined/me' } })).toThrow(/not a valid absolute URL/)
+    expect(() => setup({ ...base, session, user: { endpoint: 'https://elsewhere.test/me' } })).toThrow(/same-origin path in bff mode/)
+    expect(() => setup({ ...base, session, user: { endpoint: '/api/me' } })).not.toThrow()
+
+    // Direct mode legitimately points at another origin — that's where the app's API lives.
+    expect(() => setup({ baseURL: 'https://api.example.com/auth', mode: 'direct', user: { endpoint: 'https://api.example.com/me' } })).not.toThrow()
+  })
+})

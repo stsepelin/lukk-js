@@ -61,6 +61,11 @@ export async function resolveHydrationAccess(event: H3Event): Promise<string | n
       password: sessionPassword!,
       name,
       cookie: { sameSite: 'strict', secure, httpOnly: true, path: '/' },
+      // h3 otherwise accepts a sealed session from the `x-<name>-session` REQUEST HEADER in
+      // preference to the cookie — an auth channel outside `__Host-`, Secure, HttpOnly and
+      // SameSite=Strict. Nothing here reads it, but leaving a door open on a session primitive
+      // isn't worth the two words it costs to close.
+      sessionHeader: false,
     })
     const { pair } = await refreshOnce(session, baseURL, visitorIp(event, clientIpHeader))
     if (!pair?.access) return null

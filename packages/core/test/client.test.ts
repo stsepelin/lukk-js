@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createLukkClient, lukkError } from '../src/client'
+import { createLukkClient, isSameOrigin, lukkError } from '../src/client'
 
 describe('lukkError', () => {
   it('shapes a Laravel error, and falls back to statusText / omits errors without a body', () => {
@@ -296,5 +296,59 @@ describe('createLukkClient', () => {
       await client.request('https://bad host/x')
       expect(headersOf(fetch).get('Authorization')).toBeNull()
     })
+  })
+})
+
+describe('isSameOrigin canonicalises before deciding', () => {
+  const base = 'https://api.example.com/auth'
+
+  it('refuses every URL the WHATWG parser resolves to a foreign origin', () => {
+    // A bare `^https?://` test is far stricter than the parser, which strips leading C0 controls
+    // and spaces and treats `\` as `/` for special schemes. Each of these resolved to
+    // https://evil.com while reading as "relative" — and relative is what gets credentials.
+    for (const path of [
+      'https:/\\evil.com/steal',
+      ' https://evil.com/steal',
+      '\thttps://evil.com/steal',
+      '\nhttps://evil.com/steal',
+      'HTTPS:\\\\evil.com/steal',
+      '//evil.com/steal',
+      '/\\evil.com/steal',
+    ])
+      expect(isSameOrigin(base, path), path).toBe(false)
+  })
+
+  it('refuses a non-http scheme whatever the base', () => {
+    expect(isSameOrigin(base, 'javascript:alert(1)')).toBe(false)
+    expect(isSameOrigin(base, 'data:text/html,x')).toBe(false)
+  })
+
+  it('still accepts genuinely relative paths and a same-origin absolute URL', () => {
+    expect(isSameOrigin(base, '/login')).toBe(true)
+    expect(isSameOrigin(base, 'login')).toBe(true)
+    expect(isSameOrigin(base, 'https://api.example.com/x')).toBe(true)
+    // :443 is https's default port, so the origins match.
+    expect(isSameOrigin(base, 'https://api.example.com:443/x')).toBe(true)
+  })
+
+  it('still refuses a genuinely different origin', () => {
+    expect(isSameOrigin(base, 'https://evil.com/steal')).toBe(false)
+    expect(isSameOrigin(base, 'https://api.example.com:8443/x')).toBe(false)
+  })
+})
+
+describe('joinURL cannot emit an authority', () => {
+  it('strips every leading slash, so an empty base cannot produce a protocol-relative URL', async () => {
+    // With base '' or '/', stripping only ONE slash left `//evil.com/x` — a foreign origin that
+    // isSameOrigin had already blessed as relative.
+    const fetchSpy = vi.fn(async () => new Response('{}', { status: 200 }))
+
+    for (const base of ['', '/']) {
+      const client = createLukkClient({ baseURL: base, fetch: fetchSpy as never })
+      await client.request('//evil.test/steal').catch(() => {})
+    }
+
+    for (const call of fetchSpy.mock.calls)
+      expect(String(call[0]).startsWith('//')).toBe(false)
   })
 })

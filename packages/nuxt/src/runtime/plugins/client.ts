@@ -1,7 +1,7 @@
 import { createLukkClient, type LukkClient, singleFlight } from 'lukk-core'
 import { defineNuxtPlugin, useRuntimeConfig, useState } from '#imports'
 import { ACCESS_KEY, CONFIRMATION_KEY } from '../keys'
-import { LUKK_BFF_PREFIX } from '../shared'
+import { confirmationHeaderName, LUKK_BFF_PREFIX } from '../shared'
 
 /**
  * Provides `$lukk` — the core client, wired for the configured transport.
@@ -43,7 +43,11 @@ export default defineNuxtPlugin({
 
     const client: LukkClient = createLukkClient({
       baseURL,
-      confirmationHeader: cfg.confirmationHeader,
+      // Through the same runtime fallback both proxies use. This is PUBLIC runtime config, so
+      // `NUXT_PUBLIC_LUKK_CONFIRMATION_HEADER` lands after the build and defeats the module's
+      // validation: `authorization` would clobber the bearer with the step-up token on every
+      // confirmed request, and an empty value would make `Headers.set` throw on all of them.
+      confirmationHeader: confirmationHeaderName(cfg.confirmationHeader),
       getAccessToken: () => accessToken.value,
       getConfirmationToken: () => confirmation.value,
       refresh: safeRefresh,

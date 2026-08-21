@@ -38,6 +38,24 @@ pnpm --filter lukk-core test:conformance   # against a live lukk (see conformanc
 
 Both packages enforce **100% coverage** (statements/branches/functions/lines; each `test` runs `--coverage`). The Nuxt runtime is unit-tested via a lightweight `#imports` alias-mock (`test/mocks/imports.ts`) + `h3` mocks for `bff.ts` — no Nuxt boot. The live conformance specs (`packages/core/conformance/`) are excluded from the unit run and gate.
 
+## Audit history
+
+A full white-box audit ran **2026-08-21** against this branch — three parallel passes: the BFF
+server surface, `lukk-core`, and the Nuxt module/SSR boundary. **No Critical or High.** Every
+finding is fixed; the reasoning is in the `fix:` commits and the changesets. Two user-facing
+trade-offs are in the docs' Known limitations.
+
+Verified sound at that time — **don't re-derive these; a regression should read as a *change***:
+the access token cannot reach the SSR payload (four `ACCESS_KEY` writes, all `import.meta.client`
+gated, no server path); SSRF containment in `resolveTarget` (fuzzed over 6 base shapes × 50 hostile
+subpaths — dot-segments, percent- and double-encoding, backslashes, userinfo, CRLF, unicode
+lookalikes — zero escapes); no secret in `runtimeConfig.public`; the sealed-session read-only-then-
+lazy-write pattern never mints a cookie for an anonymous or tampered request; `refreshOnce` is
+race-free and genuinely per-session; `__Host-` prefix rules can't diverge from the `secure` flag;
+the hydration reseal rotates exactly once and writes both the response and the in-process cookie;
+route middleware all fail closed; base64url encode/decode and the WebAuthn `byteOffset` case;
+`JSON.parse` cannot pollute a prototype here (no `Object.assign`-style merge anywhere in core).
+
 ## Gotchas
 
 - **`import.meta.client`** is defined `true` in `packages/nuxt/vitest.config.ts` so the plugin behaves as the client in tests.
