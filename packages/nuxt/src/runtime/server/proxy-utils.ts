@@ -249,6 +249,20 @@ const HOP_BY_HOP: readonly string[] = [
 ]
 
 /**
+ * Headers `fetch` refuses to let you set — blank or not.
+ *
+ * undici throws `UND_ERR_INVALID_ARG` ("invalid keep-alive header") rather than ignoring the
+ * assignment, so putting one of these in the outgoing header bag makes the proxy fetch fail
+ * outright. They also never need blanking: fetch manages the connection itself and will not forward
+ * them whatever the inbound request said.
+ *
+ * This matters because `Connection: keep-alive` is what every HTTP/1.1 client sends, and the
+ * standard nginx reverse-proxy config for a Nitro app sets `Connection: upgrade` unconditionally —
+ * so the names parsed out of that header routinely include one of these.
+ */
+const UNSETTABLE: ReadonlySet<string> = new Set(['connection', 'keep-alive', 'upgrade', 'transfer-encoding'])
+
+/**
  * The hop-by-hop headers to blank for THIS request: the fixed set above, plus every field named in
  * the request's own `Connection` header.
  *
@@ -270,7 +284,7 @@ export function hopByHopHeaders(event: H3Event, keep: readonly string[] = []): R
   const blanked: Record<string, string> = {}
 
   for (const name of [...HOP_BY_HOP, ...named]) {
-    if (!protectedNames.has(name)) blanked[name] = ''
+    if (!protectedNames.has(name) && !UNSETTABLE.has(name)) blanked[name] = ''
   }
 
   return blanked

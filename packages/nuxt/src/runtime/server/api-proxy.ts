@@ -98,7 +98,11 @@ export default defineEventHandler(async (event) => {
   const accept = apiForceJson ? 'application/json' : (getRequestHeader(event, 'accept') ?? '')
   // Inject the bearer server-side; strip inbound Cookie/Authorization + spoofable
   // headers; `streamRequest` pipes the body through instead of buffering it.
-  return proxyRequest(event, base + query, {
+  // `sendProxy` swallows a failed fetch into an opaque 502 with the reason only on `error.cause`,
+  // which Nuxt doesn't surface — so a proxy that cannot reach the upstream, or that builds an
+  // illegal request, presents as a silent total outage. Surfacing the cause once turns that into a
+  // one-line diagnosis. Logged, never handled: the 502 still propagates unchanged.
+  return await proxyRequest(event, base + query, {
     streamRequest: true,
     // Never follow an upstream 3xx server-side — don't re-emit the injected bearer to a
     // redirect host (CWE-918/200). undici returns an opaque response instead of following;
@@ -171,6 +175,11 @@ export default defineEventHandler(async (event) => {
         ev.node.res.removeHeader('location')
       }
     },
+  }).catch((error: unknown) => {
+    const cause = (error as { cause?: { message?: string } })?.cause?.message
+    console.error(`[lukk] app-API proxy failed for ${base}${cause ? ` — ${cause}` : ''}`)
+
+    throw error
   })
 })
 

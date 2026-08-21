@@ -422,3 +422,32 @@ describe('app-API proxy', () => {
     error.mockRestore()
   })
 })
+
+describe('proxy failure diagnostics', () => {
+  it('surfaces the underlying cause once, and still lets the failure propagate', async () => {
+    // `sendProxy` swallows a failed fetch into an opaque 502 with the reason only on `error.cause`,
+    // which Nuxt doesn't surface — so an unreachable upstream, or an illegal outgoing request,
+    // presents as a silent total outage. Shipping 0.10.0 with exactly that cost a user a bisect.
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const boom = Object.assign(new Error('fetch failed'), { cause: { message: 'invalid keep-alive header' } })
+    proxyRequest.mockRejectedValueOnce(boom)
+
+    await expect(run(ev({ path: '/api/x', headers: { ...sameOrigin } }))).rejects.toBe(boom)
+
+    expect(error).toHaveBeenCalledOnce()
+    expect(String(error.mock.calls[0]![0])).toContain('invalid keep-alive header')
+  })
+
+  it('still logs when the failure carries no cause', async () => {
+    // A bare network error has no `cause`; the message must stay useful rather than trailing an
+    // "undefined".
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const bare = new Error('connect ECONNREFUSED')
+    proxyRequest.mockRejectedValueOnce(bare)
+
+    await expect(run(ev({ path: '/api/x', headers: { ...sameOrigin } }))).rejects.toBe(bare)
+
+    expect(String(error.mock.calls[0]![0])).toContain('app-API proxy failed')
+    expect(String(error.mock.calls[0]![0])).not.toContain('undefined')
+  })
+})

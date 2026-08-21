@@ -1,5 +1,5 @@
 import type { Server } from 'node:http'
-import { createServer } from 'node:http'
+import { createServer, request } from 'node:http'
 import { createApp, defineEventHandler, toNodeListener, useSession } from 'h3'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 // REAL h3 (no vi.mock here) + the real proxy handler, driven over real sockets
@@ -183,4 +183,60 @@ describe('api-proxy integration (real h3 + upstream)', () => {
       delete cfg.clientIpHeader
     }
   })
+})
+
+// Regression: lukk-nuxt 0.10.0 502'd on every proxied request whose client sent a `Connection`
+// header — i.e. every HTTP/1.1 client, and every deployment behind the standard nginx config
+// (`proxy_set_header Connection "upgrade"`). The hop-by-hop stripper blanked the names parsed
+// out of `Connection`, and undici REFUSES to set `connection`/`keep-alive`/`upgrade`/
+// `transfer-encoding` at all — blank or not — so the proxy's own fetch threw before leaving the
+// process and h3 turned it into an opaque 502.
+//
+// Driven with node:http rather than fetch: undici strips `Connection` from outgoing requests, so
+// a fetch-based client structurally cannot reproduce this. That is why the unit tests missed it.
+function httpGet(path: string, headers: Record<string, string>): Promise<{ status: number, body: string }> {
+  return new Promise((resolve, reject) => {
+    const { port: p, hostname } = new URL(proxyURL)
+    const req = request({ host: hostname, port: Number(p), path, method: 'GET', headers }, (res) => {
+      let body = ''
+      res.on('data', c => body += c)
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, body }))
+    })
+    req.on('error', reject)
+    req.end()
+  })
+}
+
+it('proxies a request from an HTTP/1.1 client that sends Connection: keep-alive', async () => {
+  const res = await httpGet('/api/countries', { connection: 'keep-alive' })
+
+  expect(res.status).toBe(200)
+  expect(JSON.parse(res.body)).toEqual({ ok: true })
+})
+
+it('proxies a request carrying Connection: upgrade (the nginx reverse-proxy config)', async () => {
+  // `proxy_set_header Connection "upgrade"` is set unconditionally in Nuxt's own deployment
+  // docs, so this arrives on EVERY request, not just websocket upgrades.
+  const res = await httpGet('/api/countries', { connection: 'upgrade', upgrade: 'websocket' })
+
+  expect(res.status).toBe(200)
+  expect(JSON.parse(res.body)).toEqual({ ok: true })
+})
+
+it('still strips a header the client legitimately named in Connection', async () => {
+  // The feature this stripper exists for (RFC 9110 §7.6.1) must keep working — the fix skips only
+  // the names fetch manages itself, not custom single-hop headers.
+  //
+  // Neutralised by BLANKING, not by removal: `proxyRequest` merges over the inbound headers, so
+  // omitting a key leaves the client's value in place. The upstream therefore sees the header
+  // present-but-empty rather than absent. Strictly §7.6.1 says "remove", and this is as close as
+  // that API allows — what matters is that the client's value does not survive the hop.
+  const res = await httpGet('/api/echo', {
+    'connection': 'keep-alive, x-visitor-country',
+    'x-visitor-country': 'SE',
+  })
+
+  expect(res.status).toBe(200)
+  expect(received.visitorCountry).toBe('')
+  expect(received.visitorCountry).not.toBe('SE')
 })
