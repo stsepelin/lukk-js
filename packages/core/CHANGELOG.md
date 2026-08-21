@@ -1,5 +1,9 @@
 # lukk-core
 
+## 0.10.1
+
+No changes to `lukk-core`. It versions in lockstep with `lukk-nuxt`, which shipped a fix for a proxy outage in 0.10.0 — see its changelog.
+
 ## 0.10.0
 
 ### Minor Changes
