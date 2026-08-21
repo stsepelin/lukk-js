@@ -1,4 +1,5 @@
 import type {
+  ChangePasswordInput,
   ConfirmationToken,
   LoginInput,
   LoginResult,
@@ -11,8 +12,8 @@ import type {
   RegisterResult,
   ResetPasswordInput,
   TokenPair,
-  TwoFactorInput,
   TwoFactorEnrollment,
+  TwoFactorInput,
 } from './types'
 
 /**
@@ -138,6 +139,9 @@ export function createLukkClient(hooks: LukkClientHooks) {
     forgotPassword: (email: string) => request<void>('/forgot-password', json({ email })),
     /** Complete a reset with the token + email from the emailed link and the new password. */
     resetPassword: (input: ResetPasswordInput) => request<void>('/reset-password', json(input)),
+    /** Change the password of the SIGNED-IN user. Revokes every other session upstream; this one
+     *  survives, so no re-login and no token change here. */
+    changePassword: (input: ChangePasswordInput) => request<void>('/password', json(input)),
 
     // --- step-up confirmation ---
     confirmPassword: (password: string) => request<ConfirmationToken>('/confirm-password', json({ password })),

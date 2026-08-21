@@ -96,6 +96,23 @@ describe('createLukkClient', () => {
     expect(JSON.parse((init as RequestInit).body as string)).toEqual({ email: 'a@b.c' })
   })
 
+  it('changes the signed-in password, sending the current one as the proof', async () => {
+    // No emailed token here — `current_password` IS the proof, which is what stops a stolen access
+    // token from being enough to take the account over.
+    const fetch = vi.fn(async () => json({ status: 'password-changed' }))
+    const client = createLukkClient({ baseURL: 'https://x/auth', fetch, getAccessToken: () => 'AT' })
+    const body = { current_password: 'old', password: 'new-secret-123', password_confirmation: 'new-secret-123' }
+
+    await client.changePassword(body)
+
+    const [url, init] = fetch.mock.calls[0]!
+    expect(url).toBe('https://x/auth/password')
+    expect(init?.method).toBe('POST')
+    expect(JSON.parse((init as RequestInit).body as string)).toEqual(body)
+    // Same-origin as the base, so the bearer rides along — the endpoint is authenticated.
+    expect(new Headers(init?.headers).get('authorization')).toBe('Bearer AT')
+  })
+
   it('completes a password reset with the token + email + new password', async () => {
     const fetch = vi.fn(async () => json({ status: 'password-reset' }))
     const client = createLukkClient({ baseURL: 'https://x/auth', fetch })
