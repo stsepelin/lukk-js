@@ -6,7 +6,7 @@ vi.mock('h3', () => ({
 }))
 
 // eslint-disable-next-line import/first
-import { rejectUnresolvedTarget, resolveTarget, visitorIp } from '../src/runtime/server/proxy-utils'
+import { hopByHopHeaders, rejectUnresolvedTarget, resolveTarget, viaHeader, visitorIp } from '../src/runtime/server/proxy-utils'
 
 const ev = () => ({ status: 200 } as { status: number })
 
@@ -161,5 +161,60 @@ describe('visitorIp', () => {
     expect(visitorIp(req({ 'cf-connecting-ip': 'a'.repeat(60) }), 'cf-connecting-ip')).toBe('')
     // Anything header-injectable is rejected outright rather than forwarded.
     expect(visitorIp(req({ 'cf-connecting-ip': '1.2.3.4\r\nX-Admin: 1' }), 'cf-connecting-ip')).toBe('')
+  })
+})
+
+describe('hopByHopHeaders', () => {
+  it('blanks the standard hop-by-hop set h3 does not already drop', () => {
+    // h3's proxyRequest drops connection/keep-alive/upgrade/transfer-encoding; these are the rest
+    // of RFC 9110 §7.6.1, plus proxy-authorization, which is credential material for this hop only.
+    const blanked = hopByHopHeaders({ headers: {} } as never)
+
+    for (const name of ['te', 'trailer', 'proxy-connection', 'proxy-authenticate', 'proxy-authorization'])
+      expect(blanked[name]).toBe('')
+  })
+
+  it('blanks the fields the client named in Connection', () => {
+    // The half h3 misses: it drops `Connection` itself but forwards the fields it named, so a
+    // header explicitly marked single-hop reaches the upstream with the instruction to strip it gone.
+    const blanked = hopByHopHeaders({ headers: { connection: 'X-Custom-Thing, x-another' } } as never)
+
+    expect(blanked['x-custom-thing']).toBe('')
+    expect(blanked['x-another']).toBe('')
+  })
+
+  it('refuses to let Connection strip a header the proxy sets itself', () => {
+    // Otherwise a client could name `authorization` and have the injected bearer token removed on
+    // the way through — turning a header it cannot read into one it can delete.
+    const blanked = hopByHopHeaders(
+      { headers: { connection: 'authorization, x-forwarded-for, x-lukk-confirmation' } } as never,
+      ['authorization', 'x-forwarded-for', 'X-Lukk-Confirmation'],
+    )
+
+    expect(blanked).not.toHaveProperty('authorization')
+    expect(blanked).not.toHaveProperty('x-forwarded-for')
+    expect(blanked).not.toHaveProperty('x-lukk-confirmation')
+  })
+
+  it('ignores empty entries in a malformed Connection header', () => {
+    // `toHaveProperty('')` can't express this — an empty path is not a valid property path.
+    expect(Object.keys(hopByHopHeaders({ headers: { connection: ' , ,, ' } } as never))).not.toContain('')
+  })
+})
+
+describe('viaHeader', () => {
+  it('identifies this hop with a pseudonym, not the internal hostname', () => {
+    // RFC 9110 §7.6.3 permits a pseudonym; the alternative leaks the BFF's hostname upstream.
+    expect(viaHeader({ headers: {}, node: { req: { httpVersion: '1.1' } } } as never)).toBe('1.1 lukk-nuxt')
+  })
+
+  it('appends to an existing Via rather than replacing the chain', () => {
+    expect(viaHeader({ headers: { via: '1.1 edge' }, node: { req: { httpVersion: '2.0' } } } as never))
+      .toBe('1.1 edge, 2.0 lukk-nuxt')
+  })
+
+  it('falls back to 1.1 where there is no node request', () => {
+    // workerd, Deno and Bun presets have no `node.req`.
+    expect(viaHeader({ headers: {} } as never)).toBe('1.1 lukk-nuxt')
   })
 })

@@ -2,24 +2,9 @@ import { defineEventHandler, getRequestHeader, proxyRequest, setResponseStatus, 
 import { useRuntimeConfig } from '#imports'
 import { LUKK_BFF_PREFIX, confirmationHeaderName, isSessionCookieName, sessionCookieName } from '../shared'
 import { accessExpired } from './access-token'
-import { isForeignOrigin, rejectUnresolvedTarget, resolveTarget, visitorIp } from './proxy-utils'
+import { hopByHopHeaders, isForeignOrigin, rejectUnresolvedTarget, resolveTarget, SPOOFABLE_FORWARDING, viaHeader, visitorIp } from './proxy-utils'
 import { readSealedSession } from './sealed-session'
 import { refreshOnce, type TokenSession } from './utils/refresh'
-
-// Browser-settable forwarding / client-IP headers, neutralised so a script can't
-// spoof `$request->ip()` upstream. See docs/transport-modes.md.
-const SPOOFABLE_FORWARDING = {
-  'x-forwarded-host': '',
-  'x-forwarded-proto': '',
-  'x-forwarded-port': '',
-  'forwarded': '',
-  'x-real-ip': '',
-  'x-client-ip': '',
-  'true-client-ip': '',
-  'cf-connecting-ip': '',
-  'fastly-client-ip': '',
-  'x-cluster-client-ip': '',
-} as const
 
 /**
  * Optional BFF app-API proxy. Forwards same-origin `${apiPath}/**` to the fixed
@@ -135,7 +120,13 @@ export default defineEventHandler(async (event) => {
       // `x-forwarded-for` is deliberately NOT in SPOOFABLE_FORWARDING: the spread must not blank it,
       // and h3 REPLACES the client's own header with this value rather than appending to it.
       'x-forwarded-for': clientIp || event.node.req.socket?.remoteAddress || '',
+      // RFC 9110 §7.6.3: a proxy adds itself to Via. A pseudonym, not the internal hostname.
+      'via': viaHeader(event),
       ...SPOOFABLE_FORWARDING,
+      // Last, so it can blank anything the client named in `Connection` (RFC 9110 §7.6.1) — but
+      // never the headers this proxy sets itself, or a client could use `Connection` to strip its
+      // own `authorization` and the step-up token on the way through.
+      ...hopByHopHeaders(event, ['authorization', 'cookie', 'x-forwarded-for', 'via', 'accept', 'content-type', confirmationHeader]),
     },
     // Not a cookie/cache passthrough: strip upstream Set-Cookie, restore the rotated session,
     // and (opt-in) re-emit only allow-listed app-API cookies. Keep it out of shared caches.

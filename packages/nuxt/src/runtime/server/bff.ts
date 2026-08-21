@@ -3,7 +3,7 @@ import { isTokenPair } from 'lukk-core'
 import { defineEventHandler, getCookie, getRequestHeader, readRawBody, setResponseStatus, useSession } from 'h3'
 import { useRuntimeConfig } from '#imports'
 import { LUKK_BFF_PREFIX, confirmationHeaderName, sessionCookieName } from '../shared'
-import { isForeignOrigin, rejectUnresolvedTarget, resolveTarget, visitorIp } from './proxy-utils'
+import { isForeignOrigin, rejectUnresolvedTarget, resolveTarget, viaHeader, visitorIp } from './proxy-utils'
 import { readSealedSession } from './sealed-session'
 import { warnIfSessionTooLarge } from './session-size'
 import { refreshOnce, type TokenSession } from './utils/refresh'
@@ -56,7 +56,10 @@ export default defineEventHandler(async (event) => {
   const rawBody = method === 'GET' || method === 'HEAD' ? undefined : await readRawBody(event)
 
   function callLukk(access: string | undefined): Promise<Response> {
-    const headers: Record<string, string> = { Accept: 'application/json' }
+    // This path builds its headers from scratch rather than forwarding the client's, so there is
+    // nothing to strip — no hop-by-hop or spoofed forwarding header can reach the upstream. Via is
+    // still owed: RFC 9110 §7.6.3 asks every forwarding intermediary to identify itself.
+    const headers: Record<string, string> = { Accept: 'application/json', Via: viaHeader(event) }
     const contentType = getRequestHeader(event, 'content-type')
     if (contentType) headers['Content-Type'] = contentType
     // Confirmation token is held server-side too — never trust one from the browser.
