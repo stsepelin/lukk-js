@@ -60,6 +60,7 @@ route middleware all fail closed; base64url encode/decode and the WebAuthn `byte
 
 - **`import.meta.client`** is defined `true` in `packages/nuxt/vitest.config.ts` so the plugin behaves as the client in tests.
 - **Conformance completes real ceremonies** — `conformance/authenticator.ts` (pure `node:crypto`, no deps) is a TOTP generator + a software WebAuthn authenticator (P-256 + minimal CBOR) that drive a real 2FA TOTP and a full passkey register→login against live lukk, in both cookie modes, in CI.
+- **The declared Nuxt floor is tested, not assumed.** `@nuxt/kit: ^3.13.0` is the supported minimum, but a caret range always resolves to the newest 3.x — so the main CI job only ever exercises the latest. The `nuxt-floor` job installs the floor and runs build + typecheck against it, deriving the version from `package.json` so raising the floor moves the test with it. Don't raise `@nuxt/kit` to silence a dependency-update tool: nothing in that package has been the cause of an advisory, and the floor is a compatibility promise.
 - **The fixture pins Laravel 12** (`conformance/fixture/build.sh`) — `web-auth/webauthn-lib` doesn't support Symfony 8 yet; lukk supports `^12|^13`. Throttles are relaxed in the fixture so the suite can replay flows.
 - **Default-param trap:** a default parameter applies when the arg is `undefined` — to test a genuinely-absent value (e.g. a session with no `id`), override the field after construction.
 - Releases use **changesets** (per-package `CHANGELOG.md` auto-generated) — there is no manual root changelog.
