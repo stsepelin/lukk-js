@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { useState } from '#imports'
-import { __test } from './mocks/imports'
-import { useLukkPassword } from '../src/runtime/composables/useLukkPassword'
+import { __test, useState } from './mocks/imports'
+import { ACCESS_KEY } from '../src/runtime/keys'
+import { useLukkChangePassword } from '../src/runtime/composables/useLukkChangePassword'
 
 afterEach(() => { __test.reset(); vi.clearAllMocks() })
 
@@ -11,12 +11,12 @@ const input = {
   password_confirmation: 'new-secret',
 }
 
-describe('useLukkPassword', () => {
+describe('useLukkChangePassword', () => {
   it('sends the change and toggles `changing` across the request', async () => {
     let release: () => void = () => {}
     const changePassword = vi.fn(() => new Promise<void>((r) => { release = r }))
     __test.nuxtApp = { $lukk: { changePassword } }
-    const pw = useLukkPassword()
+    const pw = useLukkChangePassword()
 
     const pending = pw.changePassword(input)
     expect(pw.changing.value).toBe(true)
@@ -32,7 +32,7 @@ describe('useLukkPassword', () => {
     // 423 are both reachable. None of them may leave a submit button disabled forever.
     const changePassword = vi.fn().mockRejectedValue({ status: 422, message: 'The provided password is incorrect.' })
     __test.nuxtApp = { $lukk: { changePassword } }
-    const pw = useLukkPassword()
+    const pw = useLukkChangePassword()
 
     await expect(pw.changePassword(input)).rejects.toMatchObject({ status: 422 })
     expect(pw.changing.value).toBe(false)
@@ -44,9 +44,9 @@ describe('useLukkPassword', () => {
     // they just changed their password in.
     const changePassword = vi.fn().mockResolvedValue(undefined)
     __test.nuxtApp = { $lukk: { changePassword } }
-    const access = useState<string | null>('lukk:access', () => 'live-token')
+    const access = useState<string | null>(ACCESS_KEY, () => 'live-token')
 
-    await useLukkPassword().changePassword(input)
+    await useLukkChangePassword().changePassword(input)
 
     expect(access.value).toBe('live-token')
     expect(changePassword).toHaveBeenCalledOnce()

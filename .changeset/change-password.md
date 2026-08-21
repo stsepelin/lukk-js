@@ -3,12 +3,12 @@
 "lukk-nuxt": minor
 ---
 
-Add `changePassword` and `useLukkPassword` for lukk's new `POST /auth/password`.
+Add `changePassword` and `useLukkChangePassword` for lukk's new `POST /auth/password`.
 
 The signed-in counterpart to the reset flow: no emailed token, because `current_password` is the proof. That's the point of the endpoint — a stolen access token alone must not be enough to take an account over permanently, which is exactly what changing the password would do.
 
 ```ts
-const { changePassword, changing } = useLukkPassword()
+const { changePassword, changing } = useLukkChangePassword()
 
 await changePassword({
   current_password: current.value,
