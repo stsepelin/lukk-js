@@ -29,7 +29,7 @@ export default defineEventHandler(async (event) => {
   const cookieOptions: SessionCookieOptions = { sameSite: 'strict', secure, httpOnly: true, path: '/' }
 
   // CSRF: reject a state-changing request riding the session cookie from a foreign origin.
-  if (isForeignOrigin(event)) {
+  if (isForeignOrigin(event, secure)) {
     setResponseStatus(event, 403)
     return { message: 'Cross-origin request rejected.' }
   }

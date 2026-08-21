@@ -220,15 +220,25 @@ describe('viaHeader', () => {
 })
 
 describe('isForeignOrigin', () => {
-  const post = (headers: Record<string, string>, encrypted = true) =>
-    isForeignOrigin({ method: 'POST', headers, node: { req: { socket: { encrypted } } } } as never)
+  const post = (headers: Record<string, string>, secure = true) =>
+    isForeignOrigin({ method: 'POST', headers } as never, secure)
 
-  it('compares the scheme, not just the host', () => {
-    // Host-only meant `http://app.test` matched an HTTPS deployment's `Host: app.test`.
+  it('compares the scheme against cookieSecure, not against the transport', () => {
+    // NOT inferred from the socket. TLS almost always terminates at a proxy, so the socket Nitro
+    // sees is plain either way — and in Node a plain-HTTP socket has no `encrypted` property at
+    // all, so socket introspection answers identically for a production request and for `nuxi dev`
+    // over http. Getting that backwards 403s every non-GET in dev.
     expect(post({ origin: 'https://app.test', host: 'app.test' })).toBe(false)
     expect(post({ origin: 'http://app.test', host: 'app.test' })).toBe(true)
-    // ...and the same request over plain http is legitimately same-origin.
-    expect(post({ origin: 'http://app.test', host: 'app.test' }, false)).toBe(false)
+  })
+
+  it('accepts an http origin when the session cookie is not Secure (dev over plain http)', () => {
+    // With `cookieSecure: false` there is no scheme to insist on — and this is the exact
+    // configuration `nuxi dev` produces, where a wrong answer breaks login for everyone.
+    expect(post({ origin: 'http://localhost:3000', host: 'localhost:3000' }, false)).toBe(false)
+    expect(post({ origin: 'https://localhost:3000', host: 'localhost:3000' }, false)).toBe(false)
+    // The host still has to match.
+    expect(post({ origin: 'http://evil.test', host: 'localhost:3000' }, false)).toBe(true)
   })
 
   it('treats a browser-declared cross-site or same-site request as foreign', () => {
@@ -246,9 +256,7 @@ describe('isForeignOrigin', () => {
     expect(isForeignOrigin({ method: 'GET', headers: { origin: 'https://evil.test' } } as never)).toBe(false)
   })
 
-  it('rejects an unparseable Origin, and copes with a runtime that has no node socket', () => {
+  it('rejects an unparseable Origin', () => {
     expect(post({ origin: 'not a url', host: 'app.test' })).toBe(true)
-    // workerd/Deno: no `node.req` — assume TLS rather than inventing a downgrade.
-    expect(isForeignOrigin({ method: 'POST', headers: { origin: 'https://app.test', host: 'app.test' } } as never)).toBe(false)
   })
 })

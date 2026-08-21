@@ -99,7 +99,7 @@ export function rejectUnresolvedTarget(event: H3Event, base: string, label: stri
  * `Origin` whose host isn't this app's. The proxies are same-origin by design,
  * so a foreign Origin means a cross-site request riding the session cookie.
  */
-export function isForeignOrigin(event: H3Event): boolean {
+export function isForeignOrigin(event: H3Event, secure = true): boolean {
   if (event.method === 'GET' || event.method === 'HEAD') return false
 
   // Browsers send this on every request and non-browsers send it never, so when it IS present and
@@ -118,21 +118,23 @@ export function isForeignOrigin(event: H3Event): boolean {
   try {
     const url = new URL(origin)
 
-    // Compare the SCHEME too. Host-only meant `http://app.example.com` matched an HTTPS
-    // deployment's `Host: app.example.com` — Chrome's schemeful same-site treats those as
-    // different sites, so the cookie wouldn't ride along, but the check shouldn't disagree.
-    return url.host !== host || url.protocol !== (isRequestSecure(event) ? 'https:' : 'http:')
+    if (url.host !== host) return true
+
+    // Compare the SCHEME against `cookieSecure`, NOT against the transport. TLS almost always
+    // terminates at a proxy, so the socket Nitro sees is plain either way — and in Node a
+    // plain-HTTP socket has no `encrypted` property at all, so any attempt to infer the scheme
+    // from it answers the same for a production request and for `nuxi dev` over http. Getting that
+    // backwards 403s every non-GET in dev.
+    //
+    // `cookieSecure` is decided once at build and never sniffed from a header, and it is exactly
+    // the right question: when the session cookie is Secure, a page served over http cannot be
+    // holding one, so an http Origin is either credential-less (harmless) or a downgrade attempt.
+    // When it is off — dev over plain http — there is no scheme to insist on.
+    return secure && url.protocol !== 'https:'
   }
   catch {
     return true
   }
-}
-
-/** Whether this request arrived over TLS, honouring only the proxy hop we set ourselves. */
-function isRequestSecure(event: H3Event): boolean {
-  return event.node?.req?.socket && 'encrypted' in event.node.req.socket
-    ? Boolean((event.node.req.socket as { encrypted?: boolean }).encrypted)
-    : true
 }
 
 const IPV4 = /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/

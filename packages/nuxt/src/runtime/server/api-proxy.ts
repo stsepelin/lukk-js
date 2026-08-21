@@ -36,7 +36,7 @@ export default defineEventHandler(async (event) => {
   const secure = cookieSecure !== false
   const sessionName = sessionCookieName(secure, cookieNamespace)
 
-  if (isForeignOrigin(event)) {
+  if (isForeignOrigin(event, secure)) {
     setResponseStatus(event, 403)
     return { message: 'Cross-origin request rejected.' }
   }

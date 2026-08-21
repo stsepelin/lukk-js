@@ -487,3 +487,32 @@ describe('credential redaction fails closed', () => {
     }
   })
 })
+
+describe('dev over plain http', () => {
+  it('does not 403 a login when the session cookie is not Secure', async () => {
+    // The end-to-end version of the CSRF scheme check. `nuxi dev` over http serves the app at
+    // http://localhost:3000 and sets a non-Secure cookie; inferring the scheme from the socket
+    // instead answered "https" here (a plain Node socket has no `encrypted` property at all) and
+    // rejected every non-GET — login, refresh, logout, confirmation.
+    __test.runtimeConfig.lukk = {
+      baseURL: 'https://lukk/auth',
+      sessionPassword: 'p'.repeat(32),
+      cookieSecure: false,
+    } as unknown as Record<string, unknown>
+
+    const session = makeSession({})
+    mockFetch().fetch = vi.fn().mockResolvedValue(jsonRes({ access_token: 'at', refresh_token: 'rt', expires_in: 900 }))
+
+    const event = makeEvent({
+      path: '/api/_lukk/login',
+      method: 'POST',
+      headers: { origin: 'http://localhost:3000', host: 'localhost:3000' },
+      body: '{}',
+      session,
+    })
+    const body = await run(event)
+
+    expect(event.status).not.toBe(403)
+    expect(body).toEqual({ ok: true, expires_in: 900 })
+  })
+})
