@@ -18,6 +18,9 @@ vi.mock('h3', () => ({
   readRawBody: async (event: { body?: string }) => event.body,
   getRequestIP: (event: { ip?: string }) => event.ip,
   setResponseStatus: (event: { status: number }, status: number) => { event.status = status },
+  setResponseHeader: (event: { headers: Record<string, string>, __res?: Record<string, string> }, name: string, value: string) => {
+    (event.__res ??= {})[name] = value
+  },
   useSession: async (event: { __session: unknown }, config: { name?: string }) => { h3state.useSessionCalls++; h3state.lastSessionName = config?.name; return event.__session },
 }))
 
@@ -378,5 +381,109 @@ describe('BFF proxy', () => {
     const event = makeEvent({ path: '/api/_lukk/x', method: 'POST', headers: { ...sameOrigin }, session })
     expect(await run(event)).toEqual({ message: 'Upstream redirect rejected.' })
     expect(event.status).toBe(502)
+  })
+})
+
+describe('the /refresh subpath is served, not proxied', () => {
+  it('rotates the sealed token and returns the tokenless shape', async () => {
+    // The browser holds an opaque cookie, not a refresh token, so its body is empty. Proxying it
+    // asked lukk to rotate nothing (401), and the generic 401 branch then rotated the SEALED token
+    // and retried the same empty body — a rotation burned per attempt, still a 401. `restore()` on
+    // app load is exactly this call, so in BFF mode it could never succeed.
+    const session = makeSession({ access: 'old', refresh: 'rt-seed' })
+    const fetchMock = vi.fn().mockResolvedValue(jsonRes({ access_token: 'new-at', refresh_token: 'rt-1', expires_in: 900 }))
+    mockFetch().fetch = fetchMock
+
+    const event = makeEvent({ path: '/api/_lukk/refresh', method: 'POST', headers: { ...sameOrigin }, body: '{}', session })
+    const body = await run(event) as { ok: boolean, expires_in: number }
+
+    // Exactly ONE upstream call, and it carried the SEALED token — not the browser's empty body.
+    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(String(fetchMock.mock.calls[0]![1]!.body)).toContain('rt-seed')
+
+    expect(body).toEqual({ ok: true, expires_in: 900 })
+    expect(JSON.stringify(body)).not.toContain('rt-1')
+    expect(session.data).toMatchObject({ access: 'new-at', refresh: 'rt-1' })
+  })
+
+  it('401s an anonymous caller without minting a session cookie', async () => {
+    const session = makeSession({})
+    mockFetch().fetch = vi.fn()
+
+    const event = makeEvent({ path: '/api/_lukk/refresh', method: 'POST', headers: { ...sameOrigin }, body: '{}', session, cookiePresent: false })
+    await run(event)
+
+    expect(event.status).toBe(401)
+    expect(mockFetch().fetch).not.toHaveBeenCalled()
+    expect(h3state.useSessionCalls).toBe(0) // never opened read-write → no empty cookie minted
+  })
+
+  it('keeps the session on a throttled refresh but clears it on a definitive reject', async () => {
+    const throttled = makeSession({ refresh: 'rt' })
+    mockFetch().fetch = vi.fn().mockResolvedValue(new Response('{}', { status: 429 }))
+    const ev1 = makeEvent({ path: '/api/_lukk/refresh', method: 'POST', headers: { ...sameOrigin }, body: '{}', session: throttled })
+    await run(ev1)
+    expect(ev1.status).toBe(503)
+    expect(throttled.data.refresh).toBe('rt') // a 429 must not turn into a logout
+
+    const rejected = makeSession({ refresh: 'rt' })
+    mockFetch().fetch = vi.fn().mockResolvedValue(new Response('{}', { status: 401 }))
+    const ev2 = makeEvent({ path: '/api/_lukk/refresh', method: 'POST', headers: { ...sameOrigin }, body: '{}', session: rejected })
+    await run(ev2)
+    expect(ev2.status).toBe(401)
+    expect(rejected.data).toEqual({})
+  })
+})
+
+describe('cache directives', () => {
+  it('marks every auth response uncacheable, replacing the upstream header it drops', async () => {
+    // lukk stamps no-store on credential responses; this handler returns a body and drops upstream
+    // headers, so authenticated GETs (the passkey inventory, the recovery-code count) were reaching
+    // shared caches with no directives and no Vary — heuristic freshness keyed on path alone.
+    const session = makeSession({ access: 'a' })
+    mockFetch().fetch = vi.fn().mockResolvedValue(jsonRes({ passkeys: [] }))
+
+    const event = makeEvent({ path: '/api/_lukk/passkeys', method: 'GET', headers: { ...sameOrigin }, session })
+    await run(event)
+
+    expect(event.__res?.['cache-control']).toBe('private, no-store')
+    expect(event.__res?.vary).toBe('cookie')
+  })
+})
+
+describe('credential redaction fails closed', () => {
+  it('strips refresh/confirmation tokens from a body that misses the capture gate', async () => {
+    // The captures are allow-list gated (`isTokenPair` needs a STRING access_token), so a body that
+    // almost matches used to skip the strip entirely and ship a rotating refresh token to the
+    // browser — the one thing BFF mode exists to prevent. Capture on a match; redact regardless.
+    const session = makeSession({ access: 'a' })
+    // `access_token: null` misses isTokenPair (it needs a STRING), and there is no string
+    // confirmation_token, so neither capture fires — this is the pass-through path.
+    mockFetch().fetch = vi.fn().mockResolvedValue(
+      jsonRes({ access_token: null, refresh_token: 'rt-leak', keep: 'me' }),
+    )
+
+    const body = await run(makeEvent({ path: '/api/_lukk/x', method: 'POST', headers: { ...sameOrigin }, session }))
+
+    expect(JSON.stringify(body)).not.toContain('rt-leak')
+    expect(body).toEqual({ access_token: null, keep: 'me' })
+
+    // A non-string confirmation_token misses its capture gate the same way, and is still removed.
+    mockFetch().fetch = vi.fn().mockResolvedValue(jsonRes({ confirmation_token: 12345, keep: 'me' }))
+    const second = await run(makeEvent({ path: '/api/_lukk/y', method: 'POST', headers: { ...sameOrigin }, session }))
+
+    expect(second).toEqual({ keep: 'me' })
+  })
+
+  it('passes a credential-free body through untouched, including arrays and scalars', async () => {
+    const session = makeSession({ access: 'a' })
+
+    for (const payload of [{ passkeys: [] }, [1, 2, 3], 'plain text']) {
+      mockFetch().fetch = vi.fn().mockResolvedValue(
+        typeof payload === 'string' ? new Response(payload, { status: 200 }) : jsonRes(payload),
+      )
+      const body = await run(makeEvent({ path: '/api/_lukk/x', method: 'POST', headers: { ...sameOrigin }, session }))
+      expect(body).toEqual(payload)
+    }
   })
 })

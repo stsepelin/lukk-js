@@ -34,7 +34,7 @@ export function useLukkConfirmation() {
    * flip `confirmed`. Shared with the passkey step-up path.
    */
   function record(result: { confirmation_token?: string }): void {
-    if (result.confirmation_token) token.value = result.confirmation_token
+    if (import.meta.client && result.confirmation_token) token.value = result.confirmation_token
     confirmedFlag.value = true
   }
 

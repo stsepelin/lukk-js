@@ -295,6 +295,10 @@ export function useLukkForm<T extends FormFields>(initial: T, options: UseLukkFo
         // Guard the shape: a non-conforming/empty bag must not mask the LukkError with a
         // TypeError, nor leave a phantom key (present in `errors` but with no message).
         for (const [field, messages] of Object.entries(bag)) {
+          // `__proto__` assigns through Vue's reactive proxy to the accessor on Object.prototype,
+          // re-parenting this bag. It pollutes nothing global, but a field named that is never a
+          // real validation error — it can only be an attempt.
+          if (field === '__proto__' || field === 'constructor') continue
           if (Array.isArray(messages) && messages.length) errors.value[field as keyof T] = messages[0]
         }
       }

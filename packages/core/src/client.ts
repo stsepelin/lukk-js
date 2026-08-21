@@ -91,7 +91,10 @@ export function createLukkClient(hooks: LukkClientHooks) {
       // A throwing refresh hook means "not refreshable" — honor the documented contract.
       try { pair = await refreshOnce() }
       catch { pair = null }
-      if (pair) {
+      // Gated on the shape, like every other sink (`commit`). The refresh path checked only for
+      // truthiness, so any 2xx body from /refresh reached the binding's storage hook unvalidated —
+      // and a binding that persists the whole object would store attacker-shaped data.
+      if (isTokenPair(pair)) {
         await hooks.onTokens?.(pair)
         return request<T>(path, init, false) // retry once with the new token
       }
@@ -160,7 +163,11 @@ export function createLukkClient(hooks: LukkClientHooks) {
 /** Absolute URLs (e.g. the app's user endpoint) pass through untouched. */
 function joinURL(base: string, path: string): string {
   if (/^https?:\/\//i.test(path)) return path
-  return `${base.replace(/\/$/, '')}/${path.replace(/^\//, '')}`
+
+  // Strip EVERY leading slash and backslash, not one. With an empty or `/` base, leaving a second
+  // one produced a protocol-relative URL — `//evil.com/x` — which resolves to a foreign origin
+  // while `isSameOrigin` had already classified it as relative and attached credentials.
+  return `${base.replace(/\/$/, '')}/${path.replace(/^[/\\]+/, '')}`
 }
 
 /**
@@ -170,10 +177,26 @@ function joinURL(base: string, path: string): string {
  * Exported so lukk-nuxt's `useLukkFetch` reuses the exact same guard.
  */
 export function isSameOrigin(base: string, path: string): boolean {
-  if (!/^https?:\/\//i.test(path)) return true
-  if (!/^https?:\/\//i.test(base)) return false
-  try { return new URL(path).origin === new URL(base).origin }
-  catch { return false }
+  // Canonicalise the way the WHATWG URL parser will, BEFORE deciding. A bare `^https?://` test is
+  // far stricter than the parser: the parser strips leading C0 controls and spaces, and treats `\`
+  // as `/` for special schemes. So ` https://evil.com`, `\thttps://evil.com` and `https:/\evil.com`
+  // all resolve to `https://evil.com` while reading as "relative" to the regex — and a relative
+  // path is exactly what this function green-lights for credentials.
+  // eslint-disable-next-line no-control-regex -- C0 controls are exactly what the parser strips
+  const candidate = path.replace(/^[\u0000-\u0020]+/, '').replace(/\\/g, '/')
+
+  // No scheme, but an authority follows: protocol-relative, so always a foreign origin.
+  if (candidate.startsWith('//')) return false
+
+  // Anything else carrying a scheme must be http(s) AND match the base's origin. A non-http scheme
+  // (`javascript:`, `data:`, `blob:`) is never same-origin, whatever the base.
+  if (/^[a-z][a-z0-9+.-]*:/i.test(candidate)) {
+    if (!/^https?:/i.test(candidate) || !/^https?:\/\//i.test(base)) return false
+    try { return new URL(candidate).origin === new URL(base).origin }
+    catch { return false }
+  }
+
+  return true
 }
 
 async function parseBody<T>(res: Response): Promise<T> {

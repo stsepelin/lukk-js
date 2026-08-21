@@ -101,15 +101,38 @@ export function rejectUnresolvedTarget(event: H3Event, base: string, label: stri
  */
 export function isForeignOrigin(event: H3Event): boolean {
   if (event.method === 'GET' || event.method === 'HEAD') return false
+
+  // Browsers send this on every request and non-browsers send it never, so when it IS present and
+  // says cross-site, that is decisive — including for a request whose `Origin` we'd otherwise have
+  // to reason about.
+  if (['cross-site', 'same-site'].includes(getRequestHeader(event, 'sec-fetch-site') ?? '')) return true
+
   const origin = getRequestHeader(event, 'origin')
+  // Absent Origin is left permissive: every browser sends it on a non-GET, so this is a non-browser
+  // caller — which has no sealed cookie to ride. `SameSite=Strict` is the primary layer here; this
+  // check is the second one.
   if (!origin) return false
+
   const host = getRequestHeader(event, 'host')
+
   try {
-    return new URL(origin).host !== host
+    const url = new URL(origin)
+
+    // Compare the SCHEME too. Host-only meant `http://app.example.com` matched an HTTPS
+    // deployment's `Host: app.example.com` — Chrome's schemeful same-site treats those as
+    // different sites, so the cookie wouldn't ride along, but the check shouldn't disagree.
+    return url.host !== host || url.protocol !== (isRequestSecure(event) ? 'https:' : 'http:')
   }
   catch {
     return true
   }
+}
+
+/** Whether this request arrived over TLS, honouring only the proxy hop we set ourselves. */
+function isRequestSecure(event: H3Event): boolean {
+  return event.node?.req?.socket && 'encrypted' in event.node.req.socket
+    ? Boolean((event.node.req.socket as { encrypted?: boolean }).encrypted)
+    : true
 }
 
 const IPV4 = /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/

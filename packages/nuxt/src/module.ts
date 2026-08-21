@@ -207,11 +207,6 @@ export default defineNuxtModule<ModuleOptions>({
     // Normalize the app-proxy mount once (a trailing slash would make `/api//**`).
     const apiPath = options.api.path.replace(/\/$/, '')
 
-    // BFF mode seals tokens with this secret; fail loudly at build, not per-request.
-    if (options.mode === 'bff' && !options.session.password && !process.env.NUXT_LUKK_SESSION_PASSWORD) {
-      console.warn('[lukk-nuxt] BFF mode needs a session secret (≥ 32 chars) — set `session.password` or NUXT_LUKK_SESSION_PASSWORD.')
-    }
-
     // Half-configured app-API proxy: one of path/target set without the other. The
     // proxy is only registered when BOTH are present, so this would silently do nothing.
     if (options.mode === 'bff' && !!apiPath !== !!options.api.target) {
@@ -307,6 +302,22 @@ export default defineNuxtModule<ModuleOptions>({
       fail(`[lukk-nuxt] confirmationHeader "${options.confirmationHeader}" must be a valid HTTP header name that the proxies don't already set (not Authorization, Accept, Content-Type, Cookie, or a forwarding header). Use a token such as X-Lukk-Confirmation.`)
     }
 
+    // BFF mode seals tokens with this secret; fail loudly at build, not per-request.
+    if (options.mode === 'bff') {
+      const password = options.session.password || process.env.NUXT_LUKK_SESSION_PASSWORD || ''
+
+      if (!password) {
+        console.warn('[lukk-nuxt] BFF mode needs a session secret (≥ 32 chars) — set `session.password` or NUXT_LUKK_SESSION_PASSWORD.')
+      }
+      // A SHORT password was documented as a requirement and enforced nowhere. iron rejects it at
+      // write time, so the old failure mode was safe but awful: every login and refresh 500s, and
+      // you find out in production rather than at build.
+      else if (password.length < 32) {
+        fail(`[lukk-nuxt] the session secret is ${password.length} characters — it must be at least 32. `
+          + 'It is the confidentiality boundary for the sealed session cookie, the BFF equivalent of Laravel\'s APP_KEY.')
+      }
+    }
+
     if (!effectiveBase) {
       console.warn('[lukk-nuxt] `baseURL` is not set — point it at your lukk auth URL.')
     }
@@ -336,6 +347,21 @@ export default defineNuxtModule<ModuleOptions>({
     if (publicLukk.apiBaseURL) {
       const error = baseError(publicLukk.apiBaseURL, '`api.target` (apiBaseURL)', true)
       if (error) fail(error)
+    }
+
+    // `user.endpoint` had no validation at all — not even the `"undefined/me"` unset-env-var check
+    // that motivated `baseError`. It is fetched with an EMPTY base, which is the one configuration
+    // where a protocol-relative value escapes, and it runs on every authenticated SSR render with
+    // the sealed session cookie attached.
+    if (options.user.endpoint) {
+      const error = baseError(options.user.endpoint, '`user.endpoint`', true)
+      if (error) fail(error)
+      // In BFF mode it MUST be same-origin: the docblock says so, and an absolute URL there would
+      // send the sealed cookie somewhere it was never scoped to.
+      if (!isDirect && isResolvableBase(options.user.endpoint)) {
+        fail(`[lukk-nuxt] \`user.endpoint\` "${redactCredentials(options.user.endpoint)}" must be a same-origin path in bff mode — `
+          + 'it is fetched server-side with the sealed session cookie attached.')
+      }
     }
 
     // BFF deliberately keeps the lukk URL server-side; an override would ship it in the SSR payload.

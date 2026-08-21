@@ -20,7 +20,7 @@ const inflightRefresh = new Map<string, Promise<RefreshResult>>()
  * leaves the refresh token UNCONSUMED and still valid, so a caller must not discard the session over
  * one. Collapsing every failure into "no pair" turned a transient throttle into a permanent logout.
  */
-export type RefreshResult = { pair: TokenSession | null, retryable: boolean }
+export type RefreshResult = { pair: TokenSession | null, expiresIn?: number, retryable: boolean }
 
 /** Single-flight the server-side refresh per session, returning the rotation outcome. */
 export function refreshOnce(session: { id?: string, data: TokenSession }, baseURL: string, clientIp = ''): Promise<RefreshResult> {
@@ -66,7 +66,7 @@ async function rawRefresh(refreshToken: string, baseURL: string, clientIp: strin
   // a redirect we refused — left it unconsumed, so report it retryable and keep the session.
   if (!res.ok) return { pair: null, retryable: res.status !== 401 && res.status !== 403 }
 
-  const pair = await res.json() as { access_token: string, refresh_token?: string }
+  const pair = await res.json() as { access_token: string, refresh_token?: string, expires_in?: number }
 
-  return { pair: { access: pair.access_token, refresh: pair.refresh_token ?? refreshToken }, retryable: false }
+  return { pair: { access: pair.access_token, refresh: pair.refresh_token ?? refreshToken }, expiresIn: pair.expires_in, retryable: false }
 }

@@ -6,7 +6,7 @@ vi.mock('h3', () => ({
 }))
 
 // eslint-disable-next-line import/first
-import { hopByHopHeaders, rejectUnresolvedTarget, resolveTarget, viaHeader, visitorIp } from '../src/runtime/server/proxy-utils'
+import { hopByHopHeaders, isForeignOrigin, rejectUnresolvedTarget, resolveTarget, viaHeader, visitorIp } from '../src/runtime/server/proxy-utils'
 
 const ev = () => ({ status: 200 } as { status: number })
 
@@ -216,5 +216,39 @@ describe('viaHeader', () => {
   it('falls back to 1.1 where there is no node request', () => {
     // workerd, Deno and Bun presets have no `node.req`.
     expect(viaHeader({ headers: {} } as never)).toBe('1.1 lukk-nuxt')
+  })
+})
+
+describe('isForeignOrigin', () => {
+  const post = (headers: Record<string, string>, encrypted = true) =>
+    isForeignOrigin({ method: 'POST', headers, node: { req: { socket: { encrypted } } } } as never)
+
+  it('compares the scheme, not just the host', () => {
+    // Host-only meant `http://app.test` matched an HTTPS deployment's `Host: app.test`.
+    expect(post({ origin: 'https://app.test', host: 'app.test' })).toBe(false)
+    expect(post({ origin: 'http://app.test', host: 'app.test' })).toBe(true)
+    // ...and the same request over plain http is legitimately same-origin.
+    expect(post({ origin: 'http://app.test', host: 'app.test' }, false)).toBe(false)
+  })
+
+  it('treats a browser-declared cross-site or same-site request as foreign', () => {
+    // Sent by every browser and by no other client, so when present it is decisive. `same-site` is
+    // a different subdomain — still not us, and the `__Host-` cookie is host-locked anyway.
+    expect(post({ 'sec-fetch-site': 'cross-site', 'origin': 'https://app.test', 'host': 'app.test' })).toBe(true)
+    expect(post({ 'sec-fetch-site': 'same-site', 'origin': 'https://app.test', 'host': 'app.test' })).toBe(true)
+    expect(post({ 'sec-fetch-site': 'same-origin', 'origin': 'https://app.test', 'host': 'app.test' })).toBe(false)
+  })
+
+  it('leaves a non-browser caller alone, and never gates a safe method', () => {
+    // No Origin on a non-GET means no browser, hence no sealed cookie to ride. SameSite=Strict is
+    // the primary layer; this is the second.
+    expect(post({ host: 'app.test' })).toBe(false)
+    expect(isForeignOrigin({ method: 'GET', headers: { origin: 'https://evil.test' } } as never)).toBe(false)
+  })
+
+  it('rejects an unparseable Origin, and copes with a runtime that has no node socket', () => {
+    expect(post({ origin: 'not a url', host: 'app.test' })).toBe(true)
+    // workerd/Deno: no `node.req` — assume TLS rather than inventing a downgrade.
+    expect(isForeignOrigin({ method: 'POST', headers: { origin: 'https://app.test', host: 'app.test' } } as never)).toBe(false)
   })
 })
