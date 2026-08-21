@@ -5,16 +5,19 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
     name: lint · typecheck · test (100% coverage) · build
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: pnpm/action-setup@v6
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 22
           cache: pnpm
@@ -33,3 +36,46 @@ jobs:
       # Both packages' `test` enforces the 100% coverage threshold (vitest --coverage).
       - run: pnpm test
       - run: pnpm build
+
+  nuxt-floor:
+    runs-on: ubuntu-latest
+    name: oldest supported Nuxt
+    # The module declares `@nuxt/kit: ^3.13.0`, but a caret range always resolves to the newest
+    # 3.x — so the main job has only ever exercised the latest release, and a regression against
+    # 3.13-3.20 could pass every check and ship. This installs the FLOOR and proves the module
+    # still compiles and type-checks against it.
+    #
+    # The version is derived from package.json rather than written here, so raising the declared
+    # floor moves this test with it instead of leaving a stale number behind.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Resolve the declared Nuxt floor
+        id: floor
+        run: |
+          floor=$(node -p "require('./packages/nuxt/package.json').dependencies['@nuxt/kit'].replace(/^[^0-9]*/, '')")
+          echo "version=$floor" >> "$GITHUB_OUTPUT"
+          echo "Declared floor: $floor"
+
+      # Deliberately NOT --frozen-lockfile: the point is to resolve away from the committed tree.
+      - name: Downgrade to the floor
+        run: |
+          pnpm --filter lukk-nuxt add -D \
+            "nuxt@${{ steps.floor.outputs.version }}" \
+            "@nuxt/schema@${{ steps.floor.outputs.version }}" \
+            "@nuxt/kit@${{ steps.floor.outputs.version }}"
+          node -p "'kit resolved to ' + require('./packages/nuxt/node_modules/@nuxt/kit/package.json').version"
+
+      - run: pnpm --filter lukk-core build
+      - run: pnpm --filter lukk-nuxt build
+      - run: pnpm --filter lukk-nuxt exec nuxi prepare playground
+      - run: pnpm --filter lukk-nuxt typecheck
