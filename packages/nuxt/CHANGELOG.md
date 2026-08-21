@@ -1,5 +1,92 @@
 # lukk-nuxt
 
+## 0.10.0
+
+### Minor Changes
+
+- 9b1f15d: Add `changePassword` and `useLukkChangePassword` for lukk's new `POST /auth/password`.
+
+  The signed-in counterpart to the reset flow: no emailed token, because `current_password` is the proof. That's the point of the endpoint — a stolen access token alone must not be enough to take an account over permanently, which is exactly what changing the password would do.
+
+  ```ts
+  const { changePassword, changing } = useLukkChangePassword();
+
+  await changePassword({
+    current_password: current.value,
+    password: next.value,
+    password_confirmation: confirm.value,
+  });
+  ```
+
+  lukk revokes every **other** session on success and keeps the current one, so there is no token to swap and nothing to re-login — the composables' state is already correct afterwards. A wrong current password is a `422` on `current_password`, which [`useLukkForm`](https://stsepelin.github.io/lukk-docs/use-lukk-form) maps onto your fields; the endpoint shares lukk's step-up throttle, so a burst of wrong guesses is a `429` and, where the account lockout is enabled, eventually a `423`.
+
+  A change made while one is already in flight is refused **without a request**. The second would carry a `current_password` the first has already replaced, so lukk reads it as a wrong password and spends one of the account's consecutive-failure attempts — a double-submit would quietly eat the user's lockout budget and report a `422` for a change that had just succeeded.
+
+- c108190: Add `clientIpHeader`, an opt-in trusted-proxy setting that lets the upstream identify the real visitor.
+
+  Both proxies previously identified the caller by the **socket address** (`getRequestIP(event, { xForwardedFor: false })`). Behind any reverse proxy — nginx, Cloudflare, a load balancer — that address is the _proxy_, not the visitor, so an upstream keying on `$request->ip()` sees every visitor as one identity. Laravel's `throttle:5,1` on a public form then means **5 requests per minute globally**, not per client: one user can lock out everyone else. It's invisible until someone trips it, and no upstream configuration can fix it, because the information never reaches the request.
+
+  Blanking the spoofable headers is still right by default — otherwise any client could claim any IP and defeat upstream rate limiting or IP allowlists. What was missing was a way to say _"this hop is trusted"_ when it genuinely is:
+
+  ```ts
+  // nuxt.config
+  lukk: {
+    clientIpHeader: "cf-connecting-ip";
+  } // or 'x-real-ip', …
+  ```
+
+  Set it and every upstream call carries that address as `X-Forwarded-For`: the app-API proxy, the lukk auth proxy, **and the server-side token refresh**. The auth paths matter as much as the app API — lukk throttles `login`, `forgot-password` and `two-factor-challenge` on the caller's IP, and `/refresh` too (30/60s by default), which in BFF mode is the highest-volume auth call of all: every proxied 401 and every SSR hydration lands there. All of those were collapsing onto one bucket.
+
+  Security properties, unchanged by default:
+
+  - **Off unless set.** Every browser-settable forwarding header (`x-real-ip`, `cf-connecting-ip`, `true-client-ip`, `forwarded`, …) stays blanked, and the socket address is forwarded exactly as before. The auth proxy still sends no `X-Forwarded-For` at all rather than assert an address that identifies this server rather than the visitor.
+  - **A client cannot influence the value in either mode.** With the option unset the browser's own `x-forwarded-for` is never read; with it set, only the _named_ header is, and the value replaces the client's chain rather than merging with it.
+  - **A list-valued trusted header is rejected outright.** A header the edge SETS carries exactly one address, but Node joins duplicates with `", "` and the **client's copy arrives first** — so on an edge that appends (or merely fails to strip the client's copy), trusting the leftmost entry would let a visitor forge `$request->ip()` upstream. Refusing turns that misconfiguration into a visible loss of function instead of a silent spoof.
+  - **The value must be an exact IP** (IPv4, or IPv6 via the WHATWG host parser — not `node:net`, which is absent from worker/edge presets). It can become an upstream rate-limit key or feed an IP allowlist, so anything else is discarded rather than forwarded.
+  - **The header must be one your edge SETS**, overwriting whatever the client sent (`cf-connecting-ip`, `x-real-ip`). One it merely appends to — the usual `x-forwarded-for` chain — leaves the leftmost entry client-controlled and is spoofable, so the module **warns at build** if you name one. Your upstream must also trust this hop (Laravel's `TrustProxies`) for `$request->ip()` to read it.
+  - **Your origin must not be reachable except through that edge.** There is no socket-peer check here (unlike `TrustProxies`), so a directly reachable origin — leaked origin IP, no firewall on the CDN ranges — lets a client set the header itself. Lock the origin down before enabling this. Enabling it also means your auth server sees and logs visitor IPs.
+  - **The auth paths assert the visitor or nothing.** Where the app-API proxy falls back to the socket address (it has always sent one), the lukk-facing calls send no `X-Forwarded-For` at all unless a visitor address was actually resolved — a wrong value there becomes a wrong rate-limit key.
+
+  Also **documents and pins the request-header pass-through**: request headers lukk doesn't explicitly strip or overwrite reach the upstream. Apps rely on this to carry per-visitor data across the proxy hop (e.g. geo-IP copied off `CF-*` onto a prefix Cloudflare won't re-stamp), and it was only ever an implicit consequence of h3's `proxyRequest`. There's now an end-to-end test pinning it, so an allowlist refactor can't silently regress it.
+
+  Two unrelated hardening fixes found while reviewing this:
+
+  - The app-API proxy now blanks the step-up **confirmation header** arriving from a client, symmetric with `authorization`. In BFF mode the browser never legitimately holds a step-up token, and the auth proxy was already immune (it builds its header set from scratch) — but the app-API proxy forwards unknown headers by default, so a client-set one could reach an app API gating routes on lukk's confirmation middleware.
+  - The module warns when `clientIpHeader` is set in `direct` mode, where it is dead config.
+
+  Also fixes a pre-existing cascade this change made far more likely: a **throttled refresh no longer destroys the session**. `refreshOnce` collapsed every failure into "no pair", and the auth proxy cleared the sealed session on that — so a `429` (or a 5xx, or an unusable `baseURL`) discarded a refresh token that was never consumed and still valid, turning a transient throttle into an unrecoverable logout. It now reports whether the failure was definitive, and only lukk actually rejecting the token (401/403) ends a session. That matters here because forwarding the real client IP makes `/refresh` the highest-volume throttled call.
+
+### Patch Changes
+
+- 6d1d476: Fixes from a full white-box security audit (three parallel passes: BFF server, `lukk-core`, Nuxt module/SSR). No Critical or High.
+
+  **`isSameOrigin` was bypassable.** The guard tested `^https?://`, which is far stricter than WHATWG URL parsing — the parser strips leading C0 controls and spaces and treats `\` as `/` for special schemes. So `https:/\evil.com`, `​ https://evil.com` (leading space) and tab-prefixed variants all read as "relative" and were green-lit for credentials, while resolving to `evil.com`. On SSR that meant the sealed `__Host-lukk-session` cookie, not just the bearer. The guard now canonicalises before deciding, and refuses any protocol-relative or non-http scheme. `joinURL` also stripped only one leading slash, so an empty base could itself emit a protocol-relative URL.
+
+  **A proxied `/refresh` burned a rotation and still failed.** The browser holds an opaque cookie, not a refresh token, so `restore()`'s empty body asked lukk to rotate nothing → 401 → the proxy's generic 401 branch rotated the _sealed_ token and retried the same empty body. `restore()` could never succeed in BFF mode, and two tabs reloading concurrently would replay a consumed token past the grace window — the false family revoke this package exists to avoid. `/refresh` is now served from the sealed session and never proxied.
+
+  **The auth proxy emitted no cache directives.** It returns a body and drops the upstream's headers, discarding lukk's `Cache-Control: no-store` with nothing to replace it — so authenticated GETs (the passkey inventory, the recovery-code count) could reach a shared cache with no directives and no `Vary`, keyed on path alone. Now `private, no-store` + `vary: cookie`, matching the app-API proxy.
+
+  **The credential strip now fails closed.** It only ran when the body matched `isTokenPair`, so a near-miss like `{"access_token": null, "refresh_token": "…"}` passed a rotating refresh token through to the browser. Capture still requires the shape; removal no longer does.
+
+  Also: the app-API proxy's 3xx branch no longer returns before stripping `Set-Cookie` and setting `no-store` (harmless on Node, live on workerd/Deno); h3's alternate `x-<name>-session` header channel is disabled on every session and blanked upstream; the CSRF check compares the scheme and honours `Sec-Fetch-Site`; a short `session.password` and an invalid or cross-origin `user.endpoint` now fail the build instead of surfacing in production; the direct-mode client routes its confirmation header through the same runtime fallback the proxies use; `challenge_token`/`confirmation_token` state writes are client-only like the access token; a redirect is only followed when it stays on the API's origin, and a caller can no longer re-enable redirect following; the refresh path validates the token shape before handing it to `onTokens`; and a `__proto__` field in a validation bag is ignored.
+
+- b2ce100: Harden the app-API proxy's header handling (RFC 9110 §7.6).
+
+  **Hop-by-hop headers.** h3's `proxyRequest` drops `connection`, `keep-alive`, `upgrade` and `transfer-encoding`, but not the rest of the standard set — `te`, `trailer`, `proxy-connection`, `proxy-authenticate` and `proxy-authorization` were forwarded upstream, the last of which is credential material scoped to a single hop.
+
+  More importantly it drops the `Connection` header itself while still forwarding **the fields that header named**. §7.6.1 requires a proxy to parse `Connection` and remove the fields it lists, so a header the client explicitly marked single-hop was reaching the upstream with the instruction to strip it gone. Those fields are now blanked — except the ones the proxy sets itself, so a client cannot use `Connection` to strip the injected `Authorization` or step-up token on the way through.
+
+  **Vendor client-IP headers.** The blanked list covered ten headers and missed a good many: `x-forwarded-server`, `x-original-forwarded-for`, `client-ip`, `x-originating-ip`, Cloudflare's `cf-connecting-ipv6`/`cf-pseudo-ipv4`, Azure's `x-azure-clientip`/`x-azure-socketip`, `fly-client-ip`, `x-vercel-forwarded-for`, `x-appengine-user-ip`, `do-connecting-ip` and others. Any of these arriving from the browser is an attempt to choose the upstream's idea of `$request->ip()` — the value lukk keys rate limits and the account lockout on.
+
+  **Via.** Both proxies now identify themselves per §7.6.3, using a pseudonym rather than the BFF's internal hostname, and appending to an existing chain rather than replacing it. Request direction only: sending `Via` back to the browser would advertise the proxy and its version for no benefit the browser can use.
+
+  The auth proxy was already sound here — it builds its request headers from scratch rather than forwarding the client's, so nothing spoofable could reach lukk through it. Only `Via` was owed.
+
+- Updated dependencies [6d1d476]
+- Updated dependencies [9b1f15d]
+- Updated dependencies [b2ce100]
+  - lukk-core@0.10.0
+
 ## 0.9.0
 
 ### Minor Changes
