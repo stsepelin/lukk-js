@@ -1,5 +1,5 @@
 import type { AccountExport } from 'lukk-core'
-import { ref, useNuxtApp } from '#imports'
+import { computed, ref, useNuxtApp } from '#imports'
 import { useLukkAuth } from './useLukkAuth'
 import { useLukkConfirmation } from './useLukkConfirmation'
 
@@ -14,8 +14,27 @@ export function useLukkAccount() {
   const { withConfirmation } = useLukkConfirmation()
   const { user, logout } = useLukkAuth()
 
-  /** True while a call is in flight — bind a button's disabled state to it. */
-  const busy = ref(false)
+  /**
+   * True while ANY call is in flight — bind a button's disabled state to it.
+   *
+   * Counted, not a boolean. Two overlapping calls each cleared the same flag independently, so the
+   * first to finish set it false while the second was still running and re-enabled the control
+   * mid-flight. These calls are long-lived by construction: `withConfirmation` parks on a modal
+   * waiting for the user, so overlap is the normal shape here rather than an edge case.
+   */
+  const inFlight = ref(0)
+  const busy = computed(() => inFlight.value > 0)
+
+  /** Run `fn` while holding the busy count, releasing it exactly once. */
+  async function tracked<T>(fn: () => Promise<T>): Promise<T> {
+    inFlight.value++
+    try {
+      return await fn()
+    }
+    finally {
+      inFlight.value--
+    }
+  }
 
   /**
    * Erase the account. **Irreversible.**
@@ -26,8 +45,7 @@ export function useLukkAccount() {
    * visitor as signed in until something else noticed.
    */
   async function deleteAccount(): Promise<void> {
-    busy.value = true
-    try {
+    return tracked(async () => {
       await withConfirmation(() => $lukk.deleteAccount())
 
       // `.catch()`, because `logout()` does NOT swallow — it is `try/finally`, which clears local
@@ -36,10 +54,7 @@ export function useLukkAccount() {
       // successful, irreversible erasure rejected, and every consumer showed "erasure failed" for
       // an account that no longer exists.
       await logout().catch(() => {})
-    }
-    finally {
-      busy.value = false
-    }
+    })
   }
 
   /**
@@ -49,13 +64,7 @@ export function useLukkAccount() {
    * your domain data, so presenting this alone as a subject-access response would under-disclose.
    */
   async function exportAccount(): Promise<AccountExport> {
-    busy.value = true
-    try {
-      return await withConfirmation(() => $lukk.exportAccount())
-    }
-    finally {
-      busy.value = false
-    }
+    return tracked(() => withConfirmation(() => $lukk.exportAccount()))
   }
 
   return { user, busy, deleteAccount, exportAccount }

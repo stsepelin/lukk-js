@@ -85,3 +85,45 @@ describe('a successful erasure whose logout call fails', () => {
     expect(account.busy.value).toBe(false)
   })
 })
+
+describe('useLukkAccount busy tracking', () => {
+  it('stays busy until the LAST overlapping call settles', async () => {
+    // `busy` was a boolean each call cleared independently, so the first to finish re-enabled the
+    // bound control while the other was still in flight — permitting a duplicate export, or a second
+    // erasure attempt. Overlap is the normal shape here rather than an edge case: `withConfirmation`
+    // parks on a modal waiting for the user, so a call can sit pending indefinitely.
+    let releaseFirst: (v: unknown) => void = () => {}
+    const first = new Promise(resolve => (releaseFirst = resolve))
+    let releaseSecond: (v: unknown) => void = () => {}
+    const second = new Promise(resolve => (releaseSecond = resolve))
+
+    const exportAccount = vi.fn()
+      .mockImplementationOnce(() => first)
+      .mockImplementationOnce(() => second)
+    __test.nuxtApp = { $lukk: { exportAccount } }
+    const account = useLukkAccount()
+
+    const a = account.exportAccount()
+    const b = account.exportAccount()
+    expect(account.busy.value).toBe(true)
+
+    releaseFirst({ generated_at: 'x' })
+    await a
+    // The second is STILL running — the whole point.
+    expect(account.busy.value).toBe(true)
+
+    releaseSecond({ generated_at: 'y' })
+    await b
+    expect(account.busy.value).toBe(false)
+  })
+
+  it('releases the count when a call rejects', async () => {
+    // A throwing export must not strand `busy` at true forever, disabling the control for good.
+    const exportAccount = vi.fn().mockRejectedValue(new Error('nope'))
+    __test.nuxtApp = { $lukk: { exportAccount } }
+    const account = useLukkAccount()
+
+    await expect(account.exportAccount()).rejects.toThrow('nope')
+    expect(account.busy.value).toBe(false)
+  })
+})

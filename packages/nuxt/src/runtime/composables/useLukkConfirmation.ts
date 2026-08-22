@@ -89,6 +89,10 @@ export function useLukkConfirmation() {
       if ((error as { status?: number }).status !== 423) throw error
       // The server rejected our confirmation → it's missing or stale; earn a fresh one.
       clear()
+      // Reset per CYCLE, not per composable. `unearnable` is only ever set, so once one action hit
+      // a 403 every later cancellation on the same instance rejected with that stale 403 —
+      // reporting "this token can never earn a step-up" for an operation the user simply dismissed.
+      unearnable = null
       required.value = true
       try {
         await confirmedOrCancelled()
