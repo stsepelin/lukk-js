@@ -41,6 +41,14 @@ grant never contains it and they are never gated, so gating "sign out other devi
 the button from everyone. lukk's `UserResource` now publishes `token_pinned` alongside `abilities`,
 exposed as `pinned`, and `LUKK_SESSIONS` / `LUKK_ACCOUNT` are exported from `lukk-core`.
 
+**Abilities follow a refreshed token.** They are re-derived on every mint server-side — that is what
+makes revoking one take effect within `access_ttl` rather than lasting the life of the refresh token
+— but the client only learns a grant through the user resource, which nothing reloaded on refresh.
+A refreshed token therefore carried a new grant while the UI kept rendering from the old one: a
+control stayed visible until it 403'd, or a newly-granted one stayed hidden, until something else
+happened to reload the user. The single-flight refresh now reloads it, and only when the loaded user
+actually publishes `abilities`, so an app that doesn't use the feature pays nothing.
+
 A step-up that can never succeed no longer **deadlocks the confirmation modal**. A 403 from
 `confirmPassword` / `confirmPasskey` means this token may never earn a confirmation — a machine token
 without `lukk.account` — so the pending step-up is abandoned instead of waiting for a flag that

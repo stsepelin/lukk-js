@@ -1,5 +1,6 @@
 import { createLukkClient, type LukkClient, singleFlight } from 'lukk-core'
 import { defineNuxtPlugin, useRuntimeConfig, useState } from '#imports'
+import { useLukkAuth } from '../composables/useLukkAuth'
 import { ACCESS_KEY, CONFIRMATION_KEY } from '../keys'
 import { confirmationHeaderName, LUKK_BFF_PREFIX } from '../shared'
 
@@ -38,8 +39,36 @@ export default defineNuxtPlugin({
       if (import.meta.client) accessToken.value = pair.access_token
       return pair
     })
+    // Abilities are re-derived on EVERY mint server-side — that is what makes revoking one take
+    // effect within `access_ttl` rather than lasting the life of the refresh token. The client only
+    // learns a grant through the user resource, so without this a refreshed token silently carried a
+    // new grant while the UI kept rendering from the old one: a control stayed visible until it
+    // 403'd, or a newly-granted one stayed hidden, until something else happened to reload the user.
+    //
+    // Only fires when the loaded user actually carries `abilities` — an app that doesn't use the
+    // feature pays nothing — and only on the client, since a server render reloads the user itself
+    // (`plugins/session.server.ts`). Fire-and-forget: a UI hint must not delay the request that
+    // triggered the refresh.
+    let resyncing = false
+
+    async function resyncAbilities(): Promise<void> {
+      const { user, fetchUser } = useLukkAuth()
+
+      // `resyncing` breaks the cycle where `fetchUser`'s own 401 refreshes again and re-enters here.
+      if (resyncing || user.value?.abilities === undefined) return
+
+      resyncing = true
+      try { await fetchUser() }
+      finally { resyncing = false }
+    }
+
     // A throwing refresh means "not refreshable" → null (the documented contract).
-    const safeRefresh = () => refresh().catch(() => null)
+    const safeRefresh = () => refresh()
+      .then((pair) => {
+        if (import.meta.client) void resyncAbilities().catch(() => {})
+        return pair
+      })
+      .catch(() => null)
 
     const client: LukkClient = createLukkClient({
       baseURL,
