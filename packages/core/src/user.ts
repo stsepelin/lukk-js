@@ -16,6 +16,26 @@ export interface LukkUser {
   email_verified_at?: string | null
   /** OIDC-canonical verification boolean — accepted as an alternative to `email_verified_at`. */
   email_verified?: boolean
+  /**
+   * What the CURRENT token may do — lukk's `UserResource` publishes it, and in BFF mode this is the
+   * only channel: the browser never sees the access token that carries the `scope` claim.
+   *
+   * **Absent and `[]` mean different things.** Absent is "this server doesn't use abilities"
+   * ({@link can} returns true); `[]` is "it does, and this token was granted nothing". Use the
+   * helpers in `abilities.ts` rather than testing membership by hand — they honour the `*` and
+   * `orders.*` wildcards the server grants with, and are pinned against it by the conformance suite.
+   */
+  abilities?: string[]
+  /**
+   * Whether this session's grant is **pinned** — a machine token (a personal access token, a capped
+   * impersonation session) rather than a human login.
+   *
+   * It matters because lukk's own gated routes apply to pinned tokens ONLY. `abilities` alone is
+   * the wrong predictor for them: a normal user's derived grant never contains `lukk.sessions`, and
+   * gating "sign out other devices" on `can('lukk.sessions')` would hide it from everyone. Use
+   * `canManageSessions` / `canManageAccount` instead of asking `can()` directly.
+   */
+  token_pinned?: boolean
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

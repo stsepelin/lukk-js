@@ -1,6 +1,6 @@
 import { createPublicKey, verify as cryptoVerify } from 'node:crypto'
 import { beforeAll, describe, expect, it } from 'vitest'
-import { createLukkClient, credentialToJSON, isTwoFactorChallenge } from '../src'
+import { can, canAll, canAny, createLukkClient, credentialToJSON, isTwoFactorChallenge, shapeUser } from '../src'
 import { createAuthenticator, totp } from './authenticator'
 
 // Runs against a REAL lukk instance (see ../../../conformance). Opt-in:
@@ -19,6 +19,7 @@ const ALGORITHM = (process.env.LUKK_ALGORITHM ?? 'HS256').toUpperCase()
 const FEAT_2FA = (process.env.LUKK_FEAT_2FA ?? 'true') === 'true'
 const FEAT_PASSKEYS = (process.env.LUKK_FEAT_PASSKEYS ?? 'true') === 'true'
 const FEAT_EMAIL = (process.env.LUKK_FEAT_EMAIL ?? 'false') === 'true'
+const FEAT_ABILITIES = (process.env.LUKK_FEAT_ABILITIES ?? 'true') === 'true'
 
 const USER = 'user@example.com'
 const TWO_FACTOR_USER = '2fa@example.com'
@@ -172,6 +173,90 @@ describe(`lukk conformance (algo=${ALGORITHM}, cookie_mode=${COOKIE_MODE}, feat=
 
     const { verified } = await (await fetch(`${ROOT}/conformance/user-verified?email=${encodeURIComponent(UNVERIFIED_USER)}`)).json() as { verified: boolean }
     expect(verified).toBe(true)
+  })
+
+  describe.runIf(FEAT_ABILITIES)('abilities', () => {
+    // The fixture grants user #1 exactly `['orders.read', 'billing.*']` and gates one route per
+    // shape the matcher has to handle. See conformance/fixture/build.sh.
+    const GATES = [
+      // [route,                 required,                            requireAll]
+      ['/gated/any', ['orders.read', 'orders.write'], false],
+      ['/gated/all', ['orders.read', 'orders.write'], true],
+      ['/gated/prefix', ['billing.view'], false],
+      ['/gated/bare-namespace', ['billing'], false],
+      ['/gated/wildcard-check', ['orders.*'], false],
+      ['/gated/denied', ['admin.impersonate'], false],
+    ] as const
+
+    async function loginAndLoadUser() {
+      const { lukk, state } = client()
+      const result = await lukk.login({ email: USER, password: PASSWORD })
+      if (isTwoFactorChallenge(result)) throw new Error('unexpected 2FA challenge')
+      const raw = await (await fetch(`${ROOT}/user`, {
+        headers: { accept: 'application/json', authorization: `Bearer ${state.access}` },
+      })).json()
+      return { access: state.access!, user: shapeUser(raw) }
+    }
+
+    it('publishes the token\'s abilities on the user resource', async () => {
+      // In BFF mode the browser never sees the access token, so this is the ONLY channel the
+      // client has for them. If it stops being emitted, every `can()` silently returns true.
+      const { user } = await loginAndLoadUser()
+
+      expect(user?.abilities, 'lukk >= 0.6 UserResource should publish `abilities`').toEqual(['orders.read', 'billing.*'])
+    })
+
+    it('predicts every server gate exactly — the matcher cannot drift', async () => {
+      // The point of the whole suite in one test: two independent implementations of the same
+      // matching rules (PHP `Lukk\\Support\\Abilities`, TS `can/canAny/canAll`) asked the same
+      // questions, and required to agree. A wildcard, case, or prefix rule that changes on one
+      // side and not the other fails here rather than in someone's UI.
+      const { access, user } = await loginAndLoadUser()
+      const granted = user?.abilities
+
+      for (const [route, required, requireAll] of GATES) {
+        const predicted = requireAll ? canAll(granted, [...required]) : canAny(granted, [...required])
+        const res = await fetch(`${ROOT}${route}`, {
+          headers: { accept: 'application/json', authorization: `Bearer ${access}` },
+        })
+
+        expect(res.status, `${route} required=${required.join(',')} all=${requireAll}`).toBe(predicted ? 200 : 403)
+      }
+    })
+
+    it('answers insufficient_scope, naming what would have sufficed (RFC 6750 §3.1)', async () => {
+      // A generic OAuth client or an API gateway acts on this header without knowing about lukk.
+      const { access } = await loginAndLoadUser()
+      const res = await fetch(`${ROOT}/gated/denied`, {
+        headers: { accept: 'application/json', authorization: `Bearer ${access}` },
+      })
+
+      expect(res.status).toBe(403)
+      const challenge = res.headers.get('www-authenticate') ?? ''
+      expect(challenge).toContain('error="insufficient_scope"')
+      expect(challenge).toContain('scope="admin.impersonate"')
+    })
+
+    it('challenges — rather than refuses — a gated route reached with no token', async () => {
+      const res = await fetch(`${ROOT}/gated/any`, { headers: { accept: 'application/json' } })
+
+      expect(res.status).toBe(401)
+    })
+
+    it('carries the grant through a refresh', async () => {
+      // Abilities are re-derived on every mint, so a rotation is where a wiring mistake would
+      // silently drop the `scope` claim and quietly widen or narrow the token.
+      const { lukk, state } = client()
+      await lukk.login({ email: USER, password: PASSWORD })
+      await lukk.refreshTokens(COOKIE_MODE ? undefined : state.refresh)
+
+      const res = await fetch(`${ROOT}/gated/prefix`, {
+        headers: { accept: 'application/json', authorization: `Bearer ${state.access}` },
+      })
+
+      expect(res.status).toBe(200)
+      expect(can(['orders.read', 'billing.*'], 'billing.view')).toBe(true)
+    })
   })
 
   it.skipIf(ALGORITHM === 'HS256')('publishes a JWKS that independently verifies an issued access token', async () => {

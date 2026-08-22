@@ -27,7 +27,17 @@ export function useLukkPasskeys() {
   /** Earn step-up confirmation with a passkey (recorded via `useLukkConfirmation`). */
   async function confirm(): Promise<void> {
     const assertion = await assert()
-    useLukkConfirmation().record(await $lukk.confirmPasskey(assertion.ceremony_id, assertion.credential))
+    const confirmation = useLukkConfirmation()
+
+    try {
+      confirmation.record(await $lukk.confirmPasskey(assertion.ceremony_id, assertion.credential))
+    }
+    catch (error) {
+      // Same as the password path: a 403 is "this token may never earn a confirmation", so the
+      // pending step-up must be abandoned rather than left waiting for a flag that cannot flip.
+      confirmation.abandonIfUnearnable(error)
+      throw error
+    }
   }
 
   /** List the user's passkeys. */

@@ -87,6 +87,31 @@ Route::get('/user', fn (\Illuminate\Http\Request $request) => new class ($reques
     }
 })->middleware('auth:api');
 
+// Abilities (lukk >= 0.6). Guarded on the class so the fixture still boots against a
+// published lukk that predates the feature — the conformance suite skips instead of 500ing.
+if (class_exists(\Lukk\Support\Abilities::class) && env('LUKK_FEAT_ABILITIES', true)) {
+    // Granted per user id, so the suite can assert a KNOWN list rather than whatever the
+    // server felt like. `billing.*` is here to exercise prefix expansion end to end.
+    \Lukk\Lukk::abilitiesUsing(fn ($userId) => match ((int) $userId) {
+        1 => ['orders.read', 'billing.*'],
+        default => [],
+    });
+
+    // One route per gate shape. The client matcher has to predict each of these exactly.
+    Route::middleware(['auth:api', 'lukk.ability:orders.read,orders.write'])
+        ->get('/gated/any', fn () => response()->json(['ok' => true]));
+    Route::middleware(['auth:api', 'lukk.abilities:orders.read,orders.write'])
+        ->get('/gated/all', fn () => response()->json(['ok' => true]));
+    Route::middleware(['auth:api', 'lukk.ability:billing.view'])
+        ->get('/gated/prefix', fn () => response()->json(['ok' => true]));
+    Route::middleware(['auth:api', 'lukk.ability:billing'])
+        ->get('/gated/bare-namespace', fn () => response()->json(['ok' => true]));
+    Route::middleware(['auth:api', 'lukk.ability:orders.*'])
+        ->get('/gated/wildcard-check', fn () => response()->json(['ok' => true]));
+    Route::middleware(['auth:api', 'lukk.ability:admin.impersonate'])
+        ->get('/gated/denied', fn () => response()->json(['ok' => true]));
+}
+
 // --- conformance helpers (test-only; see conformance/README.md) ---
 if (app()->environment() !== 'production') {
     Route::get('/conformance/last-verification-url', function () {
