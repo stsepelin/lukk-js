@@ -72,7 +72,11 @@ RESULTS=()
 FAILED=0
 
 run_combo() {
-  local name="$1" algo="$2" f2fa="$3" fpk="$4" femail="$5" cookie="$6"
+  # `fabil` is defaulted rather than positional-required, so the ten combos below stay untouched and
+  # cannot break under `set -u`. Abilities are normally DETECTED by the suite (it probes a gated
+  # route), so this exists to force them OFF — which is the only way to exercise the "server does not
+  # use abilities" contract, where the user resource must omit the key entirely.
+  local name="$1" algo="$2" f2fa="$3" fpk="$4" femail="$5" cookie="$6" fabil="${7:-true}"
 
   # Signing algorithm + keys.
   set_env LUKK_ALGORITHM "$algo"
@@ -85,6 +89,7 @@ run_combo() {
   set_env LUKK_FEAT_2FA "$f2fa"
   set_env LUKK_FEAT_PASSKEYS "$fpk"
   set_env LUKK_FEAT_EMAIL "$femail"
+  set_env LUKK_FEAT_ABILITIES "$fabil"
   set_env LUKK_COOKIE_MODE "$cookie"
 
   if ! ( cd "$APP_DIR" && php artisan optimize:clear >/dev/null && php artisan migrate:fresh --force >/dev/null && php artisan db:seed --force >/dev/null ); then
@@ -103,6 +108,7 @@ run_combo() {
   echo "── running: $name ────────────────────────────────────────────"
   if LUKK_URL="http://127.0.0.1:$PORT/auth" LUKK_COOKIE_MODE="$cookie" LUKK_ALGORITHM="$algo" \
      LUKK_FEAT_2FA="$f2fa" LUKK_FEAT_PASSKEYS="$fpk" LUKK_FEAT_EMAIL="$femail" \
+     LUKK_FEAT_ABILITIES="$fabil" \
      pnpm --dir "$REPO_ROOT" --filter lukk-core test:conformance; then
     RESULTS+=("✓ $name")
   else
@@ -128,6 +134,9 @@ run_combo "all-features   (HS256/body)" HS256  true   true     true   false
 run_combo "all-features   (HS256/cookie)" HS256 true  true     true   true
 run_combo "all-features   (RS256/body)" RS256  true   true     true   false
 run_combo "all-features   (ES256/body)" ES256  true   true     true   false
+# Abilities OFF: the only combo that exercises the absent-`abilities` contract, which is what stops
+# an un-opted-in app's UI from being blanked by a client that reads "no key" as "granted nothing".
+run_combo "abilities:off   (HS256/body)" HS256  true   true     true   false  false
 
 echo
 echo "════════════════ conformance matrix summary ════════════════"

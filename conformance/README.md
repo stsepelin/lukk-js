@@ -11,6 +11,40 @@ rotation, logout revocation, step-up confirmation, a **completed 2FA challenge**
 The TOTP generator and the software WebAuthn authenticator are built on
 `node:crypto` (see `packages/core/conformance/authenticator.ts`) — no extra deps.
 
+## Which lukk is under test
+
+`build.sh` installs the PHP package one of two ways, and the difference matters:
+
+| `LUKK_PATH` | Installs | Used by |
+|---|---|---|
+| set | your local checkout, as a composer `path` repo | **CI**, `matrix.sh`, `browser*.sh` |
+| unset | `lukk/lukk` from Packagist — the last **release** | the Docker path |
+
+CI checks out the PHP repo (`LUKK_REPO` / `LUKK_REF` at the top of
+`.github/workflows/conformance.yml`) and points `LUKK_PATH` at it, so the clients are validated
+against the branch's own server. Before that, CI installed from Packagist and therefore could not
+cover any feature that hadn't shipped yet — the tests for one would *fail*, not skip. Retarget
+`LUKK_REF` to `main` once a cross-repo change lands.
+
+**The Docker path cannot follow.** `docker-compose.yml` sets its build context to `./fixture`, with
+no volumes and no additional contexts, so a checkout elsewhere on disk is unreachable inside the
+image. Docker therefore tests the **published** package; CI tests the branch. That is a useful split
+— just don't read a green Docker run as covering unreleased work.
+
+## Feature detection
+
+Most feature flags flow runner → fixture `.env` → test process (`LUKK_FEAT_2FA` and friends), because
+the runner is the one that turned them on. **Abilities are detected instead**: the suite probes
+`GET /gated/any` and treats `404` as "this server doesn't have them" and `401` as "it does". The real
+gate is whether the installed lukk *has* the feature, which the runner cannot know without
+duplicating composer's resolution — and defaulting it to on made an older server fail five tests
+rather than skip them. A skip always prints its reason.
+
+`LUKK_FEAT_ABILITIES=false` still forces them off. `matrix.sh` uses that for its `abilities:off` leg,
+which is the only place the **absent-`abilities`** contract can be asserted: the user resource must
+omit the key entirely rather than publish `[]`, or a client reads "granted nothing" and blanks the UI
+of every app that upgraded without opting in.
+
 ## Run it locally
 
 With Docker:
@@ -24,7 +58,7 @@ docker compose -f conformance/docker-compose.yml down
 Or natively (needs PHP ≥ 8.3 + Composer):
 
 ```bash
-bash conformance/fixture/build.sh /tmp/lukk-fixture              # generate the Laravel app
+LUKK_PATH=/path/to/lukk bash conformance/fixture/build.sh /tmp/lukk-fixture   # generate the Laravel app
 (cd /tmp/lukk-fixture && php artisan serve --port=8000 &)
 LUKK_URL=http://127.0.0.1:8000/auth pnpm --filter lukk-core test:conformance
 ```
