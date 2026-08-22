@@ -26,7 +26,26 @@ export function useLukkConfirmation() {
 
   /** Re-confirm with the account password. */
   async function confirmPassword(password: string): Promise<void> {
-    record(await $lukk.confirmPassword(password))
+    try {
+      record(await $lukk.confirmPassword(password))
+    }
+    catch (error) {
+      abandonIfUnearnable(error)
+      throw error
+    }
+  }
+
+  /**
+   * A 403 from a step-up route means this TOKEN may never earn a confirmation — it is a pinned
+   * machine token without `lukk.account`, not a wrong password.
+   *
+   * Without this the modal deadlocks: `withConfirmation` sets `required` and waits for `confirmed`,
+   * which can never flip, so the promise never settles, the dialog stays open, and every retry burns
+   * the shared step-up throttle. Dropping `required` lets `confirmedOrCancelled` reject so the
+   * original call fails with a real error instead of hanging.
+   */
+  function abandonIfUnearnable(error: unknown): void {
+    if ((error as { status?: number }).status === 403) required.value = false
   }
 
   /**
@@ -87,5 +106,5 @@ export function useLukkConfirmation() {
     required.value = false
   }
 
-  return { confirmed, required, token, confirmPassword, record, clear, withConfirmation, cancel }
+  return { abandonIfUnearnable, confirmed, required, token, confirmPassword, record, clear, withConfirmation, cancel }
 }

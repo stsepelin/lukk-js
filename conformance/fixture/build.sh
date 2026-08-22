@@ -71,8 +71,10 @@ php -r '
 # Test-only helper routes for the E2E flows (email verification needs the signed
 # link out-of-band; JWKS/verified state needs a peek at the DB). Gated to non-prod.
 # Appended to the stock web routes (throwaway fixture; the Route facade is aliased).
-# Idempotent: a rebuild over an existing app dir must not append the block twice.
-if ! grep -q '/conformance/last-verification-url' routes/web.php; then
+# Idempotent: a rebuild over an existing app dir must not append the block twice. The sentinel must
+# name the NEWEST route added below — `matrix.sh` reuses its app dir, so keying on an older marker
+# means a rebuild silently keeps the previous routes file, with no new route and no error.
+if ! grep -q '/conformance/pinned-token' routes/web.php; then
 cat >> routes/web.php <<'PHP'
 
 // The app's own authenticated user endpoint (lukk issues the token; the app owns
@@ -86,6 +88,31 @@ Route::get('/user', fn (\Illuminate\Http\Request $request) => new class ($reques
         return ['email' => $this->resource->email];
     }
 })->middleware('auth:api');
+
+// Abilities (lukk >= 0.6). Guarded on the class so the fixture still boots against a
+// published lukk that predates the feature — the conformance suite skips instead of 500ing.
+if (class_exists(\Lukk\Support\Abilities::class) && env('LUKK_FEAT_ABILITIES', true)) {
+    // Granted per user id, so the suite can assert a KNOWN list rather than whatever the
+    // server felt like. `billing.*` is here to exercise prefix expansion end to end.
+    \Lukk\Lukk::abilitiesUsing(fn ($userId) => match ((int) $userId) {
+        1 => ['orders.read', 'billing.*'],
+        default => [],
+    });
+
+    // One route per gate shape. The client matcher has to predict each of these exactly.
+    Route::middleware(['auth:api', 'lukk.ability:orders.read,orders.write'])
+        ->get('/gated/any', fn () => response()->json(['ok' => true]));
+    Route::middleware(['auth:api', 'lukk.abilities:orders.read,orders.write'])
+        ->get('/gated/all', fn () => response()->json(['ok' => true]));
+    Route::middleware(['auth:api', 'lukk.ability:billing.view'])
+        ->get('/gated/prefix', fn () => response()->json(['ok' => true]));
+    Route::middleware(['auth:api', 'lukk.ability:billing'])
+        ->get('/gated/bare-namespace', fn () => response()->json(['ok' => true]));
+    Route::middleware(['auth:api', 'lukk.ability:orders.*'])
+        ->get('/gated/wildcard-check', fn () => response()->json(['ok' => true]));
+    Route::middleware(['auth:api', 'lukk.ability:admin.impersonate'])
+        ->get('/gated/denied', fn () => response()->json(['ok' => true]));
+}
 
 // --- conformance helpers (test-only; see conformance/README.md) ---
 if (app()->environment() !== 'production') {
@@ -101,6 +128,34 @@ if (app()->environment() !== 'production') {
     Route::get('/conformance/user-verified', function (\Illuminate\Http\Request $request) {
         $user = \App\Models\User::where('email', (string) $request->query('email'))->first();
         return response()->json(['verified' => $user ? $user->hasVerifiedEmail() : null]);
+    });
+
+    // Mint a PINNED session — the token owns its abilities, not the user. The suite has no other way
+    // to produce one, so without this the `pin` claim and every one of lukk's own gated routes go
+    // untested against a real server. Test-only: it hands out a live session with no credentials,
+    // which is why it lives inside the non-production guard and must stay there.
+    //
+    //   ?abilities=ci.deploy  -> pinned to that grant
+    //   ?abilities=           -> pinned to NOTHING (the residue case `token_pinned` exists for)
+    //   omitted               -> an ordinary derived grant, for an A/B against the pinned one
+    //
+    // Resolved on a plain web route where no `lukk.set-guard` ran, so GuardContext falls back to
+    // `config('lukk.guard')` — the `api` guard, which is what we want. Don't "fix" that by wrapping
+    // this in Lukk::onGuard().
+    // GET, like the other two helpers: these live in `routes/web.php`, so a POST would be
+    // rejected by the web group's CSRF middleware before it ever reached the closure.
+    Route::get('/conformance/pinned-token', function (\Illuminate\Http\Request $request) {
+        // `has()`, not a null check on the value: `?abilities=` means "pinned to NOTHING" and must
+        // stay distinguishable from omitting the parameter, which means "derive". Reading the value
+        // alone collapses the two and silently mints a derived token for the one case the pinned
+        // residue exists to test.
+        $abilities = $request->has('abilities') ? array_values(array_filter(
+            array_map('trim', explode(',', (string) $request->query('abilities'))), fn ($a) => $a !== '',
+        )) : null;
+
+        return response()->json(
+            app(\Lukk\Actions\StartSession::class)((int) $request->query('user', 1), [], $abilities)->toArray(),
+        );
     });
 }
 PHP

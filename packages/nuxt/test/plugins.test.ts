@@ -16,14 +16,16 @@ vi.mock('lukk-core', async importActual => ({
 
 const initSession = vi.fn()
 const loggedIn = { value: false }
-vi.mock('../src/runtime/composables/useLukkAuth', () => ({ useLukkAuth: () => ({ initSession, loggedIn }) }))
+const fetchUser = vi.fn()
+const user: { value: { abilities?: string[] } | null } = { value: null }
+vi.mock('../src/runtime/composables/useLukkAuth', () => ({ useLukkAuth: () => ({ initSession, loggedIn, fetchUser, user }) }))
 
 // eslint-disable-next-line import/first
 import clientPlugin from '../src/runtime/plugins/client'
 // eslint-disable-next-line import/first
 import sessionPlugin from '../src/runtime/plugins/session.client'
 
-afterEach(() => { __test.reset(); captured.hooks = undefined; loggedIn.value = false; vi.clearAllMocks() })
+afterEach(() => { __test.reset(); captured.hooks = undefined; loggedIn.value = false; user.value = null; vi.clearAllMocks() })
 
 describe('client plugin', () => {
   it('targets the lukk URL in direct mode and wires the token hooks', async () => {
@@ -78,5 +80,48 @@ describe('session.client plugin', () => {
     loggedIn.value = true
     await (sessionPlugin as unknown as () => Promise<void>)()
     expect(initSession).not.toHaveBeenCalled()
+  })
+})
+
+describe('keeping abilities in step with a refreshed token', () => {
+  function boot() {
+    __test.runtimeConfig.public.lukk = { mode: 'direct', baseURL: 'https://api/auth', confirmationHeader: 'X-Lukk-Confirmation' }
+
+    return (clientPlugin as unknown as () => { provide: { lukkRefresh: () => Promise<unknown> } })()
+  }
+
+  it('reloads the user after a refresh, so a re-derived grant reaches the UI', async () => {
+    // Abilities are re-derived on EVERY mint server-side — that is what makes revoking one take
+    // effect within `access_ttl`. The client only learns a grant through the user resource, so
+    // without this a refreshed token carried a new grant while the UI still rendered from the old
+    // one: a control stayed visible until it 403'd, or a newly-granted one stayed hidden.
+    user.value = { abilities: ['orders.read'] }
+    const { provide } = boot()
+
+    await provide.lukkRefresh()
+    await Promise.resolve() // the resync is fire-and-forget, so let its microtask run
+
+    expect(fetchUser).toHaveBeenCalledOnce()
+  })
+
+  it('does not reload the user for an app that does not use abilities', async () => {
+    // An absent `abilities` key means the server doesn't publish them; that app must not pay an
+    // extra request on every refresh for a feature it never turned on.
+    user.value = {}
+    const { provide } = boot()
+
+    await provide.lukkRefresh()
+    await Promise.resolve()
+
+    expect(fetchUser).not.toHaveBeenCalled()
+  })
+
+  it('does not reload the user when nobody is signed in', async () => {
+    const { provide } = boot()
+
+    await provide.lukkRefresh()
+    await Promise.resolve()
+
+    expect(fetchUser).not.toHaveBeenCalled()
   })
 })

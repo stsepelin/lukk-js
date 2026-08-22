@@ -7,6 +7,18 @@ on:
     branches: [main]
   pull_request:
 
+# Which lukk the fixture is built from. CI used to install `lukk/lukk` from Packagist, which meant
+# it validated the clients against the last RELEASE — so a feature still on a branch could not be
+# covered at all, and the tests for it failed rather than skipped.
+#
+# `main` is the steady state. Point it at a branch only while a cross-repo change is in flight, and
+# move it back as soon as that lands: a merged branch is usually DELETED, and then every conformance
+# run fails at checkout with a bare `git failed with exit code 1` that looks nothing like the
+# retarget it actually is.
+env:
+  LUKK_REPO: stsepelin/lukk
+  LUKK_REF: main
+
 jobs:
   conformance:
     runs-on: ubuntu-latest
@@ -17,6 +29,15 @@ jobs:
     name: lukk-core vs real lukk (cookie_mode=${{ matrix.cookie_mode }})
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The PHP package, so the fixture is built from source rather than from the last release.
+      # A fork PR gets this too (the repo is public); a contributor testing their own lukk fork
+      # changes the two `env` values above.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.LUKK_REPO }}
+          ref: ${{ env.LUKK_REF }}
+          path: lukk-php
 
       - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
         with:
@@ -33,10 +54,11 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter lukk-core build
 
-      # Generate the Laravel host app with lukk installed (composer pulls lukk/lukk).
+      # Generate the Laravel host app with lukk installed from the checkout above.
       - name: Build the lukk fixture
         env:
           LUKK_COOKIE_MODE: ${{ matrix.cookie_mode }}
+          LUKK_PATH: ${{ github.workspace }}/lukk-php
         run: bash conformance/fixture/build.sh "$RUNNER_TEMP/lukk-fixture"
 
       # Boot it, wait for /up, then run the conformance flows against it.

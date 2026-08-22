@@ -12,6 +12,8 @@ const fetchUser = vi.fn()
 vi.mock('../src/runtime/composables/useLukkAuth', () => ({ useLukkAuth: () => ({ fetchUser }) }))
 
 // eslint-disable-next-line import/first
+import { useLukkConfirmation } from '../src/runtime/composables/useLukkConfirmation'
+// eslint-disable-next-line import/first
 import { useLukkPasskeys } from '../src/runtime/composables/useLukkPasskeys'
 
 function withNavigator(create = vi.fn(), get = vi.fn()) {
@@ -77,5 +79,44 @@ describe('useLukkPasskeys', () => {
     expect(await pk.list()).toEqual({ passkeys: [{ id: 'p1', name: 'Key', last_used_at: null }] })
     await pk.remove('p1')
     expect($lukk.deletePasskey).toHaveBeenCalledWith('p1')
+  })
+})
+
+describe('passkey step-up a pinned token cannot earn', () => {
+  it('abandons the pending confirmation on a 403, like the password path', async () => {
+    // `confirm-passkey` is the OTHER way into step-up, and lukk gates both for a machine token.
+    // Handling only the password path would leave this one deadlocking the modal: `withConfirmation`
+    // waits on a `confirmed` flag that can never flip for a token lacking `lukk.account`.
+    __test.nuxtApp = {
+      $lukk: {
+        passkeyLoginOptions: vi.fn().mockResolvedValue({ ceremony_id: 'cer', options: { challenge: 'c' } }),
+        confirmPasskey: vi.fn().mockRejectedValue({ status: 403 }),
+      },
+    }
+    withNavigator(vi.fn(), vi.fn().mockResolvedValue({ id: 'cred-4' }))
+
+    const { required } = useLukkConfirmation()
+    required.value = true
+
+    await expect(useLukkPasskeys().confirm()).rejects.toMatchObject({ status: 403 })
+
+    expect(required.value).toBe(false)
+  })
+
+  it('leaves a pending confirmation alone when the assertion is merely rejected', async () => {
+    __test.nuxtApp = {
+      $lukk: {
+        passkeyLoginOptions: vi.fn().mockResolvedValue({ ceremony_id: 'cer', options: { challenge: 'c' } }),
+        confirmPasskey: vi.fn().mockRejectedValue({ status: 422 }),
+      },
+    }
+    withNavigator(vi.fn(), vi.fn().mockResolvedValue({ id: 'cred-5' }))
+
+    const { required } = useLukkConfirmation()
+    required.value = true
+
+    await expect(useLukkPasskeys().confirm()).rejects.toMatchObject({ status: 422 })
+
+    expect(required.value).toBe(true)
   })
 })
