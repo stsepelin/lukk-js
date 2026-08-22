@@ -128,3 +128,26 @@ describe('lukk\'s own gated routes', () => {
     expect(a.canManageAccount.value).toBe(false)
   })
 })
+
+describe('erasing the account is its own ability', () => {
+  it('does not treat lukk.account as permission to delete', () => {
+    // The server refuses exactly this token (`RequirePinnedAbility:lukk.account.delete`), so gating
+    // a "Delete my account" button on `canManageAccount` renders the one button most certain to 403.
+    user.value = { id: 1, abilities: ['lukk.account'], token_pinned: true }
+    const a = useLukkAbilities()
+
+    expect(a.canManageAccount.value).toBe(true)
+    expect(a.canDeleteAccount.value).toBe(false)
+  })
+
+  it('accepts the exact ability, and an ordinary session', () => {
+    user.value = { id: 1, abilities: ['lukk.account.delete'], token_pinned: true }
+    expect(useLukkAbilities().canDeleteAccount.value).toBe(true)
+
+    user.value = { id: 1, abilities: ['orders.read'] } // derived — never gated
+    expect(useLukkAbilities().canDeleteAccount.value).toBe(true)
+
+    user.value = null
+    expect(useLukkAbilities().canDeleteAccount.value).toBe(false)
+  })
+})

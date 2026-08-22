@@ -1,4 +1,4 @@
-import { can as coreCan, canAll as coreCanAll, canAny as coreCanAny, enforcesAbilities, LUKK_ACCOUNT, LUKK_SESSIONS, normalize } from 'lukk-core'
+import { can as coreCan, canAll as coreCanAll, canAny as coreCanAny, enforcesAbilities, LUKK_ACCOUNT, LUKK_ACCOUNT_DELETE, LUKK_SESSIONS, normalize } from 'lukk-core'
 import { computed } from '#imports'
 import { useLukkAuth } from './useLukkAuth'
 
@@ -81,5 +81,15 @@ export function useLukkAbilities() {
   /** Whether step-up and changing the password will be accepted — see `useLukkConfirmation`. */
   const canManageAccount = computed(() => !!user.value && (!pinned.value || can(LUKK_ACCOUNT)))
 
-  return { abilities, enforced, pinned, can, cannot, canAny, canAll, canManageSessions, canManageAccount }
+  /**
+   * Whether erasing or exporting the account will be accepted.
+   *
+   * A separate predicate from `canManageAccount`, because `lukk.account` does NOT satisfy
+   * `lukk.account.delete` — so a token granted the former computes `canManageAccount === true` and
+   * is still refused by both account routes. Gating a "Delete my account" button on the wrong one
+   * renders the single button most certain to come back 403.
+   */
+  const canDeleteAccount = computed(() => !!user.value && (!pinned.value || can(LUKK_ACCOUNT_DELETE)))
+
+  return { abilities, enforced, pinned, can, cannot, canAny, canAll, canManageSessions, canManageAccount, canDeleteAccount }
 }

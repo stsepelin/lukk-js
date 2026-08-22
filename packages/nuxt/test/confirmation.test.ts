@@ -146,3 +146,25 @@ describe('a step-up this token can never earn', () => {
     expect(required.value).toBe(true)
   })
 })
+
+describe('an unearnable step-up reported to the caller', () => {
+  it('rejects with the real 403, not a synthetic "cancelled"', async () => {
+    // `abandonIfUnearnable` drops `required`, which makes `confirmedOrCancelled` reject. Rejecting
+    // with a synthetic Error told the caller the user dismissed a modal they never saw, and threw
+    // away the 403 that explains it — the expected outcome for a machine token holding
+    // `lukk.account` but not `lukk.account.delete`.
+    __test.nuxtApp = {
+      $lukk: {
+        confirmPassword: vi.fn().mockRejectedValue({ status: 403, message: 'This token was issued with a fixed set of abilities' }),
+      },
+    }
+    const { required, confirmPassword, withConfirmation } = useLukkConfirmation()
+
+    const gated = withConfirmation(() => Promise.reject({ status: 423 }))
+    await Promise.resolve()
+    expect(required.value).toBe(true)
+
+    await expect(confirmPassword('secret')).rejects.toMatchObject({ status: 403 })
+    await expect(gated).rejects.toMatchObject({ status: 403 })
+  })
+})

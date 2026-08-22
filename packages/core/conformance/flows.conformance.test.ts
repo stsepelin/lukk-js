@@ -1,5 +1,6 @@
 import { createPublicKey, verify as cryptoVerify } from 'node:crypto'
 import { beforeAll, describe, expect, it } from 'vitest'
+import type { AccountExport } from '../src'
 import { can, canAll, canAny, createLukkClient, credentialToJSON, isTwoFactorChallenge, shapeUser } from '../src'
 import { createAuthenticator, totp } from './authenticator'
 
@@ -288,6 +289,11 @@ describe(`lukk conformance (algo=${ALGORITHM}, cookie_mode=${COOKIE_MODE}, feat=
       ['POST', '/auth/password', 'lukk.account'],
       ['GET', '/auth/passkeys', 'lukk.account'],
       ['GET', '/auth/two-factor/recovery-codes', 'lukk.account'],
+      // The account routes need their OWN ability: `lukk.account` does not satisfy
+      // `lukk.account.delete`. Safe in this loop because the derived leg only asserts "not 403" —
+      // which the step-up gate satisfies with a 423, without erasing anything.
+      ['GET', '/auth/account/export', 'lukk.account.delete'],
+      ['DELETE', '/auth/account', 'lukk.account.delete'],
     ] as const
 
     it('marks a pinned session, and only a pinned one', async () => {
@@ -350,6 +356,44 @@ describe(`lukk conformance (algo=${ALGORITHM}, cookie_mode=${COOKIE_MODE}, feat=
       expect(user?.abilities).toEqual([])
       expect(user?.token_pinned).toBe(true)
       expect((await fetch(`${ROOT}/auth/sessions`, { method: 'DELETE', ...authed(token) })).status).toBe(403)
+    })
+
+    it('exports exactly the fields the client type declares', async () => {
+      // Asserted as an exhaustive key set, not with `toHaveProperty`: a field the server ADDS should
+      // fail here too, and a field it stops emitting is how `AccountExport.sessions[].guard` came to
+      // declare something no endpoint ever returned.
+      const token = await pinnedToken('lukk.account,lukk.account.delete')
+      const confirmation = await (await fetch(`${ROOT}/auth/confirm-password`, {
+        method: 'POST',
+        headers: { ...authed(token).headers, 'content-type': 'application/json' },
+        body: JSON.stringify({ password: PASSWORD }),
+      })).json() as { confirmation_token: string }
+
+      const stepped = { headers: { ...authed(token).headers, 'X-Lukk-Confirmation': confirmation.confirmation_token } }
+      const exported = await (await fetch(`${ROOT}/auth/account/export`, stepped)).json() as AccountExport
+
+      expect(Object.keys(exported).sort()).toEqual(['account', 'generated_at', 'passkeys', 'sessions', 'two_factor'])
+      expect(Object.keys(exported.sessions[0]!).sort())
+        .toEqual(['created_at', 'expires_at', 'last_rotated_at', 'revoked_at', 'session'])
+      expect(Object.keys(exported.two_factor).sort()).toEqual(['confirmed_at', 'enabled'])
+    })
+
+    it('erases a disposable account end to end', async () => {
+      // The three properties `DeleteAccount`'s ordering exists to guarantee, none of which any
+      // client-side test verified: the call succeeds, the access token is dead immediately, and the
+      // identity can no longer log in.
+      const who = await (await fetch(`${ROOT}/conformance/ephemeral-user`)).json() as { email: string, password: string }
+      const { lukk, state } = client()
+      const result = await lukk.login({ email: who.email, password: who.password })
+      if (isTwoFactorChallenge(result)) throw new Error('unexpected 2FA challenge')
+
+      const confirmation = await lukk.confirmPassword(who.password)
+      state.confirmation = confirmation.confirmation_token
+
+      await expect(lukk.deleteAccount()).resolves.toBeUndefined()
+
+      expect((await fetch(`${ROOT}/user`, authed(state.access!))).status).toBe(401)
+      await expect(lukk.login({ email: who.email, password: who.password })).rejects.toBeTruthy()
     })
 
     it('carries the grant through a refresh', async () => {

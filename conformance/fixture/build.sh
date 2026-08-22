@@ -74,7 +74,7 @@ php -r '
 # Idempotent: a rebuild over an existing app dir must not append the block twice. The sentinel must
 # name the NEWEST route added below — `matrix.sh` reuses its app dir, so keying on an older marker
 # means a rebuild silently keeps the previous routes file, with no new route and no error.
-if ! grep -q '/conformance/pinned-token' routes/web.php; then
+if ! grep -q '/conformance/ephemeral-user' routes/web.php; then
 cat >> routes/web.php <<'PHP'
 
 // The app's own authenticated user endpoint (lukk issues the token; the app owns
@@ -142,6 +142,19 @@ if (app()->environment() !== 'production') {
     // Resolved on a plain web route where no `lukk.set-guard` ran, so GuardContext falls back to
     // `config('lukk.guard')` — the `api` guard, which is what we want. Don't "fix" that by wrapping
     // this in Lukk::onGuard().
+    // A disposable account, so a destructive flow (erasure) never poisons the seeded users every
+    // other test depends on — `build.sh` seeds once per boot and `matrix.sh` reuses the app dir.
+    Route::get('/conformance/ephemeral-user', function () {
+        $user = \App\Models\User::create([
+            'name' => 'Ephemeral',
+            'email' => 'eph-'.\Illuminate\Support\Str::random(12).'@example.com',
+            'password' => \Illuminate\Support\Facades\Hash::make('password'),
+            'email_verified_at' => now(),
+        ]);
+
+        return response()->json(['id' => $user->id, 'email' => $user->email, 'password' => 'password']);
+    });
+
     // GET, like the other two helpers: these live in `routes/web.php`, so a POST would be
     // rejected by the web group's CSRF middleware before it ever reached the closure.
     Route::get('/conformance/pinned-token', function (\Illuminate\Http\Request $request) {
