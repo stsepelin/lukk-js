@@ -9,11 +9,15 @@ on:
 
 # Which lukk the fixture is built from. CI used to install `lukk/lukk` from Packagist, which meant
 # it validated the clients against the last RELEASE — so a feature still on a branch could not be
-# covered at all, and the tests for it failed rather than skipped. Point this at the branch while a
-# cross-repo change is in flight, then back at `main`.
+# covered at all, and the tests for it failed rather than skipped.
+#
+# `main` is the steady state. Point it at a branch only while a cross-repo change is in flight, and
+# move it back as soon as that lands: a merged branch is usually DELETED, and then every conformance
+# run fails at checkout with a bare `git failed with exit code 1` that looks nothing like the
+# retarget it actually is.
 env:
   LUKK_REPO: stsepelin/lukk
-  LUKK_REF: feat/abilities
+  LUKK_REF: main
 
 jobs:
   conformance:
