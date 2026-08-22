@@ -17,11 +17,7 @@ on:
 # retarget it actually is.
 env:
   LUKK_REPO: stsepelin/lukk
-  # TEMPORARY — cross-repo change in flight: stsepelin/lukk#30 adds DELETE /auth/account and
-  # GET /auth/account/export, which the specs below now assert. Revert to `main` the moment that
-  # PR merges, or the branch gets deleted and every run fails at checkout with a bare
-  # `git failed with exit code 1` that looks nothing like the retarget it actually is.
-  LUKK_REF: feat/account-deletion
+  LUKK_REF: main
 
 jobs:
   conformance:
