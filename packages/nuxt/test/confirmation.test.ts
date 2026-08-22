@@ -117,3 +117,32 @@ describe('useLukkConfirmation withConfirmation (modal flow)', () => {
     expect(action).toHaveBeenCalledOnce()
   })
 })
+
+describe('a step-up this token can never earn', () => {
+  it('abandons the pending confirmation on a 403 instead of hanging', async () => {
+    // A pinned machine token without `lukk.account` is refused by the step-up route itself. Without
+    // this, `withConfirmation` sets `required` and waits for `confirmed` — which can never flip — so
+    // the promise never settles, the modal stays open, and every retry burns the shared throttle.
+    __test.nuxtApp = { $lukk: { confirmPassword: vi.fn().mockRejectedValue({ status: 403 }) } }
+    const { required, confirmed, confirmPassword } = useLukkConfirmation()
+
+    required.value = true
+
+    await expect(confirmPassword('secret')).rejects.toMatchObject({ status: 403 })
+
+    expect(required.value).toBe(false) // → confirmedOrCancelled rejects, the caller sees a real error
+    expect(confirmed.value).toBe(false)
+  })
+
+  it('leaves a pending confirmation alone for a wrong password', async () => {
+    // 422 is retryable — the user can try again, so the modal must stay open.
+    __test.nuxtApp = { $lukk: { confirmPassword: vi.fn().mockRejectedValue({ status: 422 }) } }
+    const { required, confirmPassword } = useLukkConfirmation()
+
+    required.value = true
+
+    await expect(confirmPassword('wrong')).rejects.toMatchObject({ status: 422 })
+
+    expect(required.value).toBe(true)
+  })
+})
