@@ -1,4 +1,5 @@
 import type {
+  AccountExport,
   ChangePasswordInput,
   ConfirmationToken,
   LoginInput,
@@ -142,6 +143,23 @@ export function createLukkClient(hooks: LukkClientHooks) {
     /** Change the password of the SIGNED-IN user. Revokes every other session upstream; this one
      *  survives, so no re-login and no token change here. */
     changePassword: (input: ChangePasswordInput) => request<void>('/password', json(input)),
+
+    // --- the account itself (behind step-up) ---
+    /**
+     * Erase the account (GDPR Art. 17). **Irreversible**, and it ends the session that called it —
+     * every token is revoked server-side before the row is deleted, so treat the resolved promise as
+     * "you are now logged out and the account is gone".
+     */
+    deleteAccount: () => request<void>('/account', { method: 'DELETE' }),
+    /**
+     * The personal data lukk holds (Art. 15 / 20): sessions, passkeys, whether two-factor is on.
+     *
+     * The **auth slice only** — lukk knows nothing about your domain data, so serving this alone as
+     * a subject-access response would under-disclose. Append your own before you hand it over.
+     * Credential material is deliberately absent: a TOTP secret and recovery codes are secrets whose
+     * only use is authenticating as the subject, not data they benefit from receiving.
+     */
+    exportAccount: () => request<AccountExport>('/account/export'),
 
     // --- step-up confirmation ---
     confirmPassword: (password: string) => request<ConfirmationToken>('/confirm-password', json({ password })),

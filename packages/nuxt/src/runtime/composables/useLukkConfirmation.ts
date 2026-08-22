@@ -25,6 +25,9 @@ export function useLukkConfirmation() {
   const required = useState<boolean>(CONFIRM_REQUIRED_KEY, () => false)
 
   /** Re-confirm with the account password. */
+  /** The error that made a step-up unearnable, so the caller sees it instead of "cancelled". */
+  let unearnable: unknown = null
+
   async function confirmPassword(password: string): Promise<void> {
     try {
       record(await $lukk.confirmPassword(password))
@@ -45,7 +48,14 @@ export function useLukkConfirmation() {
    * original call fails with a real error instead of hanging.
    */
   function abandonIfUnearnable(error: unknown): void {
-    if ((error as { status?: number }).status === 403) required.value = false
+    if ((error as { status?: number }).status !== 403) return
+
+    // Stashed so `confirmedOrCancelled` can reject with the REAL error. Rejecting with a synthetic
+    // "confirmation cancelled" told the caller the user dismissed a modal they never saw, and threw
+    // away the 403 that actually explains it — now the expected outcome for any machine token
+    // holding `lukk.account` but not `lukk.account.delete`.
+    unearnable = error
+    required.value = false
   }
 
   /**
@@ -79,6 +89,10 @@ export function useLukkConfirmation() {
       if ((error as { status?: number }).status !== 423) throw error
       // The server rejected our confirmation → it's missing or stale; earn a fresh one.
       clear()
+      // Reset per CYCLE, not per composable. `unearnable` is only ever set, so once one action hit
+      // a 403 every later cancellation on the same instance rejected with that stale 403 —
+      // reporting "this token can never earn a step-up" for an operation the user simply dismissed.
+      unearnable = null
       required.value = true
       try {
         await confirmedOrCancelled()
@@ -96,7 +110,7 @@ export function useLukkConfirmation() {
       const stop = watch([confirmedFlag, required], ([ok, req]) => {
         // `confirmed` wins over `required` going false, so a concurrent retry can't cancel this one.
         if (ok) { stop(); resolve() }
-        else if (!req) { stop(); reject(new Error('lukk: confirmation cancelled')) }
+        else if (!req) { stop(); reject(unearnable ?? new Error('lukk: confirmation cancelled')) }
       })
     })
   }

@@ -145,10 +145,18 @@ export default defineEventHandler(async (event) => {
   const text = await res.text()
   const data: unknown = text ? safeParse(text) : undefined
 
-  // Capture + strip minted tokens (login / 2FA / passkey login / refresh).
+  // Capture + strip minted tokens. Login / 2FA / passkey login / register only — `/refresh` is
+  // served above and returns before reaching here, which is why wiping `confirmation` below is safe:
+  // every pair that gets this far starts a NEW family, whereas a rotation keeps the old one and
+  // `refreshOnce`'s merge-update deliberately preserves the step-up across it.
   if (res.ok && isTokenPair(data)) {
     const s = await session()
-    await s.update({ access: data.access_token, refresh: data.refresh_token ?? currentRefresh })
+    // `confirmation: undefined` too: a fresh token pair means a new SESSION, and a step-up earned by
+    // the previous one must not carry over. Before confirmations were bound to the earning session
+    // that was a silent no-op for the same subject; now it is a hard 423 on every step-up-gated
+    // route, and the browser cannot clear the proxy's copy — `useLukkConfirmation.clear()` only
+    // touches client state — so it would stick until `confirm.ttl` expired it.
+    await s.update({ access: data.access_token, refresh: data.refresh_token ?? currentRefresh, confirmation: undefined })
     warnIfSessionTooLarge(s)
     return { ok: true, expires_in: data.expires_in }
   }

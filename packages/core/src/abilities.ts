@@ -94,6 +94,13 @@ export function cannot(granted: unknown, ability: string): boolean {
 /** lukk's own abilities, required from a PINNED token on lukk's own routes. */
 export const LUKK_SESSIONS = 'lukk.sessions'
 export const LUKK_ACCOUNT = 'lukk.account'
+/**
+ * Erasing or exporting the account. Deliberately NOT satisfied by `LUKK_ACCOUNT` — the matcher's
+ * prefix rule makes an exact grant of `lukk.account` miss `lukk.account.delete`, mirroring the
+ * server, where widening the older ability would have handed every token carrying it the power to
+ * destroy the account.
+ */
+export const LUKK_ACCOUNT_DELETE = 'lukk.account.delete'
 
 /** Whether **any** of the abilities is granted. An empty list is never satisfied. */
 export function canAny(granted: unknown, abilities: string[]): boolean {

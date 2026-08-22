@@ -169,3 +169,26 @@ export interface LukkError {
   /** Laravel validation errors, when present (422). */
   errors?: Record<string, string[]>
 }
+
+/**
+ * What `GET /auth/account/export` returns — the personal data **lukk** holds.
+ *
+ * Not a complete Art. 15 response on its own: lukk owns the auth side and knows nothing about your
+ * domain data. Credential material (the TOTP secret, recovery codes, refresh-token hashes) is
+ * deliberately excluded — those are secrets, not data a subject benefits from receiving.
+ */
+export interface AccountExport {
+  generated_at: string
+  account: { id: string | number, identifier: string | null }
+  /** One entry per refresh-token row: metadata only, never a token or a hash. */
+  sessions: Array<{
+    session: string
+    created_at: string | null
+    last_rotated_at: string | null
+    revoked_at: string | null
+    expires_at: string | null
+  }>
+  /** The FACT of each passkey — never the COSE public key. */
+  passkeys: Array<{ credential_id: string, name: string | null, last_used_at: number | null }>
+  two_factor: { enabled: boolean, confirmed_at: string | null }
+}

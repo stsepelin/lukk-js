@@ -146,3 +146,52 @@ describe('a step-up this token can never earn', () => {
     expect(required.value).toBe(true)
   })
 })
+
+describe('an unearnable step-up reported to the caller', () => {
+  it('rejects with the real 403, not a synthetic "cancelled"', async () => {
+    // `abandonIfUnearnable` drops `required`, which makes `confirmedOrCancelled` reject. Rejecting
+    // with a synthetic Error told the caller the user dismissed a modal they never saw, and threw
+    // away the 403 that explains it — the expected outcome for a machine token holding
+    // `lukk.account` but not `lukk.account.delete`.
+    __test.nuxtApp = {
+      $lukk: {
+        confirmPassword: vi.fn().mockRejectedValue({ status: 403, message: 'This token was issued with a fixed set of abilities' }),
+      },
+    }
+    const { required, confirmPassword, withConfirmation } = useLukkConfirmation()
+
+    const gated = withConfirmation(() => Promise.reject({ status: 423 }))
+    await Promise.resolve()
+    expect(required.value).toBe(true)
+
+    await expect(confirmPassword('secret')).rejects.toMatchObject({ status: 403 })
+    await expect(gated).rejects.toMatchObject({ status: 403 })
+  })
+})
+
+describe('the unearnable error does not outlive its cycle', () => {
+  it('reports a later CANCELLATION as cancelled, not as the earlier 403', async () => {
+    // `unearnable` was only ever set, never cleared. Once any action hit a 403, every later
+    // cancellation on the same composable instance rejected with that stale 403 — telling the user
+    // "this token can never earn a step-up" about an operation they simply dismissed, and telling
+    // the developer to go looking for an abilities problem that isn't there.
+    __test.nuxtApp = {
+      $lukk: { confirmPassword: vi.fn().mockRejectedValue({ status: 403, message: 'fixed abilities' }) },
+    }
+    const { required, confirmPassword, withConfirmation, cancel } = useLukkConfirmation()
+
+    // Cycle 1: a genuine unearnable 403.
+    const first = withConfirmation(() => Promise.reject({ status: 423 }))
+    await Promise.resolve()
+    await expect(confirmPassword('secret')).rejects.toMatchObject({ status: 403 })
+    await expect(first).rejects.toMatchObject({ status: 403 })
+
+    // Cycle 2: the user just closes the modal.
+    const second = withConfirmation(() => Promise.reject({ status: 423 }))
+    await Promise.resolve()
+    expect(required.value).toBe(true)
+    cancel()
+
+    await expect(second).rejects.toThrow('lukk: confirmation cancelled')
+  })
+})
