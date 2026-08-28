@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "lukk-nuxt": "workspace:*",
-    "nuxt": "^3.21.11"
+    "nuxt": "^4.5.2"
   },
   "devDependencies": {
     "@playwright/test": "^1.62.1"
