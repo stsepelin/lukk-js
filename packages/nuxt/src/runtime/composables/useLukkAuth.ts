@@ -2,7 +2,8 @@ import { isRegistrationPending, isTwoFactorChallenge, type LoginInput, type Logi
 import { computed, useNuxtApp, useRuntimeConfig, useState } from '#imports'
 import { ACCESS_KEY, CHALLENGE_KEY, CONFIRMATION_KEY, CONFIRMED_KEY, READY_KEY, RESTORE_FAILED_KEY, USER_KEY } from '../keys'
 import { isAuthRejection } from '../shared'
-import { whenReady as settled } from '../utils/when-ready'
+import { restoreState } from '../utils/restore-state'
+import { isPrematureWait, whenReady as settled } from '../utils/when-ready'
 import { useLukkFetch } from './useLukkFetch'
 
 interface PublicLukk {
@@ -20,11 +21,8 @@ interface PublicLukk {
 export function useLukkAuth() {
   const nuxtApp = useNuxtApp()
   const { $lukk } = nuxtApp
-  // `$lukkRefresh` is provided by the universal client plugin. Read it as optional (like
-  // `useLukkFetch` does) so a not-yet-in-effect provide — an ordering gap on hydration, or a
-  // failed plugin setup — degrades to logged-out instead of a fatal `$lukkRefresh is not a function`.
-  // `$lukkRestore` is the same single-flight refresh, reporting why a refresh failed (see plugins/client).
-  const $lukkRestore = (nuxtApp as { $lukkRestore?: () => Promise<{ pair: TokenPair | null, unavailable: boolean }> }).$lukkRestore
+  // Restore bookkeeping that `clearNuxtState()` cannot erase — see utils/restore-state.
+  const state = restoreState(nuxtApp)
   const cfg = useRuntimeConfig().public.lukk as PublicLukk
   // Auth-aware fetch for the current-user load — SSR-correct (forwards the session
   // cookie) unlike a bare `$fetch`, and transport-aware for the bearer.
@@ -54,10 +52,17 @@ export function useLukkAuth() {
    * account-scoped data, restoring a deep link.
    *
    * Where it is `false`:
-   *  - **During a server render that did not hydrate a user.** Direct mode (the server never sees
-   *    the refresh cookie), `ssrHydrate: false`, a prerendered route, or a session the server could
-   *    not rotate. The server cannot tell these from an anonymous visitor, so it does not claim to.
-   *  - **In any plugin that runs before, or in parallel with, `lukk:session-restore`.**
+   *  - **During ANY server render that did not hydrate a user** — including an anonymous BFF visitor,
+   *    direct mode (the server never sees the refresh cookie), `ssrHydrate: false`, a prerendered
+   *    route, a session the server could not rotate, and a user endpoint that failed on the server.
+   *    The server cannot tell these apart, so it does not claim to.
+   *  - **In any plugin that runs before `lukk:session-restore`.** Such a plugin must not AWAIT
+   *    `whenReady()` in its setup — see {@link whenReady}.
+   *
+   * **Reading it in a template on a server-rendered page causes a hydration mismatch** whenever the
+   * server did not hydrate a user: the server renders `false` and the client sets `true` before it
+   * mounts. Read it in logic, or inside `<ClientOnly>`. (`loggedIn` already behaved this way for a
+   * session restored on the client.)
    *
    * On the client it is `true` by the time route middleware, component `setup()` and `onMounted`
    * run: Nuxt awaits the restore plugin before the initial navigation and before mounting. It is
@@ -65,7 +70,9 @@ export function useLukkAuth() {
    *
    * `ready` means the restore FINISHED, not that it reached an answer — see {@link restoreFailed}.
    */
-  const ready = computed(() => readyFlag.value)
+  // `=== true`, not truthiness: `clearNuxtState()` turns the key into `undefined`, and the app-scoped
+  // `restored` is what keeps a finished restore finished after that.
+  const ready = computed(() => readyFlag.value === true || state.restored.value)
 
   const restoreFailedFlag = useState<boolean>(RESTORE_FAILED_KEY, () => false)
 
@@ -77,7 +84,13 @@ export function useLukkAuth() {
    * Only a 401/403 means "no session" — the rule `fetchUser` already used. Show a "couldn't reach
    * the server, retry" state here rather than a login prompt, and retry with `initSession()`.
    *
-   * Hidden while someone is signed in, and cleared by `logout()` — both are definitive answers.
+   * Any other status counts too — including a misconfigured endpoint (404) — so a retry there can
+   * never succeed; it reports "could not tell", which is still true.
+   *
+   * Cleared by every DEFINITIVE answer: a user loaded, a 401/403 from the user endpoint, `logout()`.
+   * Clearing on those rather than only hiding it while signed in matters — a stale flag from an
+   * earlier failed restore otherwise resurfaced once that later session ended, and code gating a
+   * redirect on it let a signed-out visitor through.
    */
   const restoreFailed = computed(() => restoreFailedFlag.value && !loggedIn.value)
 
@@ -138,6 +151,8 @@ export function useLukkAuth() {
   }
 
   async function logout(): Promise<void> {
+    // Invalidate any restore still in flight BEFORE awaiting — its result must not land afterwards.
+    state.epoch++
     try { await $lukk.logout() }
     finally {
       access.value = null
@@ -166,20 +181,23 @@ export function useLukkAuth() {
    * leaves the current `user` intact (don't bounce a logged-in user to /login).
    */
   async function fetchUser(): Promise<void> {
-    await loadUser()
+    await loadUser(() => true)
   }
 
   /**
    * `fetchUser`, reporting how it went — so a restore can tell "the user endpoint said you are signed
    * out" from "the user endpoint failed". `fetchUser` keeps its `Promise<void>` signature.
    */
-  async function loadUser(): Promise<'loaded' | 'signed-out' | 'unavailable' | 'skipped'> {
+  async function loadUser(isCurrent: () => boolean): Promise<'loaded' | 'signed-out' | 'unavailable' | 'skipped' | 'stale'> {
     if (!cfg.userEndpoint) return 'skipped'
     try {
       // userEndpoint is a full path; `baseURL: ''` keeps it as-is (in server-BFF the
       // request-aware transport resolves the relative endpoint in-process). `shapeUser`
       // auto-unwraps a Laravel `{ data: {...} }` API-Resource wrapper (configurable via `user.key`).
-      user.value = shapeUser(await api(cfg.userEndpoint, { baseURL: '' }), cfg.userKey || false)
+      const body = await api(cfg.userEndpoint, { baseURL: '' })
+      if (!isCurrent()) return 'stale'
+      user.value = shapeUser(body, cfg.userKey || false)
+      restoreFailedFlag.value = false
       // Dev-only: nudge the developer if the endpoint shape wasn't handled (no `id`, still wrapped).
       if (import.meta.dev) {
         const warning = userShapeWarning(user.value)
@@ -191,38 +209,66 @@ export function useLukkAuth() {
       // Only an auth failure means "logged out". A transient 5xx/network error
       // must not flip `loggedIn` and bounce a logged-in user to /login.
       if (!isAuthRejection(e)) return 'unavailable'
+      if (!isCurrent()) return 'stale'
       user.value = null
+      restoreFailedFlag.value = false
       return 'signed-out'
     }
   }
 
   /**
-   * Silently restore a session on app load (a valid refresh → logged in). Goes through
-   * the shared single-flight `$lukkRefresh` so a boot restore can't race a concurrent
-   * app-API 401 refresh and replay the rotating token twice.
+   * Silently restore a session on app load (a valid refresh → logged in). Goes through the shared
+   * single-flight refresh (`$lukkRestore`) so a boot restore can't race a concurrent app-API 401
+   * refresh and replay the rotating token twice. Also the retry after {@link restoreFailed}.
    */
   async function initSession(): Promise<void> {
-    // No provide at all (an ordering gap, a failed plugin) degrades to signed-out, as before — not to
-    // "unavailable", which would invite a retry loop that can never succeed.
-    const outcome = await $lukkRestore?.()
+    const epoch = state.epoch
+    const isCurrent = () => epoch === state.epoch
+
+    // Read at CALL time, like `useLukkFetch` does — a `useLukkAuth()` created before the client plugin
+    // provided it would otherwise keep `undefined` forever and silently never restore. No provide at
+    // all (an ordering gap, a failed plugin) degrades to signed-out, not to "unavailable", which would
+    // invite a retry loop that can never succeed.
+    const restore = (nuxtApp as { $lukkRestore?: () => Promise<{ pair: TokenPair | null, unavailable: boolean }> }).$lukkRestore
+    const outcome = await restore?.()
+
+    // `logout()` ran while this was in flight: its answer is newer than ours.
+    if (!isCurrent()) return
 
     if (!outcome?.pair) {
       restoreFailedFlag.value = outcome?.unavailable ?? false
       return
     }
 
-    restoreFailedFlag.value = (await loadUser()) === 'unavailable'
+    const loaded = await loadUser(isCurrent)
+    // Set from the result, not only ever to `true`: a retry whose refresh succeeded on an app with no
+    // user endpoint (`skipped`) is a definitive answer and must clear an earlier failure.
+    if (isCurrent()) restoreFailedFlag.value = loaded === 'unavailable'
   }
 
   /**
-   * Resolve once {@link ready} is true. For client code — `onMounted`, a watcher, an event handler.
+   * Resolve once {@link ready} is true — for code that may run BEFORE the restore finishes: a store, a
+   * composable used from a plugin, anything not tied to route middleware or a component (which Nuxt
+   * already runs after the restore).
    *
    * **On the server it resolves immediately**, because nothing later in the request can settle the
    * session and waiting would hang the render. Read `ready` afterwards: on the server it can still
    * be `false`, meaning "unknown — the client will decide", which is not the same as anonymous.
+   *
+   * **Do not await it in the setup of a plugin that runs before `lukk:session-restore`** — plugins run
+   * in sequence, so that plugin waits on one that cannot start until it returns, and the app never
+   * boots. Give such a plugin `dependsOn: ['lukk:session-restore']`. Warned about in development.
    */
   function whenReady(): Promise<void> {
-    return settled(readyFlag, import.meta.server === true)
+    const isServer = import.meta.server === true
+
+    if (import.meta.dev) {
+      if (isPrematureWait(ready.value, isServer, state.started)) {
+        console.warn('[lukk-nuxt] whenReady() was called before the session-restore plugin started. Awaiting it in a plugin\'s setup deadlocks app startup — give that plugin `dependsOn: [\'lukk:session-restore\']`.')
+      }
+    }
+
+    return settled(ready, isServer)
   }
 
   return { user, loggedIn, ready, whenReady, restoreFailed, pendingTwoFactor, register, login, verifyTwoFactor, verifyRecoveryCode, logout, revokeOtherSessions, fetchUser, initSession }

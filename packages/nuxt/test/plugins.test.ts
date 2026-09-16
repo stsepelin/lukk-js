@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { READY_KEY } from '../src/runtime/keys'
+import { restoreState } from '../src/runtime/utils/restore-state'
 import { __test, useState } from './mocks/imports'
 
 const captured: {
@@ -128,6 +129,17 @@ describe('session.client plugin — readiness', () => {
   it('marks the session resolved once the restore settles', async () => {
     await run()
     expect(ready().value).toBe(true)
+    // The app-scoped copy too — the one `clearNuxtState()` cannot reset.
+    expect(restoreState(__test.nuxtApp).restored.value).toBe(true)
+  })
+
+  it('still restores when a cached payload claims ready but nobody is signed in', async () => {
+    // `ready` alone must never short-circuit the client restore: only a hydrated USER does. A payload
+    // served from a shared cache could carry a stale `ready`, and skipping on it would strand a
+    // signed-in visitor as anonymous.
+    ready().value = true
+    await run()
+    expect(initSession).toHaveBeenCalledOnce()
   })
 
   it('is NOT resolved while the restore is still in flight', async () => {
@@ -137,8 +149,12 @@ describe('session.client plugin — readiness', () => {
     initSession.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve }))
 
     const pending = run()
-    await Promise.resolve()
+    // A MACROtask, not one microtask: setting `ready` a few ticks early — still mid-restore — passed
+    // a single `await Promise.resolve()`.
+    await new Promise(resolve => setTimeout(resolve, 0))
     expect(ready().value).toBe(false)
+    expect(restoreState(__test.nuxtApp).started).toBe(true)
+    expect(restoreState(__test.nuxtApp).restored.value).toBe(false)
 
     finish()
     await pending

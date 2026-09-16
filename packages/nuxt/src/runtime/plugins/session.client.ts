@@ -1,6 +1,7 @@
 import { useLukkAuth } from '../composables/useLukkAuth'
 import { READY_KEY } from '../keys'
-import { defineNuxtPlugin, useState } from '#imports'
+import { restoreState } from '../utils/restore-state'
+import { defineNuxtPlugin, useNuxtApp, useState } from '#imports'
 
 /**
  * On app load in the browser, silently restore the session: if a valid refresh
@@ -21,6 +22,8 @@ export default defineNuxtPlugin({
   async setup() {
     const auth = useLukkAuth()
     const ready = useState<boolean>(READY_KEY, () => false)
+    const state = restoreState(useNuxtApp())
+    state.started = true
 
     try {
       // If SSR already hydrated the user (BFF `ssrHydrate`), skip the client restore — no
@@ -33,6 +36,8 @@ export default defineNuxtPlugin({
       // would otherwise leave every waiter pending forever. A settled-as-signed-out session is a
       // recoverable answer; a promise that never resolves is not.
       ready.value = true
+      // The app-scoped copy is the one `clearNuxtState()` cannot reset — see utils/restore-state.
+      state.restored.value = true
     }
   },
 })

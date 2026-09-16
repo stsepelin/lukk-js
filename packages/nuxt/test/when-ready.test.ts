@@ -1,6 +1,6 @@
 import { nextTick, ref } from 'vue'
 import { describe, expect, it } from 'vitest'
-import { whenReady } from '../src/runtime/utils/when-ready'
+import { isPrematureWait, whenReady } from '../src/runtime/utils/when-ready'
 
 /** Whether a promise has settled, without awaiting it to completion. */
 async function settledYet(p: Promise<void>): Promise<boolean> {
@@ -42,5 +42,15 @@ describe('whenReady', () => {
     // Nothing later in a server request can settle the session — every plugin has already run —
     // so waiting would hang the render until the socket times out. The caller reads `ready`.
     expect(await settledYet(whenReady(ref(false), true))).toBe(true)
+  })
+})
+
+describe('isPrematureWait', () => {
+  it('flags only an unresolved client wait before the restore plugin has started', () => {
+    expect(isPrematureWait(false, false, false)).toBe(true)
+
+    expect(isPrematureWait(true, false, false)).toBe(false) // already resolved (a hydrated render)
+    expect(isPrematureWait(false, true, false)).toBe(false) // the server has no restore plugin
+    expect(isPrematureWait(false, false, true)).toBe(false) // the restore is under way
   })
 })

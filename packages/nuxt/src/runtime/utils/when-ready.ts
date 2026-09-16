@@ -13,12 +13,24 @@ import { watch } from '#imports'
  * out. The caller must still read `ready`: `false` there means the server could not tell, and the
  * client will decide after its restore.
  */
-export function whenReady(ready: Ref<boolean>, isServer: boolean): Promise<void> {
+export function whenReady(ready: Readonly<Ref<boolean>>, isServer: boolean): Promise<void> {
   if (ready.value || isServer) return Promise.resolve()
 
   // Only installed while `ready` is false, and a watcher fires only on a change — so its first
-  // callback necessarily sees `true`. `once` then removes it, so a resolved waiter leaks nothing.
+  // callback necessarily sees `true`. `once` stops the watcher after that first callback.
   return new Promise((resolve) => {
     watch(ready, () => resolve(), { once: true })
   })
+}
+
+/**
+ * Is a client-side `whenReady()` being called before the restore plugin has even started?
+ *
+ * Plugins run in sequence, so a plugin that AWAITS `whenReady()` in its setup and runs before
+ * `lukk:session-restore` — `enforce: 'pre'`, or any module registered after lukk-nuxt, since
+ * `addPlugin` prepends — waits on a plugin that cannot start until it returns. The app never boots.
+ * Not an error on its own: a call that is not awaited in setup (a `.then`, a store) is fine.
+ */
+export function isPrematureWait(ready: boolean, isServer: boolean, restoreStarted: boolean): boolean {
+  return !ready && !isServer && !restoreStarted
 }

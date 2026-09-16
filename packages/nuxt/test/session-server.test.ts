@@ -137,8 +137,15 @@ describe('session.server — readiness', () => {
     expect(ready().value).toBe(false)
   })
 
-  it('does NOT mark a prerendered page resolved', async () => {
+  it('does NOT mark a prerendered page resolved, even when a session would have hydrated', async () => {
+    // Set the mocks explicitly: `clearAllMocks` keeps implementations, so relying on what earlier tests
+    // left behind made this pass in file order and fail to catch a dropped prerender guard when run alone.
+    resolveHydrationAccess.mockResolvedValue(fresh())
+    fetchUser.mockImplementation(async () => { loggedIn.value = true })
+
     await run(app({ prerenderedAt: 1 }))
+
+    expect(fetchUser).not.toHaveBeenCalled()
     expect(ready().value).toBe(false)
   })
 })

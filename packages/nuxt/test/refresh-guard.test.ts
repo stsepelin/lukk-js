@@ -26,7 +26,7 @@ const bffConfig = { mode: 'bff', baseURL: '', confirmationHeader: 'X', apiBaseUR
 
 afterEach(() => { __test.reset(); captured.client = undefined; vi.clearAllMocks() })
 
-describe('$lukkRefresh guard (real client + session-restore plugins)', () => {
+describe('session restore with the real client + session-restore plugins', () => {
   it('degrades to logged-out (never throws) when the client plugin provide is missing', async () => {
     __test.runtimeConfig.public.lukk = { ...bffConfig }
     // `$lukkRefresh` is absent — simulate the client plugin's provide not being in effect on hydration.
