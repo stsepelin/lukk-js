@@ -4,6 +4,7 @@ import { defineEventHandler, getCookie, getRequestHeader, readRawBody, setRespon
 import { useRuntimeConfig } from '#imports'
 import { LUKK_BFF_PREFIX, confirmationHeaderName, sessionCookieName } from '../shared'
 import { isForeignOrigin, rejectUnresolvedTarget, resolveTarget, viaHeader, visitorIp } from './proxy-utils'
+import { isSessionEnded, markSessionEnded, newSessionId, sessionKey } from './ended-sessions'
 import { readSealedSession } from './sealed-session'
 import { warnIfSessionTooLarge } from './session-size'
 import { refreshOnce, type TokenSession } from './utils/refresh'
@@ -108,7 +109,17 @@ export default defineEventHandler(async (event) => {
     }
 
     const s = await session()
+    // Replaced by a sign-in, or ended by a logout, while this request was out. Neither rotate nor
+    // write: the browser already holds the newer cookie. 409 rather than 401 — the visitor may well be
+    // signed in, and the client reports it as "couldn't tell", whose retry carries the new cookie.
+    const replaced = () => {
+      setResponseStatus(event, 409)
+      return { message: 'The session was replaced.' }
+    }
+    if (isSessionEnded(sessionKey(s))) return replaced()
+
     const { pair, expiresIn, retryable } = await refreshOnce(s, baseURL, clientIp)
+    if (isSessionEnded(sessionKey(s))) return replaced()
 
     if (!pair) {
       if (!retryable) await s.clear()
@@ -129,17 +140,30 @@ export default defineEventHandler(async (event) => {
 
   if (res.status === 401 && sealed.refresh && !SIGN_IN_PATHS.has(subpath)) {
     const s = await session()
-    const { pair, retryable } = await refreshOnce(s, baseURL, clientIp)
-    if (pair) {
-      await s.update(pair)
-      warnIfSessionTooLarge(s)
-      currentRefresh = pair.refresh
-      res = await callLukk(pair.access)
-    }
-    // Clear ONLY on a definitive rejection. A throttled or failed refresh leaves the token valid, and
-    // discarding the session there turns a transient 429 into an unrecoverable logout.
-    else if (!retryable) {
-      await s.clear()
+    // A session a sign-in replaced or a logout ended is neither rotated nor written — before the
+    // refresh or after it — and the 401 goes back as it came. See the `/refresh` branch above.
+    const ended = () => isSessionEnded(sessionKey(s))
+
+    if (!ended()) {
+      const { pair, retryable } = await refreshOnce(s, baseURL, clientIp)
+      if (pair && !ended()) {
+        currentRefresh = pair.refresh
+        // Seal AFTER the retried call, so a sign-in or logout during it is still seen — the response
+        // carries this cookie only once that call is done. In `finally`: the refresh token has been
+        // rotated either way, and a throw that skipped the write would strand the session on a consumed one.
+        try { res = await callLukk(pair.access) }
+        finally {
+          if (!ended()) {
+            await s.update(pair)
+            warnIfSessionTooLarge(s)
+          }
+        }
+      }
+      // Clear ONLY on a definitive rejection. A throttled or failed refresh leaves the token valid, and
+      // discarding the session there turns a transient 429 into an unrecoverable logout.
+      else if (!pair && !retryable && !ended()) {
+        await s.clear()
+      }
     }
   }
 
@@ -159,12 +183,14 @@ export default defineEventHandler(async (event) => {
   // `refreshOnce`'s merge-update deliberately preserves the step-up across it.
   if (res.ok && isTokenPair(data)) {
     const s = await session()
+    // The session this request arrived with is over: a refresh still out for it must not write it back.
+    if (sealed.access || sealed.refresh) markSessionEnded(sessionKey(s))
     // `confirmation: undefined` too: a fresh token pair means a new SESSION, and a step-up earned by
     // the previous one must not carry over. Before confirmations were bound to the earning session
     // that was a silent no-op for the same subject; now it is a hard 423 on every step-up-gated
     // route, and the browser cannot clear the proxy's copy — `useLukkConfirmation.clear()` only
     // touches client state — so it would stick until `confirm.ttl` expired it.
-    await s.update({ access: data.access_token, refresh: data.refresh_token ?? currentRefresh, confirmation: undefined })
+    await s.update({ access: data.access_token, refresh: data.refresh_token ?? currentRefresh, confirmation: undefined, sid: newSessionId() })
     warnIfSessionTooLarge(s)
     return { ok: true, expires_in: data.expires_in }
   }
@@ -172,13 +198,25 @@ export default defineEventHandler(async (event) => {
   // Capture + strip a step-up confirmation token — keep it server-side as well.
   if (res.ok && isConfirmation(data)) {
     const s = await session()
+    // h3 re-seals the WHOLE session on any update — a confirmation answering after a sign-in or logout
+    // would write the replaced session back. It also belongs to that session, so it is not recorded.
+    if (isSessionEnded(sessionKey(s))) {
+      setResponseStatus(event, 409)
+      return { message: 'The session was replaced.' }
+    }
     await s.update({ confirmation: data.confirmation_token })
     warnIfSessionTooLarge(s)
     return { ok: true }
   }
 
   // Only clear an existing cookie — never mint one just to expire it.
-  if (subpath === '/logout' && hasCookie) await (await session()).clear()
+  if (subpath === '/logout' && hasCookie) {
+    const s = await session()
+    // Only a session that unsealed: a forged or expired cookie still gets an h3 id, and recording those
+    // let anyone flood the record past its bound and evict the entries that matter.
+    if (sealed.access || sealed.refresh) markSessionEnded(sessionKey(s))
+    await s.clear()
+  }
 
   setResponseStatus(event, res.status)
 

@@ -1,7 +1,7 @@
 import { setResponseHeader } from 'h3'
 import { useLukkAuth } from '../composables/useLukkAuth'
-import { READY_KEY } from '../keys'
-import { resolveHydrationAccess } from '../server/hydrate'
+import { READY_KEY, USER_KEY } from '../keys'
+import { hydratedSessionEnded, resolveHydrationAccess, withholdIfReplaced } from '../server/hydrate'
 import { defineNuxtPlugin, useState } from '#imports'
 
 /**
@@ -41,12 +41,25 @@ export default defineNuxtPlugin({
     const access = await resolveHydrationAccess(event)
     if (!access) return
 
+    // A re-sealed cookie leaves with the page, after the whole render: check its session once more then.
+    // On `app:error` too — a render that throws skips `app:rendered`, and the error page still carries
+    // every cookie queued so far.
+    nuxtApp.hooks.hook('app:rendered', () => withholdIfReplaced(event))
+    nuxtApp.hooks.hook('app:error', () => withholdIfReplaced(event))
+
     // The rotate path may have queued a fresh session Set-Cookie here, so suppress shared caching
     // now — before fetchUser can fail and leave a rotated cookie or per-user render cacheable.
     setResponseHeader(event, 'cache-control', 'no-store')
 
     const auth = useLukkAuth()
     await auth.fetchUser()
+
+    // Ended by a sign-in or logout while the user loaded: render signed out and unresolved, so the client
+    // restores with the cookie the browser now holds instead of showing the account that just left.
+    if (hydratedSessionEnded(event)) {
+      useState(USER_KEY, () => null).value = null
+      return
+    }
 
     // A transient user-endpoint failure leaves `user` null — not resolved, so the client restores.
     if (auth.loggedIn.value) useState<boolean>(READY_KEY, () => false).value = true

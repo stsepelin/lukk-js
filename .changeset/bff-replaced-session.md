@@ -1,0 +1,14 @@
+---
+"lukk-nuxt": patch
+---
+
+**BFF: a refresh still in flight can no longer put a replaced or logged-out session back.** The browser keeps whichever `Set-Cookie` arrives last. A request that was already out when someone signed in or logged out — an app-API call renewing an expired token, a page render, another tab's restore — refreshed the OLD sealed session and re-sealed it on the way back. After a login that put the previous account back under the new one; after a logout it re-created the cookie logout had just cleared. The browser tab can hold back its own refreshes, but not these.
+
+Each sign-in now gives the sealed session a new id, and a sign-in or logout records the id it replaced for ten minutes. Every path that re-seals after a refresh — `/api/_lukk/refresh`, the auth proxy's 401 retry, the app-API proxy's proactive refresh, SSR hydration, and a step-up confirmation — checks it before rotating and again as late as it can: just before its response headers go out, withholding the session cookie if the session ended meanwhile. A page render for a replaced session renders signed out and unresolved rather than as that account, so the client restores with the cookie the browser now holds — including when the render throws. `/api/_lukk/refresh` answers `409` for a replaced session; a restoring tab waits a moment and asks once more (the browser most likely holds the newer cookie by then), treating a second `409` as signed out rather than "couldn't tell", and a tab that was already signed in reloads its user so it stops showing the previous account. A restore retry answered "no session" now also clears a user still on screen.
+
+Also fixed on the way:
+
+- **The server-side refresh single-flight is keyed by the session's own id**, not h3's. A sign-in re-seals the new session under the old h3 id, so a refresh for it could join one still out for the session it replaced — and seal that session's tokens under the new one.
+- **SSR hydration and the proxies now share one single-flight.** Nitro's handlers and the Nuxt app's server bundle each carry their own copy of the module, so a page render and a proxy refreshing the same session at once each rotated the token. Both registries now live on `globalThis`.
+
+Limits: what remains is the time between a response's headers leaving the server and the browser storing them. The record is per server process, like the single-flight — behind a load balancer without sticky sessions, a request another instance serves isn't covered. A session sealed before this version has no id of its own and is recorded by h3's; that covers every refresh and re-seal, but a page load that needs no refresh can still render such a session as the account it replaced until the tab reloads (no cookie is written). After a sign-in whose response never reached the browser, the session it replaced reads as signed out for those ten minutes.

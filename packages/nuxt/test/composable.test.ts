@@ -449,6 +449,31 @@ describe('useLukkAuth — restoreFailed tracks the LATEST definitive answer', ()
     expect(restoreFailed.value).toBe(false)
   })
 
+  it('signs a still-displayed user out when a retry is answered "no session"', async () => {
+    // Another tab logged out: this tab's retry learns the session is gone, and must stop showing it.
+    withApp({}, () => Promise.resolve({ pair: null, unavailable: false }))
+    const { initSession, user, loggedIn } = useLukkAuth()
+    user.value = { id: 1 }
+
+    await initSession()
+
+    expect(loggedIn.value).toBe(false)
+  })
+
+  it('keeps the user on screen when the retry merely could not tell, or was superseded', async () => {
+    for (const outcome of [{ pair: null, unavailable: true }, { pair: null, unavailable: false, superseded: true }]) {
+      withApp({}, () => Promise.resolve(outcome))
+      const { initSession, user, loggedIn, restoreFailed } = useLukkAuth()
+      user.value = { id: 1 }
+
+      await initSession()
+
+      expect(loggedIn.value).toBe(true)
+      expect(restoreFailed.value).toBe(false)
+      __test.reset()
+    }
+  })
+
   it('clears it when a retry is answered "no session"', async () => {
     const restore = vi.fn()
       .mockResolvedValueOnce({ pair: null, unavailable: true })

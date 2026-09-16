@@ -11,6 +11,18 @@ import { restoreState, settle } from '../utils/restore-state'
  */
 class SupersededRefresh extends Error {}
 
+/** What a restore learned. `superseded`: a newer sign-in or logout decided the session instead. */
+export interface RestoreOutcome { pair: TokenPair | null, unavailable: boolean, superseded?: boolean }
+
+/** How long a restore waits for another tab's sign-in cookie to land before retrying a 409. */
+export const REPLACED_SESSION_RETRY_DELAY_MS = 400
+
+/** The BFF's answer for a refresh of a session that was replaced while the request was out. */
+function isReplacedSession(error: unknown): boolean {
+  const e = error as { status?: number, statusCode?: number } | null
+  return (e?.statusCode ?? e?.status) === 409
+}
+
 /**
  * Provides `$lukk` — the core client, wired for the configured transport.
  *  - direct: hits lukk directly (refresh via the `__Host-refresh` cookie).
@@ -102,7 +114,13 @@ export default defineNuxtPlugin({
         if (import.meta.client) void resyncAbilities().catch(() => {})
         return pair
       })
-      .catch(() => null)
+      .catch((error: unknown) => {
+        // The BFF refused to renew a session another tab has since replaced or ended. This tab is
+        // still showing that session; reload the user so it shows what the browser now holds instead
+        // of the previous account.
+        if (import.meta.client && isReplacedSession(error)) void useLukkAuth().fetchUser().catch(() => {})
+        return null
+      })
 
     const client: LukkClient = createLukkClient({
       baseURL,
@@ -125,11 +143,27 @@ export default defineNuxtPlugin({
     // reduces every failure to null, which is right for a request retry and wrong for the restore: a
     // 401 means "no session", while a 429, a 5xx or an unreachable server means "couldn't tell", and
     // reporting the second as signed-out prompts a signed-in user to log in again.
-    const restore = (): Promise<{ pair: TokenPair | null, unavailable: boolean }> => refresh().then(
+    //
+    // A 409 is the BFF saying this request carried a session that a sign-in or logout has since replaced
+    // — in another tab, since this tab's own handover holds its refreshes back. The server records the
+    // replacement just before that sign-in's response leaves, so give the new cookie a moment to arrive,
+    // then ask once more. A second 409 is an answer: this browser still holds the replaced session (the
+    // sign-in's response was lost), so it is signed out — reporting "couldn't tell" there offered a retry
+    // that could not succeed for the whole ten minutes the server remembers it.
+    const attempt = (retried: boolean): Promise<RestoreOutcome> => refresh().then(
       pair => ({ pair, unavailable: false }),
-      // Superseded is an answer, not a failure: a newer `logout()` or sign-in decided the session.
-      (error: unknown) => ({ pair: null, unavailable: !(error instanceof SupersededRefresh) && !isAuthRejection(error) }),
+      async (error: unknown) => {
+        if (isReplacedSession(error)) {
+          if (retried) return { pair: null, unavailable: false }
+          await new Promise(resolve => setTimeout(resolve, REPLACED_SESSION_RETRY_DELAY_MS))
+          return attempt(true)
+        }
+        // Superseded is neither a failure nor "no session": a newer `logout()` or sign-in decided it.
+        if (error instanceof SupersededRefresh) return { pair: null, unavailable: false, superseded: true }
+        return { pair: null, unavailable: !isAuthRejection(error) }
+      },
     )
+    const restore = () => attempt(false)
 
     return { provide: { lukk: client, lukkRefresh: safeRefresh, lukkRestore: restore } }
   },

@@ -170,6 +170,28 @@ describe('a sign-in during an in-flight restore', () => {
     expect(auth.restoreFailed.value).toBe(false)
   })
 
+  it('does not sign out the new session when a later restore joins the refresh it superseded', async () => {
+    // "No session" clears the user on screen; "superseded" must not — it says nothing about the new one.
+    vi.useFakeTimers()
+    const flight = deferred<{ access_token: string }>()
+    wire.client.refreshTokens!.mockReturnValueOnce(flight.promise)
+    userEndpoint()
+    boot()
+    const auth = useLukkAuth()
+
+    void auth.initSession()
+    const signingIn = auth.login({ email: 'b', password: 'p' })
+    await vi.advanceTimersByTimeAsync(REFRESH_SETTLE_TIMEOUT)
+    await signingIn
+    expect(auth.user.value).toEqual({ id: 'B' })
+
+    const retry = auth.initSession() // joins the flight that started before the login
+    flight.resolve(pairFor('A'))
+    await retry
+
+    expect(auth.user.value).toEqual({ id: 'B' })
+  })
+
   it('does not report the superseded restore as a failure', async () => {
     // A retry that was throttled and answered after a login left the raw flag set under the new user,
     // hidden only while they stayed signed in.

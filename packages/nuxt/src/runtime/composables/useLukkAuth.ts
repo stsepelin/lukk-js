@@ -1,10 +1,11 @@
-import { isRegistrationPending, isTwoFactorChallenge, type LoginInput, type LoginResult, type LukkUser, type RegisterInput, type RegisterResult, shapeUser, type TokenPair, userShapeWarning } from 'lukk-core'
+import { isRegistrationPending, isTwoFactorChallenge, type LoginInput, type LoginResult, type LukkUser, type RegisterInput, type RegisterResult, shapeUser, userShapeWarning } from 'lukk-core'
 import type { ComputedRef, Ref } from 'vue'
 import { computed, useNuxtApp, useRuntimeConfig, useState } from '#imports'
 import { ACCESS_KEY, CHALLENGE_KEY, CONFIRMATION_KEY, CONFIRMED_KEY, READY_KEY, RESTORE_FAILED_KEY, USER_KEY } from '../keys'
 import { isAuthRejection } from '../shared'
 import { restoreState, settleRefresh, signIn } from '../utils/restore-state'
 import { isPrematureWait, whenReady as settled } from '../utils/when-ready'
+import type { RestoreOutcome } from '../plugins/client'
 import { useLukkFetch } from './useLukkFetch'
 
 interface PublicLukk {
@@ -284,13 +285,16 @@ export function useLukkAuth(): LukkAuth {
     // provided it would otherwise keep `undefined` forever and silently never restore. No provide at
     // all (an ordering gap, a failed plugin) degrades to signed-out, not to "unavailable", which would
     // invite a retry loop that can never succeed.
-    const restore = (nuxtApp as { $lukkRestore?: () => Promise<{ pair: TokenPair | null, unavailable: boolean }> }).$lukkRestore
+    const restore = (nuxtApp as { $lukkRestore?: () => Promise<RestoreOutcome> }).$lukkRestore
     const outcome = await restore?.()
 
-    // `logout()` ran while this was in flight: its answer is newer than ours.
-    if (!isCurrent()) return
+    // A `logout()` or sign-in ran while this was in flight: its answer is newer than ours.
+    if (!isCurrent() || outcome?.superseded) return
 
     if (!outcome?.pair) {
+      // "No session" is an answer about the visitor, so clear a user still on screen — a retry from a tab
+      // whose session another tab logged out kept showing that account. Not when it merely couldn't tell.
+      if (outcome && !outcome.unavailable) user.value = null
       restoreFailedFlag.value = outcome?.unavailable ?? false
       return
     }

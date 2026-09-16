@@ -1,16 +1,23 @@
+import { sessionKey } from '../ended-sessions'
 import { reportUnusableBase, resolveTarget } from '../proxy-utils'
 
 export interface TokenSession {
   access?: string
   refresh?: string
   confirmation?: string
+  /** Identifies this sealed session across refreshes; minted by each sign-in. See `ended-sessions.ts`. */
+  sid?: string
 }
 
 // Per-session single-flight, shared by BOTH proxies (the lukk-auth `bff.ts` and the
 // app-API proxy) so a concurrent auth-401 refresh and an app-API proactive refresh
 // for the same session collapse to ONE `/refresh` — the rotating token is never
 // replayed (which reuse detection would punish with a family revoke).
-const inflightRefresh = new Map<string, Promise<RefreshResult>>()
+//
+// On `globalThis`, not module scope: the Nuxt app's server bundle (SSR hydration) gets its own copy of
+// this module, separate from Nitro's handlers, so a module-level Map never collapsed a page render's
+// refresh with a proxy's for the same session.
+const inflightRefresh: Map<string, Promise<RefreshResult>> = ((globalThis as { __lukkInflightRefresh?: Map<string, Promise<RefreshResult>> }).__lukkInflightRefresh ??= new Map())
 
 /**
  * The outcome of a rotation attempt.
@@ -24,7 +31,10 @@ export type RefreshResult = { pair: TokenSession | null, expiresIn?: number, ret
 
 /** Single-flight the server-side refresh per session, returning the rotation outcome. */
 export function refreshOnce(session: { id?: string, data: TokenSession }, baseURL: string, clientIp = ''): Promise<RefreshResult> {
-  const id = session.id
+  // Keyed by the session's own `sid`, not h3's id: a sign-in re-seals the NEW session under the old h3
+  // id, so a refresh for it would otherwise join one still out for the session it replaced, and seal
+  // that session's tokens under the new one.
+  const id = sessionKey(session)
   // No id → don't key the map (an empty key would collapse distinct sessions).
   if (!id) return rawRefresh(session.data.refresh!, baseURL, clientIp)
   const existing = inflightRefresh.get(id)

@@ -26,8 +26,10 @@ vi.mock('h3', () => ({
 
 // eslint-disable-next-line import/first
 import handler from '../src/runtime/server/bff'
+// eslint-disable-next-line import/first
+import { forgetEndedSessions } from '../src/runtime/server/ended-sessions'
 
-interface TokenSession { access?: string, refresh?: string, confirmation?: string }
+interface TokenSession { access?: string, refresh?: string, confirmation?: string, sid?: string }
 
 function makeSession(initial: TokenSession = {}, id = 'sid') {
   const s = {
@@ -57,6 +59,7 @@ beforeEach(() => {
   ;(__test.runtimeConfig as Record<string, unknown>).public = { lukk: {} }
   h3state.useSessionCalls = 0
   h3state.lastSessionName = undefined
+  forgetEndedSessions()
 })
 afterEach(() => { __test.reset(); vi.restoreAllMocks() })
 
@@ -67,7 +70,7 @@ describe('BFF proxy', () => {
 
     const result = await run(makeEvent({ path: '/api/_lukk/login', method: 'POST', body: '{"email":"e"}', headers: { ...sameOrigin, 'content-type': 'application/json' }, session }))
 
-    expect(session.update).toHaveBeenCalledWith({ access: 'a', refresh: 'r' })
+    expect(session.update).toHaveBeenCalledWith({ access: 'a', refresh: 'r', confirmation: undefined, sid: expect.any(String) })
     expect(result).toEqual({ ok: true, expires_in: 900 })
     const init = mockFetch().fetch.mock.calls[0]![1]!
     expect(init.headers['Content-Type']).toBe('application/json')
@@ -126,7 +129,7 @@ describe('BFF proxy', () => {
     const session = makeSession({ refresh: 'existing' })
     mockFetch().fetch = vi.fn().mockResolvedValue(jsonRes({ access_token: 'a', expires_in: 900 }))
     await run(makeEvent({ path: '/api/_lukk/login', method: 'POST', headers: sameOrigin, session }))
-    expect(session.update).toHaveBeenCalledWith({ access: 'a', refresh: 'existing' })
+    expect(session.update).toHaveBeenCalledWith({ access: 'a', refresh: 'existing', confirmation: undefined, sid: expect.any(String) })
   })
 
   it('writes the sealed session under the per-app namespaced cookie name', async () => {
@@ -396,6 +399,207 @@ describe('BFF proxy', () => {
     const event = makeEvent({ path: '/api/_lukk/x', method: 'POST', headers: { ...sameOrigin }, session })
     expect(await run(event)).toEqual({ message: 'Upstream redirect rejected.' })
     expect(event.status).toBe(502)
+  })
+})
+
+describe('a session replaced or ended while a refresh for it was out', () => {
+  // The browser keeps the LAST Set-Cookie. A refresh already out for the old session, answering after
+  // a login or logout, put that session back — the previous account under the new one, or a cleared
+  // cookie re-created.
+  function deferredFetch() {
+    let answer!: (r: Response) => void
+    const pending = new Promise<Response>((resolve) => { answer = resolve })
+    return { pending, answer }
+  }
+  const post = (path: string, session: ReturnType<typeof makeSession>) =>
+    makeEvent({ path: `/api/_lukk${path}`, method: 'POST', body: '{}', headers: sameOrigin, session })
+
+  it.each([
+    ['a login', '/login', () => jsonRes({ access_token: 'B', refresh_token: 'rB', expires_in: 900 })],
+    ['a logout', '/logout', () => jsonRes(null, 204)],
+  ])('does not write back a /refresh that answers after %s', async (_, path, answer) => {
+    const refreshing = makeSession({ access: 'A', refresh: 'rA', sid: 'session-A' } as TokenSession)
+    const signingIn = makeSession({ access: 'A', refresh: 'rA', sid: 'session-A' } as TokenSession)
+    const upstream = deferredFetch()
+    mockFetch().fetch = vi.fn(async (url: string) => (String(url).endsWith('/refresh') ? upstream.pending : answer()))
+
+    const refreshEvent = post('/refresh', refreshing)
+    const pendingRefresh = run(refreshEvent)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    await run(post(path, signingIn))
+    upstream.answer(jsonRes({ access_token: 'A2', refresh_token: 'rA2', expires_in: 900 }))
+
+    expect(await pendingRefresh).toEqual({ message: 'The session was replaced.' })
+    expect(refreshEvent.status).toBe(409)
+    expect(refreshing.update).not.toHaveBeenCalled()
+    expect(refreshing.clear).not.toHaveBeenCalled()
+  })
+
+  it('does not clear the newer session over a definitive reject that answers late', async () => {
+    const refreshing = makeSession({ access: 'A', refresh: 'rA', sid: 'session-A' } as TokenSession)
+    const upstream = deferredFetch()
+    mockFetch().fetch = vi.fn(async (url: string) => (String(url).endsWith('/refresh') ? upstream.pending : jsonRes({ access_token: 'B', expires_in: 900 })))
+
+    const pendingRefresh = run(post('/refresh', refreshing))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    await run(post('/login', makeSession({ access: 'A', refresh: 'rA', sid: 'session-A' } as TokenSession)))
+    upstream.answer(jsonRes({ message: 'revoked' }, 401))
+    await pendingRefresh
+
+    expect(refreshing.clear).not.toHaveBeenCalled()
+  })
+
+  it('does not even rotate a session that already ended', async () => {
+    mockFetch().fetch = vi.fn(async () => jsonRes(null, 204))
+    await run(post('/logout', makeSession({ access: 'A', refresh: 'rA', sid: 'session-A' } as TokenSession)))
+    mockFetch().fetch = vi.fn()
+
+    const late = makeSession({ access: 'A', refresh: 'rA', sid: 'session-A' } as TokenSession)
+    const event = post('/refresh', late)
+    await run(event)
+
+    expect(event.status).toBe(409)
+    expect(mockFetch().fetch).not.toHaveBeenCalled()
+  })
+
+  it('passes a proxied 401 straight back for an ended session, without rotating or writing', async () => {
+    mockFetch().fetch = vi.fn(async () => jsonRes(null, 204))
+    await run(post('/logout', makeSession({ access: 'A', refresh: 'rA', sid: 'session-A' } as TokenSession)))
+    mockFetch().fetch = vi.fn(async () => jsonRes({ message: 'Unauthenticated.' }, 401))
+
+    const late = makeSession({ access: 'A', refresh: 'rA', sid: 'session-A' } as TokenSession)
+    const event = makeEvent({ path: '/api/_lukk/passkeys', session: late })
+    await run(event)
+
+    expect(event.status).toBe(401)
+    expect(mockFetch().fetch).toHaveBeenCalledOnce()
+    expect(late.update).not.toHaveBeenCalled()
+    expect(late.clear).not.toHaveBeenCalled()
+  })
+
+  it('does not write back a proxied request\'s refresh that answers after a logout', async () => {
+    const refreshing = makeSession({ access: 'A', refresh: 'rA', sid: 'session-A' } as TokenSession)
+    const upstream = deferredFetch()
+    mockFetch().fetch = vi.fn(async (url: string) => {
+      if (String(url).endsWith('/refresh')) return upstream.pending
+      if (String(url).endsWith('/logout')) return jsonRes(null, 204)
+      return jsonRes({ message: 'Unauthenticated.' }, 401)
+    })
+
+    const event = makeEvent({ path: '/api/_lukk/passkeys', session: refreshing })
+    const pending = run(event)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    await run(post('/logout', makeSession({ access: 'A', refresh: 'rA', sid: 'session-A' } as TokenSession)))
+    upstream.answer(jsonRes({ access_token: 'A2', refresh_token: 'rA2', expires_in: 900 }))
+    await pending
+
+    expect(event.status).toBe(401)
+    expect(refreshing.update).not.toHaveBeenCalled()
+    // Nor retried with the replaced session's fresh token: the original call, the refresh, the logout.
+    expect(mockFetch().fetch).toHaveBeenCalledTimes(3)
+  })
+
+  it('does not clear the newer session when a proxied request\'s refresh is rejected after a login', async () => {
+    const refreshing = makeSession({ access: 'A', refresh: 'rA', sid: 'session-A' } as TokenSession)
+    const upstream = deferredFetch()
+    mockFetch().fetch = vi.fn(async (url: string) => {
+      if (String(url).endsWith('/refresh')) return upstream.pending
+      if (String(url).endsWith('/login')) return jsonRes({ access_token: 'B', expires_in: 900 })
+      return jsonRes({ message: 'Unauthenticated.' }, 401)
+    })
+
+    const pending = run(makeEvent({ path: '/api/_lukk/passkeys', session: refreshing }))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    await run(post('/login', makeSession({ access: 'A', refresh: 'rA', sid: 'session-A' } as TokenSession)))
+    upstream.answer(jsonRes({ message: 'revoked' }, 401))
+    await pending
+
+    expect(refreshing.clear).not.toHaveBeenCalled()
+  })
+
+  it('does not write back a refresh whose RETRIED call was still out when a logout landed', async () => {
+    // The re-seal used to happen before the retried call, so its cookie left with a response that
+    // could take as long as that call — long after the session had ended.
+    const refreshing = makeSession({ access: 'A', refresh: 'rA', sid: 'session-A' } as TokenSession)
+    const retried = deferredFetch()
+    let calls = 0
+    mockFetch().fetch = vi.fn(async (url: string) => {
+      if (String(url).endsWith('/refresh')) return jsonRes({ access_token: 'A2', refresh_token: 'rA2', expires_in: 900 })
+      if (String(url).endsWith('/logout')) return jsonRes(null, 204)
+      return ++calls === 1 ? jsonRes({ message: 'Unauthenticated.' }, 401) : retried.pending
+    })
+
+    const pending = run(makeEvent({ path: '/api/_lukk/passkeys', session: refreshing }))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    await run(post('/logout', makeSession({ access: 'A', refresh: 'rA', sid: 'session-A' } as TokenSession)))
+    retried.answer(jsonRes({ passkeys: [] }))
+    await pending
+
+    expect(refreshing.update).not.toHaveBeenCalled()
+  })
+
+  it('still seals the rotated session when the retried call throws, so it is not stranded on a spent token', async () => {
+    const session = makeSession({ access: 'A', refresh: 'rA', sid: 'session-A' } as TokenSession)
+    let calls = 0
+    mockFetch().fetch = vi.fn(async (url: string) => {
+      if (String(url).endsWith('/refresh')) return jsonRes({ access_token: 'A2', refresh_token: 'rA2', expires_in: 900 })
+      if (++calls === 1) return jsonRes({ message: 'Unauthenticated.' }, 401)
+      throw new TypeError('fetch failed')
+    })
+
+    await expect(run(makeEvent({ path: '/api/_lukk/passkeys', session }))).rejects.toThrow('fetch failed')
+
+    expect(session.update).toHaveBeenCalledWith({ access: 'A2', refresh: 'rA2' })
+  })
+
+  it('does not write back a step-up confirmation that answers after a sign-in — h3 re-seals the whole session', async () => {
+    const confirming = makeSession({ access: 'A', refresh: 'rA', sid: 'session-A' } as TokenSession)
+    const upstream = deferredFetch()
+    mockFetch().fetch = vi.fn(async (url: string) => (String(url).endsWith('/confirm-password') ? upstream.pending : jsonRes({ access_token: 'B', expires_in: 900 })))
+
+    const event = post('/confirm-password', confirming)
+    const pending = run(event)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    await run(post('/login', makeSession({ access: 'A', refresh: 'rA', sid: 'session-A' } as TokenSession)))
+    upstream.answer(jsonRes({ confirmation_token: 'ct' }))
+
+    expect(await pending).toEqual({ message: 'The session was replaced.' })
+    expect(event.status).toBe(409)
+    expect(confirming.update).not.toHaveBeenCalled()
+  })
+
+  it('does not record a logout that arrived with a cookie that would not unseal', async () => {
+    // Anyone can send a garbage cookie; recording each one let a flood evict the entries that matter.
+    mockFetch().fetch = vi.fn(async () => jsonRes(null, 204))
+    const forged = makeSession({}, 'h3-forged')
+
+    await run(makeEvent({ path: '/api/_lukk/logout', method: 'POST', headers: sameOrigin, session: forged, sealTampered: true }))
+
+    const later = makeSession({ access: 'X', refresh: 'rX' }, 'h3-forged')
+    mockFetch().fetch = vi.fn(async () => jsonRes({ access_token: 'X2', expires_in: 900 }))
+    const event = post('/refresh', later)
+    await run(event)
+    expect(event.status).toBe(200)
+  })
+
+  it('gives every sign-in a new session id, and leaves a session that was never signed in unmarked', async () => {
+    mockFetch().fetch = vi.fn(async () => jsonRes({ access_token: 'B', expires_in: 900 }))
+    const anonymous = makeSession({}, 'h3-anon')
+
+    await run(makeEvent({ path: '/api/_lukk/login', method: 'POST', body: '{}', headers: sameOrigin, session: anonymous, cookiePresent: false }))
+    const first = (anonymous.data as { sid?: string }).sid
+
+    // A later refresh for the anonymous h3 id is not blocked — nothing it could overwrite.
+    const other = makeSession({ access: 'X', refresh: 'rX' }, 'h3-anon')
+    mockFetch().fetch = vi.fn(async () => jsonRes({ access_token: 'X2', expires_in: 900 }))
+    const event = post('/refresh', other)
+    await run(event)
+    expect(event.status).toBe(200)
+
+    mockFetch().fetch = vi.fn(async () => jsonRes({ access_token: 'C', expires_in: 900 }))
+    await run(post('/login', anonymous))
+    expect(first).toEqual(expect.any(String))
+    expect((anonymous.data as { sid?: string }).sid).not.toBe(first)
   })
 })
 

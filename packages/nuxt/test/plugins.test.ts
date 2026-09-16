@@ -23,7 +23,7 @@ const user: { value: { abilities?: string[] } | null } = { value: null }
 vi.mock('../src/runtime/composables/useLukkAuth', () => ({ useLukkAuth: () => ({ initSession, loggedIn, fetchUser, user }) }))
 
 // eslint-disable-next-line import/first
-import clientPlugin from '../src/runtime/plugins/client'
+import clientPlugin, { REPLACED_SESSION_RETRY_DELAY_MS } from '../src/runtime/plugins/client'
 // eslint-disable-next-line import/first
 import sessionPlugin from '../src/runtime/plugins/session.client'
 
@@ -62,6 +62,22 @@ describe('client plugin', () => {
     expect(captured.client!.refreshTokens).toHaveBeenCalledTimes(1)
     // the shared refresh also updated the in-memory access token
     expect(await captured.hooks!.getAccessToken()).toBe('fresh')
+  })
+
+  it('reloads the user when the BFF refuses to renew a session another tab replaced', async () => {
+    // This tab still shows that session. Reloading the user makes it show what the browser now holds.
+    __test.runtimeConfig.public.lukk = { mode: 'bff', baseURL: '', confirmationHeader: 'X' }
+    const { provide } = (clientPlugin as unknown as () => { provide: { lukkRefresh: () => Promise<unknown> } })()
+    captured.client!.refreshTokens.mockRejectedValueOnce({ status: 409 })
+    fetchUser.mockResolvedValue(undefined)
+
+    expect(await provide.lukkRefresh()).toBeNull()
+    expect(fetchUser).toHaveBeenCalledOnce()
+
+    captured.client!.refreshTokens.mockRejectedValueOnce({ status: 401 })
+    fetchUser.mockClear()
+    expect(await provide.lukkRefresh()).toBeNull()
+    expect(fetchUser).not.toHaveBeenCalled()
   })
 
   it('$lukkRefresh resolves null when the refresh fails', async () => {
@@ -103,6 +119,41 @@ describe('client plugin — $lukkRestore', () => {
     const { lukkRestore } = setup()
     captured.client!.refreshTokens.mockRejectedValueOnce(error)
     await expect(lukkRestore()).resolves.toEqual({ pair: null, unavailable: true })
+  })
+
+  it('asks once more when the BFF says the session was replaced, since the browser likely holds the newer one', async () => {
+    // Another tab signed in while this tab's restore was out: the proxy refuses to re-seal the old
+    // session (409). The retry carries the cookie that sign-in set.
+    vi.useFakeTimers()
+    const { lukkRestore } = setup()
+    captured.client!.refreshTokens.mockRejectedValueOnce({ status: 409, message: 'The session was replaced.' })
+
+    const restoring = lukkRestore()
+    // Not straight away: the server records the replacement before that sign-in's cookie reaches us.
+    await vi.advanceTimersByTimeAsync(REPLACED_SESSION_RETRY_DELAY_MS - 1)
+    expect(captured.client!.refreshTokens).toHaveBeenCalledOnce()
+    await vi.advanceTimersByTimeAsync(1)
+
+    await expect(restoring).resolves.toEqual({ pair: { access_token: 'fresh', expires_in: 900 }, unavailable: false })
+    expect(captured.client!.refreshTokens).toHaveBeenCalledTimes(2)
+    vi.useRealTimers()
+  })
+
+  it('reports a second replaced answer as signed out — a retry could never succeed — and stops there', async () => {
+    // This browser still holds the replaced session (the sign-in's response was lost). "Couldn't tell"
+    // would offer a retry that fails for as long as the server remembers the replacement.
+    vi.useFakeTimers()
+    const { lukkRestore } = setup()
+    captured.client!.refreshTokens
+      .mockRejectedValueOnce({ statusCode: 409 })
+      .mockRejectedValueOnce({ status: 409 })
+
+    const restoring = lukkRestore()
+    await vi.advanceTimersByTimeAsync(REPLACED_SESSION_RETRY_DELAY_MS)
+
+    await expect(restoring).resolves.toEqual({ pair: null, unavailable: false })
+    expect(captured.client!.refreshTokens).toHaveBeenCalledTimes(2)
+    vi.useRealTimers()
   })
 
   it('shares ONE refresh with $lukkRefresh, so a restore cannot replay the rotating token', async () => {
