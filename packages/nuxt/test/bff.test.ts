@@ -159,6 +159,21 @@ describe('BFF proxy', () => {
     expect(session.update).toHaveBeenCalledWith({ access: 'new', refresh: 'rt2' })
   })
 
+  it.each(['/login', '/register', '/two-factor-challenge', '/passkeys/login'])('passes a 401 from %s straight through — no refresh, no retry', async (path) => {
+    // A sign-in's 401 is its answer (a passkey whose user is gone), not an expired token. Refreshing
+    // rotated the session being replaced and replayed a spent ceremony.
+    const session = makeSession({ access: 'old', refresh: 'rt' })
+    mockFetch().fetch = vi.fn().mockResolvedValue(jsonRes({ message: 'Unauthenticated.' }, 401))
+    const event = makeEvent({ path: `/api/_lukk${path}`, method: 'POST', body: '{}', headers: sameOrigin, session })
+
+    await run(event)
+
+    expect(event.status).toBe(401)
+    expect(mockFetch().fetch).toHaveBeenCalledOnce()
+    expect(session.update).not.toHaveBeenCalled()
+    expect(session.clear).not.toHaveBeenCalled()
+  })
+
   it('keeps the refresh token when the refresh response omits it', async () => {
     const session = makeSession({ access: 'old', refresh: 'rt' })
     mockFetch().fetch = vi.fn(async (url: string, init?: { headers?: Record<string, string> }) =>

@@ -11,6 +11,14 @@ import { refreshOnce, type TokenSession } from './utils/refresh'
 type SessionCookieOptions = { sameSite: 'strict', secure: boolean, httpOnly: true, path: '/' }
 
 /**
+ * Sign-in routes never refresh and retry. They don't authenticate with the session they would replace,
+ * so a 401 from one is the answer — lukk gives it for a passkey whose user no longer exists — not an
+ * expired token. Retrying rotated the session being replaced and replayed an already-spent ceremony.
+ * The same rule lukk-core applies in the browser.
+ */
+const SIGN_IN_PATHS = new Set(['/login', '/register', '/two-factor-challenge', '/passkeys/login'])
+
+/**
  * The BFF proxy. The browser calls `/api/_lukk/*`; this handler attaches the
  * access token (and step-up confirmation token) from a sealed, server-side
  * session, proxies to the real lukk URL, refreshes server-side on a 401, and
@@ -119,7 +127,7 @@ export default defineEventHandler(async (event) => {
   let currentRefresh = sealed.refresh
   let res = await callLukk(sealed.access)
 
-  if (res.status === 401 && sealed.refresh) {
+  if (res.status === 401 && sealed.refresh && !SIGN_IN_PATHS.has(subpath)) {
     const s = await session()
     const { pair, retryable } = await refreshOnce(s, baseURL, clientIp)
     if (pair) {
