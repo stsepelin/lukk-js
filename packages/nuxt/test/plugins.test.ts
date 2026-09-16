@@ -84,9 +84,14 @@ describe('client plugin — $lukkRestore', () => {
     await expect(lukkRestore()).resolves.toEqual({ pair: { access_token: 'fresh', expires_in: 900 }, unavailable: false })
   })
 
-  it('reports a 401 as "no session", not as unavailable', async () => {
+  it.each([
+    ['a 401', { status: 401, message: 'Unauthenticated.' }],
+    ['a 403', { status: 403, message: 'Forbidden.' }],
+    // ofetch's shape — what a custom `$fetch`-based transport rejects with.
+    ['an ofetch 403', { statusCode: 403, statusMessage: 'Forbidden' }],
+  ])('reports %s as "no session", not as unavailable', async (_, error) => {
     const { lukkRestore } = setup()
-    captured.client!.refreshTokens.mockRejectedValueOnce({ status: 401, message: 'Unauthenticated.' })
+    captured.client!.refreshTokens.mockRejectedValueOnce(error)
     await expect(lukkRestore()).resolves.toEqual({ pair: null, unavailable: false })
   })
 
@@ -106,6 +111,15 @@ describe('client plugin — $lukkRestore', () => {
     const { lukkRefresh, lukkRestore } = setup()
     await Promise.all([lukkRestore(), lukkRefresh()])
     expect(captured.client!.refreshTokens).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('plugin names consumers depend on', () => {
+  it('keeps the names the docs tell apps to `dependsOn`, and the order between them', () => {
+    // An unknown `dependsOn` name is ignored by Nuxt, so renaming either plugin would silently put an
+    // app's `whenReady()` plugin back in front of the restore — and deadlock its startup.
+    expect((clientPlugin as unknown as { meta: unknown }).meta).toEqual({ name: 'lukk:client' })
+    expect((sessionPlugin as unknown as { meta: unknown }).meta).toEqual({ name: 'lukk:session-restore', dependsOn: ['lukk:client'] })
   })
 })
 

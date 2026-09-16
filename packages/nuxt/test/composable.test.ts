@@ -426,6 +426,29 @@ describe('useLukkAuth — restoreFailed tracks the LATEST definitive answer', ()
     expect(restoreFailed.value).toBe(false)
   })
 
+  it('leaves no failure behind a successful restore, even one hidden by the signed-in user', async () => {
+    // `restoreFailed` hides the flag while someone is signed in, so a successful load that SET it went
+    // unnoticed — until the user was nulled by anything other than logout().
+    withApp({}, () => Promise.resolve({ pair: { access_token: 'a' }, unavailable: false }))
+    const { initSession } = useLukkAuth()
+
+    await initSession()
+
+    expect(useState<boolean>(RESTORE_FAILED_KEY, () => false).value).toBe(false)
+  })
+
+  it('clears it when a plain fetchUser() is answered 401', async () => {
+    withApp({}, () => Promise.resolve({ pair: null, unavailable: true }))
+    const { initSession, fetchUser, restoreFailed } = useLukkAuth()
+    await initSession()
+    expect(restoreFailed.value).toBe(true)
+
+    api.mockRejectedValueOnce({ statusCode: 401 })
+    await fetchUser()
+
+    expect(restoreFailed.value).toBe(false)
+  })
+
   it('clears it when a retry is answered "no session"', async () => {
     const restore = vi.fn()
       .mockResolvedValueOnce({ pair: null, unavailable: true })
@@ -503,8 +526,9 @@ describe('useLukkAuth — a logout during an in-flight restore wins', () => {
   })
 
   it.each([
+    // No 401 row: it writes the `null` logout already wrote, so it could not fail. The case that CAN —
+    // a stale 401 landing on a newer session — is pinned in session-generation.test.ts.
     ['a user', () => Promise.resolve({ id: 1, name: 'Ada' })],
-    ['a 401', () => Promise.reject({ statusCode: 401 })],
     ['a 503', () => Promise.reject({ statusCode: 503 })],
   ])('discards %s from the user endpoint when logout() lands during that load', async (_, answer) => {
     const load = deferred<void>()

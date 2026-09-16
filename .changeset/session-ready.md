@@ -14,17 +14,31 @@ const { ready, loggedIn, restoreFailed, whenReady } = useLukkAuth()
 
 **Where the gap actually is.** Nuxt awaits the `lukk:session-restore` plugin before the initial navigation and before mounting, so on the client, route middleware, `setup()` and `onMounted` already see the restore finished. The gap is the **server render** whenever it did not hydrate a user — an anonymous visitor, direct mode, `ssrHydrate: false`, prerendered routes, a session the server couldn't refresh, or a user endpoint that failed on the server. There `loggedIn` is `false` because the server cannot tell, and a `useAsyncData` that skipped on it baked an empty result into the payload that hydration never re-ran. `ready` is `false` in all of those renders, so code can defer to the client (for data: `useAsyncData(key, handler, { server: ready.value })`).
 
-It is `true` from the first line when the server hydrated the user, so that path stays synchronous, and nothing changes for an app that doesn't read it.
+It is `true` from the first line when the server hydrated the user, so that path stays synchronous. An app that doesn't read the new fields keeps its behaviour, apart from the race fixes below.
 
-**`restoreFailed`** separates a restore that reached no answer from a real signed-out visitor. Only a 401/403 means "no session" — the rule `fetchUser` already used. Anything else sets it: a throttled refresh (429), a server error (5xx, including the BFF's 503), an unreachable server, a user endpoint that fails right after a successful refresh — and a misconfigured endpoint, where retrying cannot help. `initSession()` is the retry. The flag is cleared by every definitive answer (a user loaded, a 401/403, `logout()`), and a `logout()` during an in-flight restore wins over that restore's result.
+**`restoreFailed`** separates a restore that reached no answer from a real signed-out visitor. Only a 401/403 means "no session" — the rule `fetchUser` already used. Anything else sets it: a throttled refresh (429), a server error (5xx, including the BFF's 503), an unreachable server, a user endpoint that fails right after a successful refresh — and a misconfigured endpoint, where retrying cannot help. `initSession()` is the retry. The flag is cleared by every definitive answer: a user loaded, a 401/403, a sign-in, `logout()`.
 
 It is read through a restore-specific variant of the SAME single-flight refresh, so a boot restore still cannot race a request's own 401 retry and replay the rotating refresh token.
+
+**Fixed: a slow restore or user load could show the wrong account, or sign a user back in after `logout()`.** Offering `initSession()` as a retry made these easier to hit, but they predate it:
+
+- A restore still loading the previous account when someone signed in replaced the new user on screen with the old one, while requests carried the new token.
+- A refresh that answered after `logout()` wrote its access token back, and a restore joining it signed the user in again. A `fetchUser()` that answered after `logout()` did the same for the user.
+- A late refresh's response also re-set the refresh cookie (direct) or the sealed session (BFF) after a login or logout had replaced it.
+
+- A `logout()` while a sign-in's response was still on the wire left the visitor signed in with no token and a revoked session.
+
+Sign-ins (password, register, two-factor, passkey) are now a session handover. They wait for a refresh already in flight before sending — at most 10 seconds, so a refresh that never answers cannot lock anyone out — and a refresh that starts while one is on the wire waits for it, then isn't sent at all if a new session began. `logout()` waits for an in-flight refresh the same way, authenticates with the token it minted, and holds back a refresh that starts while it is out. A sign-in that issues a session, and every `logout()` before it sends its request, starts a new session generation; a refresh, restore or `fetchUser()` from an older one discards its result instead of writing it. A sign-in that answers after a `logout()` ends the session it was issued rather than signing in. One that started no session (rejected credentials, a two-factor challenge, a registration awaiting verification) changes nothing.
+
+The wait is capped, so a refresh slower than 10 seconds can still land its cookie after the new session's. These guards also live in the browser tab. In BFF mode, refreshes the proxy makes on its own (an app-API call renewing an expired token) and other tabs aren't covered: switching accounts while one of those is in flight can still leave the previous account's sealed session in place.
+
+Also fixed: after `clearNuxtState()`, an existing `useLukkAuth()` read `loggedIn` and `pendingTwoFactor` as `true`. And `useLukkAuth()` now has a declared return type, `LukkAuth` — the published declarations typed every field `any`, so `auth.ready.value = true` type-checked.
 
 Deliberate limits:
 
 - **An anonymous server render is never marked `ready`.** It isn't `no-store`, so a shared cache may serve it to a signed-in visitor whose cookie the edge ignored — and a baked-in `ready: true` would stop that visitor's client from restoring. Only a hydrated, per-user, `no-store` render carries it.
-- **`whenReady()` resolves immediately on the server**, whatever `ready` says: nothing later in the request can resolve the session, and waiting would hang the render. Read `ready` afterwards in code that also runs on the server.
-- **Reading `ready` or `restoreFailed` in a template on a server-rendered page causes a hydration mismatch** when the server didn't hydrate a user. Use them in logic, or inside `<ClientOnly>`.
-- **A plugin that awaits `whenReady()` in its setup must run after the restore** — give it `dependsOn: ['lukk:session-restore']`. Awaiting it earlier deadlocks startup; this is warned about in development.
-- **Readiness survives `clearNuxtState()`**, a common logout idiom, which would otherwise leave every later `whenReady()` pending.
+- **`whenReady()` resolves immediately on the server**, whatever `ready` says: the client restore never runs there, and waiting would hang the render. Read `ready` afterwards in code that also runs on the server.
+- **Reading `ready` in a template on a server-rendered page causes a hydration mismatch** when the server didn't hydrate a user; `restoreFailed` does when the client restore then fails. Use them in logic, or inside `<ClientOnly>`.
+- **A plugin that awaits `whenReady()` in its setup must run after the restore** — put it in a `.client.ts` file with `dependsOn: ['lukk:session-restore']`. The restore plugin is client-only, so a universal plugin naming it is reported (a build error on Nuxt 3, a development warning on Nuxt 4). Awaiting it earlier can deadlock startup, and depending on `lukk:client` doesn't prevent that; this is warned about in development.
+- **`ready` survives `clearNuxtState()`**, a common logout idiom, which would otherwise leave every later `whenReady()` pending. `restoreFailed` does not: it reads as `false` afterwards until the next restore.
 - **The built-in `lukk-auth` middleware does not use `ready` yet** and still redirects during a server render that couldn't resolve the session.

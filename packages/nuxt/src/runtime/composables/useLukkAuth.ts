@@ -1,8 +1,9 @@
 import { isRegistrationPending, isTwoFactorChallenge, type LoginInput, type LoginResult, type LukkUser, type RegisterInput, type RegisterResult, shapeUser, type TokenPair, userShapeWarning } from 'lukk-core'
+import type { ComputedRef, Ref } from 'vue'
 import { computed, useNuxtApp, useRuntimeConfig, useState } from '#imports'
 import { ACCESS_KEY, CHALLENGE_KEY, CONFIRMATION_KEY, CONFIRMED_KEY, READY_KEY, RESTORE_FAILED_KEY, USER_KEY } from '../keys'
 import { isAuthRejection } from '../shared'
-import { restoreState } from '../utils/restore-state'
+import { restoreState, settleRefresh, signIn } from '../utils/restore-state'
 import { isPrematureWait, whenReady as settled } from '../utils/when-ready'
 import { useLukkFetch } from './useLukkFetch'
 
@@ -15,10 +16,32 @@ interface PublicLukk {
 }
 
 /**
+ * Declared rather than inferred: the module build cannot resolve `#imports`, so an inferred return type
+ * shipped as `any` in the published declarations — and `auth.ready.value = true` type-checked in a
+ * consumer app.
+ */
+export interface LukkAuth {
+  user: Ref<LukkUser | null>
+  loggedIn: ComputedRef<boolean>
+  ready: ComputedRef<boolean>
+  whenReady: () => Promise<void>
+  restoreFailed: ComputedRef<boolean>
+  pendingTwoFactor: ComputedRef<boolean>
+  register: (input: RegisterInput) => Promise<RegisterResult>
+  login: (credentials: LoginInput) => Promise<LoginResult>
+  verifyTwoFactor: (code: string) => Promise<void>
+  verifyRecoveryCode: (recoveryCode: string) => Promise<void>
+  logout: () => Promise<void>
+  revokeOtherSessions: () => Promise<void>
+  fetchUser: () => Promise<void>
+  initSession: () => Promise<void>
+}
+
+/**
  * The reactive auth surface. Identical API in every mode — only the transport
  * underneath differs.
  */
-export function useLukkAuth() {
+export function useLukkAuth(): LukkAuth {
   const nuxtApp = useNuxtApp()
   const { $lukk } = nuxtApp
   // Restore bookkeeping that `clearNuxtState()` cannot erase — see utils/restore-state.
@@ -37,8 +60,10 @@ export function useLukkAuth() {
   const confirmation = useState<string | null>(CONFIRMATION_KEY, () => null)
   const confirmed = useState<boolean>(CONFIRMED_KEY, () => false)
 
-  const loggedIn = computed(() => user.value !== null)
-  const pendingTwoFactor = computed(() => challenge.value !== null)
+  // Loose `!= null`: `clearNuxtState()` leaves these keys `undefined` (Nuxt 3) or deleted (Nuxt 4), and
+  // a strict check read that as signed in with a pending challenge.
+  const loggedIn = computed(() => user.value != null)
+  const pendingTwoFactor = computed(() => challenge.value != null)
 
   // Written by the session plugins only, so it is exposed read-only — the same shape as
   // `useLukkConfirmation().confirmed`.
@@ -87,12 +112,13 @@ export function useLukkAuth() {
    * Any other status counts too — including a misconfigured endpoint (404) — so a retry there can
    * never succeed; it reports "could not tell", which is still true.
    *
-   * Cleared by every DEFINITIVE answer: a user loaded, a 401/403 from the user endpoint, `logout()`.
+   * Cleared by every DEFINITIVE answer: a user loaded, a 401/403 from the user endpoint, a sign-in,
+   * `logout()`.
    * Clearing on those rather than only hiding it while signed in matters — a stale flag from an
    * earlier failed restore otherwise resurfaced once that later session ended, and code gating a
    * redirect on it let a signed-out visitor through.
    */
-  const restoreFailed = computed(() => restoreFailedFlag.value && !loggedIn.value)
+  const restoreFailed = computed(() => restoreFailedFlag.value === true && !loggedIn.value)
 
   /**
    * Password login. When the user has 2FA enabled this surfaces a challenge
@@ -101,7 +127,8 @@ export function useLukkAuth() {
    * and the user loaded.
    */
   async function login(credentials: LoginInput): Promise<LoginResult> {
-    const result = await $lukk.login(credentials)
+    const { result, current } = await signIn(nuxtApp, () => $lukk.login(credentials), r => !isTwoFactorChallenge(r))
+    if (!current) return endSupersededSignIn(result, !isTwoFactorChallenge(result))
     if (isTwoFactorChallenge(result)) {
       // Client-only, for the reason ACCESS_KEY is: a `useState` written during SSR serialises
       // into `__NUXT_DATA__`. A challenge token is a live single-use credential, and at this point
@@ -121,7 +148,9 @@ export function useLukkAuth() {
    * `{ registered, requires_verification }` shape — route the user on accordingly.
    */
   async function register(input: RegisterInput): Promise<RegisterResult> {
-    const result = await $lukk.register(input)
+    const startsSession = (r: RegisterResult) => !isRegistrationPending(r) && !isTwoFactorChallenge(r)
+    const { result, current } = await signIn(nuxtApp, () => $lukk.register(input), startsSession)
+    if (!current) return endSupersededSignIn(result, startsSession(result))
     if (isRegistrationPending(result)) {
       return result
     }
@@ -145,15 +174,38 @@ export function useLukkAuth() {
 
   async function completeTwoFactor(input: { code?: string, recovery_code?: string }): Promise<void> {
     if (!challenge.value) throw new Error('lukk: no pending two-factor challenge')
-    await $lukk.twoFactorChallenge({ challenge_token: challenge.value, ...input })
+    const challengeToken = challenge.value
+    const { current } = await signIn(nuxtApp, () => $lukk.twoFactorChallenge({ challenge_token: challengeToken, ...input }), () => true)
+    if (!current) return endSupersededSignIn(undefined, true)
     challenge.value = null
     await fetchUser()
   }
 
+  /**
+   * A sign-in whose response landed after `logout()`. The logout is the newer intent, but it went out
+   * before this session existed, so it could not end it: the server has just issued a live session
+   * (tokens in direct mode, a sealed cookie in BFF) that nothing on screen reflects. End it too.
+   */
+  async function endSupersededSignIn<T>(result: T, issuedSession: boolean): Promise<T> {
+    if (issuedSession) await logout()
+    return result
+  }
+
   async function logout(): Promise<void> {
-    // Invalidate any restore still in flight BEFORE awaiting — its result must not land afterwards.
-    state.epoch++
-    try { await $lukk.logout() }
+    try {
+      // Let a refresh already on the wire finish first, so its cookie cannot land after logout cleared
+      // the session — and so the logout itself carries the token it just minted.
+      await settleRefresh(nuxtApp)
+      // Then end the generation BEFORE sending: a restore, refresh, user load or sign-in still out must
+      // not write its result after this.
+      state.epoch++
+      state.logouts++
+      // Published like a sign-in, so a refresh starting while this is out waits for the cookie to clear.
+      const request = $lukk.logout()
+      state.handover = request
+      try { await request }
+      finally { if (state.handover === request) state.handover = null }
+    }
     finally {
       access.value = null
       user.value = null
@@ -181,7 +233,10 @@ export function useLukkAuth() {
    * leaves the current `user` intact (don't bounce a logged-in user to /login).
    */
   async function fetchUser(): Promise<void> {
-    await loadUser(() => true)
+    // A `logout()` or a sign-in while this is in flight makes its answer stale — a user loaded for the
+    // session that just ended would otherwise sign the visitor back in.
+    const epoch = state.epoch
+    await loadUser(() => epoch === state.epoch)
   }
 
   /**
@@ -251,20 +306,22 @@ export function useLukkAuth() {
    * composable used from a plugin, anything not tied to route middleware or a component (which Nuxt
    * already runs after the restore).
    *
-   * **On the server it resolves immediately**, because nothing later in the request can settle the
-   * session and waiting would hang the render. Read `ready` afterwards: on the server it can still
-   * be `false`, meaning "unknown — the client will decide", which is not the same as anonymous.
+   * **On the server it resolves immediately**: the client restore never runs there, so an unhydrated
+   * render would wait forever. Read `ready` afterwards: on the server it can still be `false`, meaning
+   * "unknown — the client will decide", which is not the same as anonymous.
    *
    * **Do not await it in the setup of a plugin that runs before `lukk:session-restore`** — plugins run
-   * in sequence, so that plugin waits on one that cannot start until it returns, and the app never
-   * boots. Give such a plugin `dependsOn: ['lukk:session-restore']`. Warned about in development.
+   * in sequence, so that plugin can wait on one that cannot start until it returns, and the app never
+   * boots. Put such a plugin in a `.client.ts` file with `dependsOn: ['lukk:session-restore']` (the
+   * restore plugin is client-only, so a universal plugin naming it logs a build error). Warned about in
+   * development.
    */
   function whenReady(): Promise<void> {
     const isServer = import.meta.server === true
 
     if (import.meta.dev) {
       if (isPrematureWait(ready.value, isServer, state.started)) {
-        console.warn('[lukk-nuxt] whenReady() was called before the session-restore plugin started. Awaiting it in a plugin\'s setup deadlocks app startup — give that plugin `dependsOn: [\'lukk:session-restore\']`.')
+        console.warn('[lukk-nuxt] whenReady() was called before the session-restore plugin started. Awaiting it in a plugin\'s setup can deadlock app startup — move that plugin to a `.client.ts` file with `dependsOn: [\'lukk:session-restore\']`. Depending on `lukk:client` is not enough.')
       }
     }
 

@@ -1,5 +1,6 @@
 import { credentialToJSON, toCreationOptions, toRequestOptions } from 'lukk-core'
 import { useNuxtApp } from '#imports'
+import { signIn } from '../utils/restore-state'
 import { useLukkAuth } from './useLukkAuth'
 import { useLukkConfirmation } from './useLukkConfirmation'
 
@@ -8,7 +9,8 @@ import { useLukkConfirmation } from './useLukkConfirmation'
  * and lukk-core's base64url (de)serialization, so callers just await a verb.
  */
 export function useLukkPasskeys() {
-  const { $lukk } = useNuxtApp()
+  const nuxtApp = useNuxtApp()
+  const { $lukk } = nuxtApp
 
   /** Register a new passkey (requires a logged-in, step-up-confirmed user). */
   async function register(name?: string): Promise<void> {
@@ -20,8 +22,12 @@ export function useLukkPasskeys() {
   /** Passwordless login with a passkey, then load the user. */
   async function login(): Promise<void> {
     const assertion = await assert()
-    await $lukk.loginWithPasskey(assertion.ceremony_id, assertion.credential)
-    await useLukkAuth().fetchUser()
+    // The same session handover as a password login — see `useLukkAuth().login`.
+    const { current } = await signIn(nuxtApp, () => $lukk.loginWithPasskey(assertion.ceremony_id, assertion.credential), () => true)
+    const auth = useLukkAuth()
+    // Logged out while the response was on the wire: end the session it just issued.
+    if (!current) return auth.logout()
+    await auth.fetchUser()
   }
 
   /** Earn step-up confirmation with a passkey (recorded via `useLukkConfirmation`). */

@@ -101,7 +101,9 @@ describe('isAuthRejection', () => {
   })
 
   it('is false for anything that does not say "signed out"', () => {
-    for (const e of [{ status: 429 }, { statusCode: 500 }, { status: 503 }, new TypeError('Failed to fetch'), null, undefined])
+    // 404 and 419 included: a misconfigured endpoint or an expired CSRF token is "could not tell", and
+    // reading either as signed out would prompt a signed-in user to log in again.
+    for (const e of [{ status: 404 }, { statusCode: 419 }, { status: 429 }, { statusCode: 500 }, { status: 503 }, new TypeError('Failed to fetch'), null, undefined])
       expect(isAuthRejection(e)).toBe(false)
   })
 })

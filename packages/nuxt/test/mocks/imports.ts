@@ -32,8 +32,13 @@ export const useRequestHeaders = (_keys?: string[]) => __test.requestHeaders
 // unreachable in the client test env (it's driven via createRequestFetch's own test).
 export const useRequestFetch = () => (async () => undefined) as unknown
 // Accepts a function plugin or the object form `{ name, dependsOn, setup }`; tests invoke the
-// returned setup directly (plugin metadata like `name`/`dependsOn` is a Nuxt-runtime concern).
-export const defineNuxtPlugin = (plugin: unknown): unknown =>
-  typeof plugin === 'function' ? plugin : (plugin as { setup: unknown }).setup
+// returned setup directly. The object form's metadata rides along on `.meta`: consumers are told to
+// `dependsOn` a plugin by NAME, and Nuxt silently ignores a name that matches nothing — so a rename
+// has to fail a test, not reintroduce a startup deadlock.
+export const defineNuxtPlugin = (plugin: unknown): unknown => {
+  if (typeof plugin === 'function') return plugin
+  const { setup, ...meta } = plugin as { setup: (...args: unknown[]) => unknown }
+  return Object.assign((...args: unknown[]) => setup(...args), { meta })
+}
 export const defineNuxtRouteMiddleware = <T>(fn: T): T => fn
 export { computed, reactive, ref, shallowRef, toRaw, watch }
