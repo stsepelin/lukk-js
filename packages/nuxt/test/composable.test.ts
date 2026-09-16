@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { __test } from './mocks/imports'
+import { nextTick } from 'vue'
+import { READY_KEY } from '../src/runtime/keys'
+import { __test, useState } from './mocks/imports'
 
 // fetchUser goes through useLukkFetch — mock it with a controllable fake.
 const { api } = vi.hoisted(() => ({ api: vi.fn() }))
@@ -8,8 +10,11 @@ vi.mock('../src/runtime/composables/useLukkFetch', () => ({ useLukkFetch: () => 
 // eslint-disable-next-line import/first
 import { useLukkAuth } from '../src/runtime/composables/useLukkAuth'
 
-function withApp(lukk: Record<string, unknown>, lukkRefresh: () => Promise<unknown> = () => Promise.resolve(null)) {
-  __test.nuxtApp = { $lukk: lukk, $lukkRefresh: lukkRefresh }
+type Restore = () => Promise<{ pair: unknown, unavailable: boolean }>
+const signedOut: Restore = () => Promise.resolve({ pair: null, unavailable: false })
+
+function withApp(lukk: Record<string, unknown>, lukkRefresh: () => Promise<unknown> = () => Promise.resolve(null), lukkRestore: Restore = signedOut) {
+  __test.nuxtApp = { $lukk: lukk, $lukkRefresh: lukkRefresh, $lukkRestore: lukkRestore }
   __test.runtimeConfig.public.lukk = {
     mode: 'direct',
     baseURL: 'https://api/auth',
@@ -151,20 +156,22 @@ describe('useLukkAuth', () => {
   })
 
   it('initSession restores via the shared single-flight + loads the user when a session exists', async () => {
-    const refresh = vi.fn().mockResolvedValue({ access_token: 'a', expires_in: 900 })
-    withApp({}, refresh)
-    const { user, initSession } = useLukkAuth()
+    const restore = vi.fn().mockResolvedValue({ pair: { access_token: 'a', expires_in: 900 }, unavailable: false })
+    withApp({}, undefined, restore)
+    const { user, initSession, restoreFailed } = useLukkAuth()
     await initSession()
-    expect(refresh).toHaveBeenCalledTimes(1)
+    expect(restore).toHaveBeenCalledTimes(1)
     expect(user.value).toEqual({ id: 1, name: 'Ada' })
+    expect(restoreFailed.value).toBe(false)
   })
 
   it('initSession does nothing without a session', async () => {
-    withApp({}, vi.fn().mockResolvedValue(null))
-    const { user, initSession } = useLukkAuth()
+    withApp({})
+    const { user, initSession, restoreFailed } = useLukkAuth()
     await initSession()
     expect(user.value).toBeNull()
     expect(api).not.toHaveBeenCalled()
+    expect(restoreFailed.value).toBe(false)
   })
 
   it('surfaces a 2FA challenge on login and completes it with a TOTP code', async () => {
@@ -250,5 +257,131 @@ describe('useLukkAuth', () => {
       await useLukkAuth().fetchUser()
       expect(warn).not.toHaveBeenCalled()
     })
+  })
+})
+
+describe('useLukkAuth — session readiness', () => {
+  it('reports unresolved until the session plugins say otherwise', () => {
+    withApp({})
+    const { ready, loggedIn } = useLukkAuth()
+
+    // Both false — which is exactly why `loggedIn` alone cannot mean "anonymous".
+    expect(ready.value).toBe(false)
+    expect(loggedIn.value).toBe(false)
+
+    useState<boolean>(READY_KEY, () => false).value = true
+    expect(ready.value).toBe(true)
+  })
+
+  it('whenReady() waits for the restore, then resolves', async () => {
+    withApp({})
+    const { whenReady } = useLukkAuth()
+    let released = false
+    void whenReady().then(() => { released = true })
+
+    await nextTick()
+    expect(released).toBe(false)
+
+    useState<boolean>(READY_KEY, () => false).value = true
+    await nextTick()
+    await Promise.resolve()
+    expect(released).toBe(true)
+  })
+
+  it('whenReady() resolves at once when the session is already resolved', async () => {
+    withApp({})
+    useState<boolean>(READY_KEY, () => false).value = true
+
+    await expect(useLukkAuth().whenReady()).resolves.toBeUndefined()
+  })
+
+  it('stays resolved across a logout — signed out is still a resolved answer', async () => {
+    withApp({ logout: vi.fn().mockResolvedValue(undefined) })
+    useState<boolean>(READY_KEY, () => false).value = true
+    const { ready, logout, loggedIn } = useLukkAuth()
+
+    await logout()
+
+    expect(loggedIn.value).toBe(false)
+    expect(ready.value).toBe(true)
+  })
+})
+
+describe('useLukkAuth — a restore that could not reach an answer', () => {
+  const pair = { access_token: 'a', expires_in: 900 }
+
+  it('reports it when the refresh itself was unavailable (throttled, 5xx, unreachable)', async () => {
+    withApp({}, undefined, () => Promise.resolve({ pair: null, unavailable: true }))
+    const { initSession, loggedIn, restoreFailed } = useLukkAuth()
+
+    await initSession()
+
+    // Signed out as far as the UI can tell — but the visitor may have a perfectly valid session.
+    expect(loggedIn.value).toBe(false)
+    expect(restoreFailed.value).toBe(true)
+  })
+
+  it('reports it when the refresh worked but the user endpoint then failed', async () => {
+    // The session is VALID here; only loading the user failed. Reporting "signed out" would prompt a
+    // signed-in user to log in again.
+    withApp({}, undefined, () => Promise.resolve({ pair, unavailable: false }))
+    api.mockRejectedValueOnce({ statusCode: 503 })
+    const { initSession, loggedIn, restoreFailed } = useLukkAuth()
+
+    await initSession()
+
+    expect(loggedIn.value).toBe(false)
+    expect(restoreFailed.value).toBe(true)
+  })
+
+  it('does NOT report it when the user endpoint says signed out (401/403)', async () => {
+    withApp({}, undefined, () => Promise.resolve({ pair, unavailable: false }))
+    api.mockRejectedValueOnce({ statusCode: 401 })
+    const { initSession, restoreFailed } = useLukkAuth()
+
+    await initSession()
+
+    expect(restoreFailed.value).toBe(false)
+  })
+
+  it('clears it when a retry succeeds', async () => {
+    const restore = vi.fn()
+      .mockResolvedValueOnce({ pair: null, unavailable: true })
+      .mockResolvedValueOnce({ pair, unavailable: false })
+    withApp({}, undefined, restore)
+    const { initSession, loggedIn, restoreFailed } = useLukkAuth()
+
+    await initSession()
+    expect(restoreFailed.value).toBe(true)
+
+    await initSession()
+    expect(loggedIn.value).toBe(true)
+    expect(restoreFailed.value).toBe(false)
+  })
+
+  it('is hidden while someone is signed in, and cleared by logout', async () => {
+    withApp({ logout: vi.fn().mockResolvedValue(undefined) }, undefined, () => Promise.resolve({ pair: null, unavailable: true }))
+    const { initSession, user, logout, restoreFailed } = useLukkAuth()
+    await initSession()
+    expect(restoreFailed.value).toBe(true)
+
+    user.value = { id: 1 } // e.g. a later successful login
+    expect(restoreFailed.value).toBe(false)
+
+    await logout()
+    // Signing out is a definitive answer — the earlier failure must not resurface.
+    expect(restoreFailed.value).toBe(false)
+  })
+
+  it('does not report a failure when the restore provide is missing entirely', async () => {
+    // An ordering gap degrades to signed-out, as before. Calling it "unavailable" would invite a
+    // retry loop that can never succeed.
+    __test.nuxtApp = { $lukk: {} }
+    __test.runtimeConfig.public.lukk = { mode: 'direct', baseURL: '', confirmationHeader: 'X', userEndpoint: '/me', userKey: '' }
+    const { initSession, restoreFailed } = useLukkAuth()
+
+    await initSession()
+
+    expect(restoreFailed.value).toBe(false)
   })
 })

@@ -1,7 +1,8 @@
 import { setResponseHeader } from 'h3'
 import { useLukkAuth } from '../composables/useLukkAuth'
+import { READY_KEY } from '../keys'
 import { resolveHydrationAccess } from '../server/hydrate'
-import { defineNuxtPlugin } from '#imports'
+import { defineNuxtPlugin, useState } from '#imports'
 
 /**
  * BFF SSR auth hydration. Per request, on the server, seed `useLukkAuth().user` from
@@ -23,6 +24,11 @@ import { defineNuxtPlugin } from '#imports'
  *    `resolveHydrationAccess` rotates + re-seals in place (onto both the page response and
  *    the in-process request), so a full page load stays logged-in instead of flashing
  *    /login. An anonymous or unrefreshable session yields null and defers to the client.
+ *  - Marks `ready` ONLY when a user was actually hydrated — never for an anonymous render. That
+ *    render carries no `no-store`, so a shared cache or CDN may serve it to anyone, including a
+ *    signed-in visitor whose cookie the edge ignored. A baked-in `ready: true` would tell that
+ *    visitor's client the session was already resolved, and they would stay signed out. The
+ *    hydrated render is per-user and `no-store` (above), so the flag only ever reaches its owner.
  */
 export default defineNuxtPlugin({
   name: 'lukk:session-hydrate',
@@ -39,6 +45,10 @@ export default defineNuxtPlugin({
     // now — before fetchUser can fail and leave a rotated cookie or per-user render cacheable.
     setResponseHeader(event, 'cache-control', 'no-store')
 
-    await useLukkAuth().fetchUser()
+    const auth = useLukkAuth()
+    await auth.fetchUser()
+
+    // A transient user-endpoint failure leaves `user` null — not resolved, so the client restores.
+    if (auth.loggedIn.value) useState<boolean>(READY_KEY, () => false).value = true
   },
 })

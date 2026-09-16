@@ -7,8 +7,9 @@ const captured: { client?: { refreshTokens: ReturnType<typeof vi.fn> } } = {}
 vi.mock('lukk-core', async importActual => ({
   ...(await importActual<typeof import('lukk-core')>()),
   createLukkClient: vi.fn(() => {
-    // No session → refresh rejects → the shared `safeRefresh` resolves null (logged-out).
-    captured.client = { refreshTokens: vi.fn().mockRejectedValue(new Error('no session')) }
+    // No session → the BFF answers /refresh with a 401, which is what a real rejection carries. A bare
+    // `new Error` has no status, and that is how an UNREACHABLE server looks — not an anonymous one.
+    captured.client = { refreshTokens: vi.fn().mockRejectedValue({ status: 401, message: 'Unauthenticated.' }) }
     return captured.client
   }),
 }))
@@ -33,15 +34,34 @@ describe('$lukkRefresh guard (real client + session-restore plugins)', () => {
     expect(useLukkAuth().loggedIn.value).toBe(false)
   })
 
-  it('restores nothing (logged-out) when the shared refresh yields null', async () => {
+  /** Run the real client plugin and inject EVERY provide as Nuxt does (`$` + key), so a provide added
+   *  later cannot silently fall out of this harness — which is how `$lukkRestore` first went missing. */
+  function provideClient(): void {
     __test.runtimeConfig.public.lukk = { ...bffConfig }
-    // Run the real client plugin, then wire its provide onto the app — as Nuxt's `dependsOn` guarantees
-    // before the session-restore plugin runs.
-    const { provide } = run(clientPlugin) as { provide: { lukk: unknown, lukkRefresh: () => Promise<unknown> } }
-    Object.assign(__test.nuxtApp, { $lukk: provide.lukk, $lukkRefresh: provide.lukkRefresh })
+    const { provide } = run(clientPlugin) as { provide: Record<string, unknown> }
+    Object.assign(__test.nuxtApp, Object.fromEntries(Object.entries(provide).map(([k, v]) => [`$${k}`, v])))
+  }
+
+  it('restores nothing (signed out, not failed) when there is no session', async () => {
+    provideClient()
 
     await expect(run(sessionPlugin) as Promise<void>).resolves.toBeUndefined()
     expect(captured.client!.refreshTokens).toHaveBeenCalledTimes(1)
     expect(useLukkAuth().loggedIn.value).toBe(false)
+    expect(useLukkAuth().restoreFailed.value).toBe(false)
+    expect(useLukkAuth().ready.value).toBe(true)
+  })
+
+  it('reports a failed restore when the server cannot be reached', async () => {
+    // A network failure rejects with no status at all. The visitor may be signed in, so this must
+    // not read as "anonymous" — the end-to-end path the unit tests only cover piecewise.
+    provideClient()
+    captured.client!.refreshTokens.mockRejectedValueOnce(new TypeError('Failed to fetch'))
+
+    await run(sessionPlugin)
+
+    expect(useLukkAuth().loggedIn.value).toBe(false)
+    expect(useLukkAuth().restoreFailed.value).toBe(true)
+    expect(useLukkAuth().ready.value).toBe(true)
   })
 })

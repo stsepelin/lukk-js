@@ -1,5 +1,6 @@
 import { useLukkAuth } from '../composables/useLukkAuth'
-import { defineNuxtPlugin } from '#imports'
+import { READY_KEY } from '../keys'
+import { defineNuxtPlugin, useState } from '#imports'
 
 /**
  * On app load in the browser, silently restore the session: if a valid refresh
@@ -9,16 +10,29 @@ import { defineNuxtPlugin } from '#imports'
  * `dependsOn` the client plugin so `$lukkRefresh` is guaranteed provided before
  * `initSession` runs (initSession also guards the call defensively regardless, so
  * a missing provide degrades to logged-out instead of throwing).
+ *
+ * Owns `ready`: it is the one place that knows the session has been resolved on the client. Nuxt
+ * awaits this plugin before the initial navigation and before mounting, so route middleware,
+ * `setup()` and `onMounted` all see it settled.
  */
 export default defineNuxtPlugin({
   name: 'lukk:session-restore',
   dependsOn: ['lukk:client'],
   async setup() {
     const auth = useLukkAuth()
-    // If SSR already hydrated the user (BFF `ssrHydrate`), skip the client restore — no
-    // redundant refresh on every page load. Anonymous / expired-at-SSR renders leave `user`
-    // null, so this still restores them.
-    if (auth.loggedIn.value) return
-    await auth.initSession()
+    const ready = useState<boolean>(READY_KEY, () => false)
+
+    try {
+      // If SSR already hydrated the user (BFF `ssrHydrate`), skip the client restore — no
+      // redundant refresh on every page load. Anonymous / expired-at-SSR renders leave `user`
+      // null, so this still restores them.
+      if (!auth.loggedIn.value) await auth.initSession()
+    }
+    finally {
+      // In `finally`, not after the await: `whenReady()` waits on this flag, and a restore that threw
+      // would otherwise leave every waiter pending forever. A settled-as-signed-out session is a
+      // recoverable answer; a promise that never resolves is not.
+      ready.value = true
+    }
   },
 })

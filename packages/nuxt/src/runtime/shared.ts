@@ -107,3 +107,17 @@ export function isUsableConfirmationHeader(name: string): boolean {
 export function confirmationHeaderName(configured?: string): string {
   return configured && isUsableConfirmationHeader(configured) ? configured : LUKK_CONFIRMATION_HEADER
 }
+
+/**
+ * Did the server reject the caller as not signed in (401/403)?
+ *
+ * Anything else — a 429, a 5xx, a network failure with no status at all — means the answer is
+ * unknown, NOT that nobody is signed in. Treating those as signed-out shows a login prompt to a
+ * user whose session is perfectly valid. Reads `statusCode` as well as `status` because ofetch
+ * errors carry the former and `LukkError` the latter.
+ */
+export function isAuthRejection(error: unknown): boolean {
+  const e = error as { statusCode?: number, status?: number } | null | undefined
+  const status = e?.statusCode ?? e?.status
+  return status === 401 || status === 403
+}

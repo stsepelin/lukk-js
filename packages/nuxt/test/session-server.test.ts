@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ACCESS_KEY } from '../src/runtime/keys'
+import { ACCESS_KEY, READY_KEY } from '../src/runtime/keys'
 import { __test, useState } from './mocks/imports'
 
 const fetchUser = vi.fn()
@@ -103,4 +103,42 @@ describe('accessExpired', () => {
   it('is true within the 10s skew window', () =>
     expect(accessExpired(token(Math.floor(Date.now() / 1000) + 5))).toBe(true))
   it('is false for a comfortably-valid token', () => expect(accessExpired(fresh())).toBe(false))
+})
+
+describe('session.server — readiness', () => {
+  const ready = () => useState<boolean>(READY_KEY, () => false)
+
+  it('marks the session resolved when it hydrated a user, so the client path stays synchronous', async () => {
+    resolveHydrationAccess.mockResolvedValue(fresh())
+    fetchUser.mockImplementation(async () => { loggedIn.value = true })
+
+    await run(app())
+
+    expect(ready().value).toBe(true)
+  })
+
+  it('does NOT mark an anonymous render resolved', async () => {
+    // That render carries no `no-store`, so a shared cache may serve it to a signed-in visitor whose
+    // cookie the edge ignored. A baked-in `ready: true` would stop that visitor's client restoring.
+    resolveHydrationAccess.mockResolvedValue(null)
+
+    await run(app())
+
+    expect(ready().value).toBe(false)
+  })
+
+  it('does NOT mark it resolved when the user endpoint yields no user', async () => {
+    // A transient failure on the server is not an answer — the client restore decides.
+    resolveHydrationAccess.mockResolvedValue(fresh())
+    fetchUser.mockResolvedValue(undefined)
+
+    await run(app())
+
+    expect(ready().value).toBe(false)
+  })
+
+  it('does NOT mark a prerendered page resolved', async () => {
+    await run(app({ prerenderedAt: 1 }))
+    expect(ready().value).toBe(false)
+  })
 })

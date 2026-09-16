@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { __test } from './mocks/imports'
+import { READY_KEY } from '../src/runtime/keys'
+import { __test, useState } from './mocks/imports'
 
 const captured: {
   hooks?: Record<string, (...a: unknown[]) => unknown>
@@ -70,6 +71,43 @@ describe('client plugin', () => {
   })
 })
 
+describe('client plugin — $lukkRestore', () => {
+  type Provide = { lukkRefresh: () => Promise<unknown>, lukkRestore: () => Promise<{ pair: unknown, unavailable: boolean }> }
+  const setup = () => {
+    __test.runtimeConfig.public.lukk = { mode: 'bff', baseURL: '', confirmationHeader: 'X' }
+    return (clientPlugin as unknown as () => { provide: Provide })().provide
+  }
+
+  it('hands back the pair on success', async () => {
+    const { lukkRestore } = setup()
+    await expect(lukkRestore()).resolves.toEqual({ pair: { access_token: 'fresh', expires_in: 900 }, unavailable: false })
+  })
+
+  it('reports a 401 as "no session", not as unavailable', async () => {
+    const { lukkRestore } = setup()
+    captured.client!.refreshTokens.mockRejectedValueOnce({ status: 401, message: 'Unauthenticated.' })
+    await expect(lukkRestore()).resolves.toEqual({ pair: null, unavailable: false })
+  })
+
+  it.each([
+    ['a throttled refresh (429)', { status: 429, message: 'Too Many Attempts.' }],
+    ['a BFF upstream failure (503)', { status: 503, message: 'Unauthenticated.' }],
+    ['an unreachable server (no status)', new TypeError('Failed to fetch')],
+  ])('reports %s as unavailable', async (_, error) => {
+    const { lukkRestore } = setup()
+    captured.client!.refreshTokens.mockRejectedValueOnce(error)
+    await expect(lukkRestore()).resolves.toEqual({ pair: null, unavailable: true })
+  })
+
+  it('shares ONE refresh with $lukkRefresh, so a restore cannot replay the rotating token', async () => {
+    // Reuse detection revokes the whole family on a replayed refresh token — two concurrent refreshes
+    // from boot + a 401 retry would log the user out everywhere.
+    const { lukkRefresh, lukkRestore } = setup()
+    await Promise.all([lukkRestore(), lukkRefresh()])
+    expect(captured.client!.refreshTokens).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('session.client plugin', () => {
   it('restores the session on load when not already logged in', async () => {
     await (sessionPlugin as unknown as () => Promise<void>)()
@@ -80,6 +118,46 @@ describe('session.client plugin', () => {
     loggedIn.value = true
     await (sessionPlugin as unknown as () => Promise<void>)()
     expect(initSession).not.toHaveBeenCalled()
+  })
+})
+
+describe('session.client plugin — readiness', () => {
+  const run = () => (sessionPlugin as unknown as () => Promise<void>)()
+  const ready = () => useState<boolean>(READY_KEY, () => false)
+
+  it('marks the session resolved once the restore settles', async () => {
+    await run()
+    expect(ready().value).toBe(true)
+  })
+
+  it('is NOT resolved while the restore is still in flight', async () => {
+    // A waiter released before the refresh returns would read `loggedIn: false` for a signed-in
+    // visitor — the exact ambiguity the flag exists to remove.
+    let finish!: () => void
+    initSession.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve }))
+
+    const pending = run()
+    await Promise.resolve()
+    expect(ready().value).toBe(false)
+
+    finish()
+    await pending
+    expect(ready().value).toBe(true)
+  })
+
+  it('marks it resolved when SSR already hydrated the user, without a restore', async () => {
+    loggedIn.value = true
+    await run()
+    expect(initSession).not.toHaveBeenCalled()
+    expect(ready().value).toBe(true)
+  })
+
+  it('still marks it resolved when the restore throws, so no waiter hangs', async () => {
+    // A settled-as-signed-out session is recoverable; a `whenReady()` that never resolves is not.
+    initSession.mockRejectedValueOnce(new Error('boom'))
+
+    await expect(run()).rejects.toThrow('boom')
+    expect(ready().value).toBe(true)
   })
 })
 

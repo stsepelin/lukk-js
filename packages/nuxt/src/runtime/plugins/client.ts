@@ -1,8 +1,8 @@
-import { createLukkClient, type LukkClient, singleFlight } from 'lukk-core'
+import { createLukkClient, type LukkClient, singleFlight, type TokenPair } from 'lukk-core'
 import { defineNuxtPlugin, useRuntimeConfig, useState } from '#imports'
 import { useLukkAuth } from '../composables/useLukkAuth'
 import { ACCESS_KEY, CONFIRMATION_KEY } from '../keys'
-import { confirmationHeaderName, LUKK_BFF_PREFIX } from '../shared'
+import { confirmationHeaderName, isAuthRejection, LUKK_BFF_PREFIX } from '../shared'
 
 /**
  * Provides `$lukk` — the core client, wired for the configured transport.
@@ -84,6 +84,16 @@ export default defineNuxtPlugin({
       onUnauthenticated: () => { accessToken.value = null },
     })
 
-    return { provide: { lukk: client, lukkRefresh: safeRefresh } }
+    // The SAME single-flight as `safeRefresh`, so a boot restore still can't replay the rotating
+    // refresh token alongside a concurrent 401 retry — but it keeps WHY a refresh failed. `safeRefresh`
+    // reduces every failure to null, which is right for a request retry and wrong for the restore: a
+    // 401 means "no session", while a 429, a 5xx or an unreachable server means "couldn't tell", and
+    // reporting the second as signed-out prompts a signed-in user to log in again.
+    const restore = (): Promise<{ pair: TokenPair | null, unavailable: boolean }> => refresh().then(
+      pair => ({ pair, unavailable: false }),
+      (error: unknown) => ({ pair: null, unavailable: !isAuthRejection(error) }),
+    )
+
+    return { provide: { lukk: client, lukkRefresh: safeRefresh, lukkRestore: restore } }
   },
 })
