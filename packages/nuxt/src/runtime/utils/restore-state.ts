@@ -1,5 +1,6 @@
 import type { Ref } from 'vue'
 import { RESTORE_FAILED_KEY } from '../keys'
+import { clearPendingLogout, noteSignIn } from './pending-logout'
 import { shallowRef, useState } from '#imports'
 
 /**
@@ -48,6 +49,13 @@ export interface RestoreState {
   announce?: () => void
   /** The Web Lock shared by this app's tabs. Set by the client plugin where the browser has one. */
   lockName?: string
+  /** This app's base, which scopes what it keeps in browser storage. Set by the client plugin. */
+  scope?: string
+  /**
+   * Set by the restore plugin, for the `logout()` it calls next: that call FINISHES the logout an earlier
+   * page noted at this time, rather than being a new one. Consumed by that call.
+   */
+  finishingLogout?: number
   /** How many of this tab's operations are using the tab lock — the lock is released when it reaches 0. */
   lockUsers: number
   /** Settles once this tab holds the lock (or gave up waiting for it). */
@@ -130,21 +138,42 @@ async function handOver<T>(nuxtApp: object, send: () => Promise<T>, startsSessio
   await settle(state.handover)
   const logouts = state.logouts
 
+  let issued = false
+  const sentAt = Date.now()
   const request = send().then((result) => {
     // Even when a logout came first: the server issued a session either way, and the caller is about
     // to end it — starting its generation now stops a refresh waiting on this from renewing it.
-    if (startsSession(result)) beginSession(nuxtApp)
+    if (startsSession(result)) {
+      issued = true
+      beginSession(nuxtApp, sentAt)
+    }
     return result
   })
   state.handover = request
 
+  let outcome: { result: T, current: boolean }
   try {
     const result = await request
-    return { result, current: logouts === state.logouts }
+    outcome = { result, current: logouts === state.logouts }
   }
   finally {
     if (state.handover === request) state.handover = null
   }
+
+  if (issued && outcome.current) claimSession(nuxtApp)
+  return outcome
+}
+
+/**
+ * Tell lukk this client received the session it just issued. With lukk's `claim_seconds` on, a session
+ * whose first use comes too late is revoked — which is what ends one whose sign-in response never
+ * reached the client (a dropped connection, an aborted request). Claiming at once keeps an app that
+ * makes no authenticated request for a while from being signed out. Fire-and-forget, after the handover
+ * is released; a lukk release without the route answers 404, which is ignored.
+ */
+function claimSession(nuxtApp: object): void {
+  const lukk = (nuxtApp as { $lukk?: { claimSession?: () => Promise<void> } }).$lukk
+  void lukk?.claimSession?.().catch(() => {})
 }
 
 /**
@@ -219,9 +248,13 @@ function holdTabLock(locks: TabLocks, state: RestoreState): Promise<void> {
  * retrying. Also a definitive answer, so it clears `restoreFailed`: an app with no user endpoint has
  * no `fetchUser` to do that.
  */
-export function beginSession(nuxtApp: object): void {
+export function beginSession(nuxtApp: object, sentAt: number): void {
   const state = restoreState(nuxtApp)
   state.epoch++
   useState<boolean>(RESTORE_FAILED_KEY, () => false).value = false
+  // A logout never finished is moot once a sign-in is sent after it — here, or in a tab that left and
+  // returns. One asked for while this sign-in was already out still stands.
+  clearPendingLogout(state.scope, sentAt)
+  noteSignIn(state.scope, sentAt)
   state.announce?.()
 }

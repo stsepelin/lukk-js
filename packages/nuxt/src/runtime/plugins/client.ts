@@ -211,6 +211,7 @@ export default defineNuxtPlugin({
       const appBase = (useRuntimeConfig() as { app?: { baseURL?: string } }).app?.baseURL ?? '/'
       // Tabs also queue their sign-ins, logouts and refreshes behind one Web Lock — see `acrossTabs`.
       state.lockName = `lukk:session:${appBase}`
+      state.scope = appBase
 
       if (typeof window.BroadcastChannel === 'function') {
         const channel = new window.BroadcastChannel(`lukk:session:${appBase}`)

@@ -5,6 +5,7 @@ import {
   addServerHandler,
   addServerPlugin,
   addServerImportsDir,
+  addTypeTemplate,
   createResolver,
   defineNuxtModule,
 } from '@nuxt/kit'
@@ -382,6 +383,24 @@ export default defineNuxtModule<ModuleOptions>({
 
     // Auto-imported composables: useLukkAuth, useLukkTwoFactor, useLukkPasskeys, ...
     addImportsDir(resolver.resolve('./runtime/composables'))
+    // The client plugin's provides, typed: the module build can't resolve `#imports`, so the plugin's own
+    // declarations are `any` and consumers saw `useNuxtApp().$lukk` as `unknown`.
+    addTypeTemplate({
+      filename: 'types/lukk-nuxt.d.ts',
+      getContents: () => [
+        `import type { LukkClient, TokenPair } from 'lukk-core'`,
+        `declare module '#app' {`,
+        `  interface NuxtApp {`,
+        `    /** The lukk-core client, wired for the configured transport. */`,
+        `    $lukk: LukkClient`,
+        `    /** The shared single-flight refresh; \`null\` when the session can't be refreshed. */`,
+        `    $lukkRefresh: () => Promise<TokenPair | null>`,
+        `  }`,
+        `}`,
+        `export {}`,
+        ``,
+      ].join('\n'),
+    })
 
     // Server-side helpers for your own routes: getLukkAccessToken(event), useLukkSession(event).
     addServerImportsDir(resolver.resolve('./runtime/server/utils'))
@@ -401,6 +420,8 @@ export default defineNuxtModule<ModuleOptions>({
     // first paint. Default on; opt out with `ssrHydrate: false`. No-op in direct mode.
     if (options.mode === 'bff' && options.ssrHydrate !== false) {
       addPlugin({ src: resolver.resolve('./runtime/plugins/session.server'), mode: 'server' })
+      // Marks streamable renders, which don't refresh on the server (Nuxt 4 `experimental.ssrStreaming`).
+      addServerPlugin(resolver.resolve('./runtime/server/plugins/streaming-render'))
     }
 
     // BFF mode: the same-origin Nitro proxy that holds tokens server-side.

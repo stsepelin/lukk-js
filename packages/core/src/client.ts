@@ -150,6 +150,12 @@ export function createLukkClient(hooks: LukkClientHooks) {
         if (!(error instanceof TypeError)) throw error
         return request<void>('/logout', json({}), options.retry ?? true)
       }),
+    /**
+     * Confirm this client received the session a sign-in just issued (lukk's `claim_seconds`): a session
+     * first used after that window is revoked. Any authenticated request claims too; this one exists so a
+     * client can do it straight away. Older lukk releases answer 404.
+     */
+    claimSession: () => request<void>('/session/claim', { method: 'POST' }),
     revokeAllSessions: () => request<void>('/sessions', { method: 'DELETE' }),
     revokeOtherSessions: () => request<void>('/sessions/others', { method: 'DELETE' }),
 

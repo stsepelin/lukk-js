@@ -81,6 +81,7 @@ beforeEach(() => {
     register: signsIn('B'),
     twoFactorChallenge: signsIn('B'),
     loginWithPasskey: signsIn('B'),
+    claimSession: vi.fn(async () => undefined),
     passkeyLoginOptions: vi.fn(async () => ({ ceremony_id: 'cer', options: {} })),
     logout: vi.fn(async () => undefined),
   }
@@ -684,6 +685,18 @@ describe('a sign-in or logout in another tab', () => {
     expect(auth.user.value).toEqual({ id: 'B' })
   })
 
+  it('keeps a logout this tab never finished — the other tab may have only failed to log out; a sign-in there is told apart by its record', async () => {
+    const store = new Map<string, string>([['lukk:logging-out:/admin/', String(Date.now())]])
+    vi.stubGlobal('sessionStorage', { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => { store.set(k, v) }, removeItem: (k: string) => { store.delete(k) } })
+    api.mockResolvedValue({ id: 'B' })
+    boot('bff')
+    restoreState(__test.nuxtApp).scope = '/admin/'
+
+    await otherTabSays()
+
+    expect(store.has('lukk:logging-out:/admin/')).toBe(true)
+  })
+
   it('drops what this tab still had in flight for the previous session', async () => {
     const slowA = deferred<void>()
     userEndpoint({ A: slowA.promise })
@@ -706,6 +719,7 @@ describe('a sign-in or logout in another tab', () => {
     boot()
 
     expect(FakeChannel.instances[0]!.name).toBe('lukk:session:/admin/')
+    expect(restoreState(__test.nuxtApp).scope).toBe('/admin/')
   })
 
   it('does not listen where the browser has no BroadcastChannel', () => {
@@ -818,6 +832,131 @@ describe('a refresh that answers after its session was replaced (past the caps)'
 
     expect(await refreshing).toBeNull()
     expect(revocations).not.toHaveBeenCalled()
+  })
+})
+
+describe('claiming the session a sign-in issued', () => {
+  it.each([
+    ['a password login', (auth: ReturnType<typeof useLukkAuth>) => auth.login({ email: 'b', password: 'p' })],
+    ['a registration', (auth: ReturnType<typeof useLukkAuth>) => auth.register({ email: 'b', password: 'p', password_confirmation: 'p' })],
+    ['a two-factor challenge', async (auth: ReturnType<typeof useLukkAuth>) => {
+      useState<string | null>(CHALLENGE_KEY, () => null).value = 'challenge'
+      await auth.verifyTwoFactor('123456')
+    }],
+    ['a passkey login', async () => {
+      vi.stubGlobal('navigator', { credentials: { get: vi.fn(async () => ({ id: 'credential' })) } })
+      await useLukkPasskeys().login()
+    }],
+  ])('claims it straight after %s', async (_, signIn) => {
+    // With lukk's claim_seconds on, a session whose first use comes too late is revoked — which ends one
+    // whose sign-in response never arrived, but would also end an app that simply stays idle.
+    userEndpoint()
+    boot()
+
+    await signIn(useLukkAuth())
+
+    expect(wire.client.claimSession).toHaveBeenCalledOnce()
+  })
+
+  it.each([
+    ['rejected credentials', () => { wire.client.login!.mockRejectedValueOnce({ status: 422 }) }],
+    ['a two-factor challenge', () => { wire.client.login!.mockResolvedValueOnce({ two_factor: true, challenge_token: 'c' }) }],
+  ])('claims nothing after %s — no session was issued', async (_, answer) => {
+    boot()
+    answer()
+
+    await useLukkAuth().login({ email: 'b', password: 'p' }).catch(() => {})
+
+    expect(wire.client.claimSession).not.toHaveBeenCalled()
+  })
+
+  it('does not claim a session a logout during the sign-in ended', async () => {
+    const response = deferred<void>()
+    wire.client.login!.mockImplementationOnce(slowSignIn('B', response.promise))
+    boot()
+    const auth = useLukkAuth()
+
+    const signingIn = auth.login({ email: 'b', password: 'p' })
+    await macrotask()
+    await auth.logout()
+    response.resolve()
+    await signingIn
+
+    expect(wire.client.claimSession).not.toHaveBeenCalled()
+  })
+
+  it('ignores a lukk release without the route, and never delays or fails the sign-in', async () => {
+    wire.client.claimSession!.mockRejectedValueOnce({ status: 404 })
+    userEndpoint()
+    boot()
+
+    await expect(useLukkAuth().login({ email: 'b', password: 'p' })).resolves.toEqual(pairFor('B'))
+  })
+})
+
+describe('a pending logout note and a later sign-in', () => {
+  it('drops the note when someone signs in again in this tab — the old logout is moot', async () => {
+    const store = new Map<string, string>([['lukk:logging-out:/admin/', String(Date.now())]])
+    vi.stubGlobal('sessionStorage', { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => { store.set(k, v) }, removeItem: (k: string) => { store.delete(k) } })
+    userEndpoint()
+    boot()
+    restoreState(__test.nuxtApp).scope = '/admin/'
+
+    await useLukkAuth().login({ email: 'b', password: 'p' })
+
+    expect(store.has('lukk:logging-out:/admin/')).toBe(false)
+  })
+
+  it('keeps a note for a logout asked for while this sign-in was already out — that logout still ends it', async () => {
+    const store = new Map<string, string>()
+    vi.stubGlobal('sessionStorage', { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => { store.set(k, v) }, removeItem: (k: string) => { store.delete(k) } })
+    const answer = deferred<void>()
+    userEndpoint()
+    boot()
+    const login = wire.client.login as ReturnType<typeof vi.fn>
+    const original = login.getMockImplementation()!
+    login.mockImplementationOnce(async (...args: unknown[]) => { await answer.promise; return original(...args) })
+
+    const signingIn = useLukkAuth().login({ email: 'b', password: 'p' })
+    await new Promise(resolve => setTimeout(resolve, 5))
+    store.set('lukk:logging-out:/', String(Date.now()))
+    answer.resolve()
+    await signingIn
+
+    expect(store.has('lukk:logging-out:/')).toBe(true)
+  })
+
+  it('records when the sign-in was SENT — a logout asked for while it was out still ends it', async () => {
+    const shared = new Map<string, string>()
+    vi.stubGlobal('localStorage', { getItem: (k: string) => shared.get(k) ?? null, setItem: (k: string, v: string) => { shared.set(k, v) } })
+    const answer = deferred<void>()
+    userEndpoint()
+    boot()
+    restoreState(__test.nuxtApp).scope = '/admin/' // recorded for this app only
+    const login = wire.client.login as ReturnType<typeof vi.fn>
+    const original = login.getMockImplementation()!
+    login.mockImplementationOnce(async (...args: unknown[]) => { await answer.promise; return original(...args) })
+
+    const signingIn = useLukkAuth().login({ email: 'b', password: 'p' })
+    await macrotask()
+    const asked = Date.now()
+    await new Promise(resolve => setTimeout(resolve, 5))
+    answer.resolve()
+    await signingIn
+
+    expect(Number(shared.get('lukk:signed-in-at:/admin/'))).toBeLessThanOrEqual(asked) // not when it was answered, 5 ms later
+  })
+
+  it('records the sign-in for every tab — a note left in a tab that navigated away is moot when it returns', async () => {
+    const shared = new Map<string, string>()
+    vi.stubGlobal('localStorage', { getItem: (k: string) => shared.get(k) ?? null, setItem: (k: string, v: string) => { shared.set(k, v) } })
+    const before = Date.now()
+    userEndpoint()
+    boot()
+
+    await useLukkAuth().login({ email: 'b', password: 'p' })
+
+    expect(Number(shared.get('lukk:signed-in-at:/'))).toBeGreaterThanOrEqual(before)
   })
 })
 

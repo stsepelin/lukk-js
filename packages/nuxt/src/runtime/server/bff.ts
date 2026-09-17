@@ -3,7 +3,7 @@ import { isTokenPair } from 'lukk-core'
 import { defineEventHandler, getCookie, getRequestHeader, readRawBody, setResponseHeader, setResponseStatus, useSession } from 'h3'
 import { useRuntimeConfig } from '#imports'
 import { LUKK_BFF_PREFIX, confirmationHeaderName, sessionCookieName } from '../shared'
-import { isForeignOrigin, rejectUnresolvedTarget, resolveTarget, viaHeader, visitorIp } from './proxy-utils'
+import { isForeignOrigin, rejectUnresolvedTarget, reportProxyFailure, resolveTarget, viaHeader, visitorIp } from './proxy-utils'
 import { endSession, newSessionId, sessionEnded, sessionKey, sessionReplaced, withholdSessionCookie } from './ended-sessions'
 import { revokeDroppedSession } from './revoke-dropped'
 import { readSealedSession } from './sealed-session'
@@ -99,7 +99,15 @@ export default defineEventHandler(async (event) => {
     // X-Lukk-Confirmation header (undici keeps custom headers across redirects) and, on a
     // 307/308, the request body to the redirect host (CWE-918/200). Handled below.
     const body = endsSession ? JSON.stringify(logoutRefresh ? { refresh_token: logoutRefresh } : {}) : rawBody
-    return fetch(target!, { method, headers, body, redirect: 'manual' })
+    // lukk unreachable, or the connection dropped: answer 502 like any other upstream failure, rather
+    // than letting the fetch error escape as a 500 with a stack trace in the log on every attempt.
+    return fetch(target!, { method, headers, body, redirect: 'manual' }).catch((error: unknown) => {
+      reportProxyFailure(target!, error)
+      return new Response(
+        JSON.stringify({ message: 'lukk could not be reached.' }),
+        { status: 502, headers: { 'content-type': 'application/json' } },
+      )
+    })
   }
 
   // `/refresh` is SERVED here, never proxied. The browser holds an opaque cookie, not a refresh

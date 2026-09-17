@@ -7,6 +7,7 @@ const kit = vi.hoisted(() => ({
   addServerHandler: vi.fn(),
   addServerImportsDir: vi.fn(),
   addServerPlugin: vi.fn(),
+  addTypeTemplate: vi.fn(),
   createResolver: () => ({ resolve: (p: string) => p }),
   defineNuxtModule: (def: unknown) => def,
 }))
@@ -66,6 +67,26 @@ describe('lukk-nuxt module', () => {
     expect((unset.options.runtimeConfig.lukk as { cookieNamespace?: string }).cookieNamespace).toBeUndefined()
     const named = setup({ baseURL: 'https://api/auth', mode: 'bff', session: { password: 'x'.repeat(32), name: 'admin' } })
     expect((named.options.runtimeConfig.lukk as { cookieNamespace?: string }).cookieNamespace).toBe('admin')
+  })
+
+  it('types the client plugin\'s provides for consumers', () => {
+    setup({ baseURL: 'https://api/auth', mode: 'bff' })
+    const template = kit.addTypeTemplate.mock.calls[0]![0] as { filename: string, getContents: () => string }
+
+    expect(template.filename).toBe('types/lukk-nuxt.d.ts')
+    const contents = template.getContents()
+    expect(contents).toContain(`import type { LukkClient, TokenPair } from 'lukk-core'`)
+    expect(contents).toContain('$lukk: LukkClient')
+    expect(contents).toContain('$lukkRefresh: () => Promise<TokenPair | null>')
+  })
+
+  it('registers the streaming-render marker alongside SSR hydration, and not without it', () => {
+    setup({ baseURL: 'https://api/auth', mode: 'bff' })
+    expect(kit.addServerPlugin).toHaveBeenCalledWith('./runtime/server/plugins/streaming-render')
+
+    kit.addServerPlugin.mockClear()
+    setup({ baseURL: 'https://api/auth', mode: 'bff', ssrHydrate: false })
+    expect(kit.addServerPlugin).not.toHaveBeenCalledWith('./runtime/server/plugins/streaming-render')
   })
 
   it('passes session.sharedStore through and registers the plugin that wires it (bff only)', () => {

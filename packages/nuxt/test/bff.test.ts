@@ -622,7 +622,7 @@ describe('a session replaced or ended while a refresh for it was out', () => {
     expect(mockFetch().fetch).toHaveBeenCalledWith('https://lukk/auth/logout', expect.objectContaining({ headers: expect.objectContaining({ Authorization: 'Bearer A2' }) }))
   })
 
-  it('still seals the rotated session when the retried call throws, so it is not stranded on a spent token', async () => {
+  it('still seals the rotated session when the retried call can\'t reach lukk, so it is not stranded on a spent token', async () => {
     const session = makeSession({ access: 'A', refresh: 'rA', sid: 'session-A' } as TokenSession)
     let calls = 0
     mockFetch().fetch = vi.fn(async (url: string) => {
@@ -630,10 +630,24 @@ describe('a session replaced or ended while a refresh for it was out', () => {
       if (++calls === 1) return jsonRes({ message: 'Unauthenticated.' }, 401)
       throw new TypeError('fetch failed')
     })
+    const event = makeEvent({ path: '/api/_lukk/passkeys', session })
 
-    await expect(run(makeEvent({ path: '/api/_lukk/passkeys', session }))).rejects.toThrow('fetch failed')
-
+    expect(await run(event)).toEqual({ message: 'lukk could not be reached.' })
+    expect(event.status).toBe(502)
     expect(session.update).toHaveBeenCalledWith({ access: 'A2', refresh: 'rA2' })
+  })
+
+  it('answers 502 when lukk can\'t be reached at all, instead of escaping as a 500', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const session = makeSession({ access: 'A', refresh: 'rA' })
+    mockFetch().fetch = vi.fn(async () => { throw new TypeError('fetch failed') })
+    const event = makeEvent({ path: '/api/_lukk/session/claim', method: 'POST', body: '{}', headers: sameOrigin, session })
+
+    expect(await run(event)).toEqual({ message: 'lukk could not be reached.' })
+    expect(event.status).toBe(502)
+    expect(session.clear).not.toHaveBeenCalled()
+    // Diagnosable: the cause is reported (once per target and cause, like the app-API proxy).
+    expect(error).toHaveBeenCalled()
   })
 
   it('does not write back a step-up confirmation that answers after a sign-in — h3 re-seals the whole session', async () => {

@@ -1,5 +1,6 @@
 import { useLukkAuth } from '../composables/useLukkAuth'
 import { READY_KEY } from '../keys'
+import { pendingLogoutAt, signedInSince } from '../utils/pending-logout'
 import { restoreState } from '../utils/restore-state'
 import { defineNuxtPlugin, useNuxtApp, useState } from '#imports'
 
@@ -26,10 +27,21 @@ export default defineNuxtPlugin({
     state.started = true
 
     try {
+      // The previous page in this tab started a logout it may not have finished — it navigated away
+      // first, and this page's request (and a server render) could still carry the session. Finish it
+      // before restoring anything; its errors surface nowhere else, so they are swallowed.
+      const noted = pendingLogoutAt(state.scope)
+      if (noted !== undefined) {
+        state.finishingLogout = noted
+        await auth.logout().catch(() => {})
+        // Unless a sign-in sent meanwhile in another tab made it moot: then the logout stood down, and the
+        // cookie holds that newer session — restore it.
+        if (signedInSince(state.scope, noted)) await auth.initSession()
+      }
       // If SSR already hydrated the user (BFF `ssrHydrate`), skip the client restore — no
       // redundant refresh on every page load. Anonymous / expired-at-SSR renders leave `user`
       // null, so this still restores them.
-      if (!auth.loggedIn.value) await auth.initSession()
+      else if (!auth.loggedIn.value) await auth.initSession()
     }
     finally {
       // In `finally`, not after the await: `whenReady()` waits on this flag, and a restore that threw

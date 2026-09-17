@@ -3,6 +3,7 @@ import type { ComputedRef, Ref } from 'vue'
 import { computed, useNuxtApp, useRuntimeConfig, useState } from '#imports'
 import { ACCESS_KEY, CHALLENGE_KEY, CONFIRMATION_KEY, CONFIRMED_KEY, READY_KEY, RESTORE_FAILED_KEY, USER_KEY } from '../keys'
 import { isAuthRejection } from '../shared'
+import { clearPendingLogout, notePendingLogout, signedInSince } from '../utils/pending-logout'
 import { acrossTabs, restoreState, settleRefresh, signIn } from '../utils/restore-state'
 import { tokenSubject } from '../utils/token-subject'
 import { isPrematureWait, whenReady as settled } from '../utils/when-ready'
@@ -194,13 +195,72 @@ export function useLukkAuth(): LukkAuth {
   }
 
   async function logout(): Promise<void> {
-    const ending = acrossTabs(nuxtApp, endAndClear)
+    // Until the logout request itself is on the wire it waits — for another tab's lock, for a refresh
+    // already out. A page that navigates away in that moment cancelled it, and the session outlived what
+    // the user saw. So if the page starts to unload first, send it right away with `keepalive` (which
+    // outlives the page) and skip the ordering: the page is leaving, and ending the session wins.
+    //
+    // `pagehide` and a `visibilitychange` to hidden both count: iOS Safari doesn't reliably fire
+    // `pagehide` for a backgrounded tab it later kills, and the user has already asked to log out.
+    // Sending early skips the cross-tab lock — in direct mode a sign-in in another tab at that very moment
+    // can lose its cookie — which is the smaller loss than a logout that never happened.
+    // And a note the next page finishes it from, should this page be gone before it completes.
+    //
+    //
+    // Unless this call FINISHES a logout an earlier page noted (the restore plugin says so). That one
+    // keeps its note as it was — re-stamping moved it past sign-ins sent since, and renewed its minute on
+    // every reload while it kept failing — and stands down if a sign-in was sent after it, in any tab:
+    // sending would end that newer session. Only a recorded sign-in, never a note that's gone: one that
+    // aged out or another logout cleared still has a session to end. Any other call is a new logout.
+    const finishing = state.finishingLogout
+    state.finishingLogout = undefined
+    const moot = () => finishing !== undefined && signedInSince(state.scope, finishing)
+    if (import.meta.client && finishing === undefined) notePendingLogout(state.scope)
+
+    let early: Promise<boolean> | null = null
+    let sentInOrder = false
+    const leaving = () => {
+      if (early || sentInOrder || moot()) return
+      early = $lukk.logout({ retry: false }).then(() => true, () => false)
+    }
+    const hidden = () => {
+      if (document.visibilityState === 'hidden') leaving()
+    }
+    const page = import.meta.client && typeof window !== 'undefined' && typeof window.addEventListener === 'function' ? window : undefined
+    const doc = page && typeof document !== 'undefined' ? document : undefined
+    page?.addEventListener('pagehide', leaving)
+    doc?.addEventListener('visibilitychange', hidden)
+
+    const ending = acrossTabs(nuxtApp, () => endAndClear(async () => {
+      // Sent on the way out: send it again only if that attempt failed — a page restored from the
+      // back/forward cache resumes here, and a lost early send would otherwise leave the session live.
+      // A sign-in sent after the logout this finishes comes first, even over a failed early send: resending
+      // would end that newer session.
+      if (moot()) return false
+      if (early) return !(await early)
+      sentInOrder = true
+      return true
+    }))
     state.ending = ending
-    try { await ending }
-    finally { if (state.ending === ending) state.ending = null }
+    try {
+      await ending
+      clearPendingLogout(state.scope)
+    }
+    catch (error) {
+      // No session left to end: done. Anything else may have left it live — keep the note, so the next
+      // page load in this tab tries again.
+      if ((error as { status?: number } | null)?.status === 401) clearPendingLogout(state.scope)
+      throw error
+    }
+    finally {
+      page?.removeEventListener('pagehide', leaving)
+      doc?.removeEventListener('visibilitychange', hidden)
+      if (state.ending === ending) state.ending = null
+    }
   }
 
-  async function endAndClear(): Promise<void> {
+  /** `claimSend` says whether this logout should still send its request — not when the page already did. */
+  async function endAndClear(claimSend: () => Promise<boolean>): Promise<void> {
     try {
       // Let a refresh already on the wire finish first, so its cookie cannot land after logout cleared
       // the session — and so the logout itself carries the token it just minted.
@@ -209,7 +269,8 @@ export function useLukkAuth(): LukkAuth {
       // not write its result after this.
       state.epoch++
       state.logouts++
-      await endSession()
+      // Unless the page already sent it on its way out.
+      if (await claimSend()) await endSession()
     }
     finally {
       // Once more: the renewal inside `endSession` can itself start a user reload, which captured the
