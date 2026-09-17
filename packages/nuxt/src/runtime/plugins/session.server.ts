@@ -58,6 +58,8 @@ export default defineNuxtPlugin({
     // restores with the cookie the browser now holds instead of showing the account that just left.
     if (hydratedSessionEnded(event)) {
       useState(USER_KEY, () => null).value = null
+      // Now, not only in the render hooks: with streaming the headers are already out by then.
+      withholdIfReplaced(event)
       return
     }
 

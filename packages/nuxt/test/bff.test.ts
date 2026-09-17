@@ -27,7 +27,7 @@ vi.mock('h3', () => ({
 // eslint-disable-next-line import/first
 import handler from '../src/runtime/server/bff'
 // eslint-disable-next-line import/first
-import { forgetEndedSessions } from '../src/runtime/server/ended-sessions'
+import { forgetEndedSessions, markSessionEnded } from '../src/runtime/server/ended-sessions'
 
 interface TokenSession { access?: string, refresh?: string, confirmation?: string, sid?: string }
 
@@ -42,7 +42,13 @@ function makeSession(initial: TokenSession = {}, id = 'sid') {
 }
 
 function makeEvent(o: { path: string, method?: string, body?: string, headers?: Record<string, string>, session: ReturnType<typeof makeSession>, cookiePresent?: boolean, sealTampered?: boolean, sealNoData?: boolean }) {
-  return { path: o.path, method: o.method ?? 'GET', body: o.body, headers: o.headers ?? {}, ip: '203.0.113.7', __session: o.session, __cookiePresent: o.cookiePresent ?? true, __sealTampered: o.sealTampered ?? false, __sealNoData: o.sealNoData ?? false, status: 200 }
+  const responseHeaders = new Map<string, unknown>()
+  const res = {
+    getHeader: (k: string) => responseHeaders.get(k),
+    setHeader: (k: string, v: unknown) => { responseHeaders.set(k, v) },
+    removeHeader: (k: string) => { responseHeaders.delete(k) },
+  }
+  return { path: o.path, method: o.method ?? 'GET', body: o.body, headers: o.headers ?? {}, ip: '203.0.113.7', __session: o.session, __cookiePresent: o.cookiePresent ?? true, __sealTampered: o.sealTampered ?? false, __sealNoData: o.sealNoData ?? false, status: 200, node: { res } }
 }
 
 function jsonRes(body: unknown, status = 200): Response {
@@ -580,6 +586,71 @@ describe('a session replaced or ended while a refresh for it was out', () => {
     const event = post('/refresh', later)
     await run(event)
     expect(event.status).toBe(200)
+  })
+
+  it('withholds a re-sealed cookie when the session ends while the retried response body is still being read', async () => {
+    const refreshing = makeSession({ access: 'A', refresh: 'rA', sid: 'session-A' } as TokenSession)
+    let finishBody!: () => void
+    const slowBody = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"passkeys":'))
+        finishBody = () => { controller.enqueue(new TextEncoder().encode('[]}')); controller.close() }
+      },
+    })
+    let calls = 0
+    mockFetch().fetch = vi.fn(async (url: string) => {
+      if (String(url).endsWith('/refresh')) return jsonRes({ access_token: 'A2', refresh_token: 'rA2', expires_in: 900 })
+      if (String(url).endsWith('/logout')) return jsonRes(null, 204)
+      return ++calls === 1 ? jsonRes({ message: 'Unauthenticated.' }, 401) : new Response(slowBody, { status: 200 })
+    })
+    const event = makeEvent({ path: '/api/_lukk/passkeys', session: refreshing })
+    refreshing.update.mockImplementation(async (d: TokenSession) => {
+      Object.assign(refreshing.data, d)
+      event.node.res.setHeader('set-cookie', ['__Host-lukk-session=RESEALED', 'other=1'])
+    })
+
+    const pending = run(event)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(refreshing.update).toHaveBeenCalled() // sealed before the body was read
+    await run(post('/logout', makeSession({ access: 'A', refresh: 'rA', sid: 'session-A' } as TokenSession)))
+    finishBody()
+
+    expect(await pending).toEqual({ passkeys: [] })
+    expect(event.node.res.getHeader('set-cookie')).toEqual(['other=1'])
+  })
+
+  it('withholds a /refresh re-seal when the session ends while that write is being made', async () => {
+    const refreshing = makeSession({ access: 'A', refresh: 'rA', sid: 'session-A' } as TokenSession)
+    mockFetch().fetch = vi.fn(async () => jsonRes({ access_token: 'A2', refresh_token: 'rA2', expires_in: 900 }))
+    const event = post('/refresh', refreshing)
+    refreshing.update.mockImplementation(async (d: TokenSession) => {
+      Object.assign(refreshing.data, d)
+      event.node.res.setHeader('set-cookie', '__Host-lukk-session=RESEALED')
+      markSessionEnded('session-A') // a sign-in elsewhere lands during the write
+    })
+
+    expect(await run(event)).toEqual({ message: 'The session was replaced.' })
+    expect(event.status).toBe(409)
+    expect(event.node.res.getHeader('set-cookie')).toBeUndefined()
+  })
+
+  it('still renews an ended session on logout, so lukk revokes it — without writing it back', async () => {
+    // After a lost sign-in response the browser keeps the replaced session. Skipping the refresh on its
+    // expired token meant no authenticated /logout ever reached lukk, and the family stayed alive.
+    markSessionEnded('session-A')
+    const ending = makeSession({ access: 'A-expired', refresh: 'rA', sid: 'session-A' } as TokenSession)
+    const bearers: (string | undefined)[] = []
+    mockFetch().fetch = vi.fn(async (url: string, init?: { headers?: Record<string, string> }) => {
+      if (String(url).endsWith('/refresh')) return jsonRes({ access_token: 'A2', refresh_token: 'rA2', expires_in: 900 })
+      bearers.push(init?.headers?.Authorization)
+      return init?.headers?.Authorization === 'Bearer A2' ? jsonRes(null, 204) : jsonRes({ message: 'Unauthenticated.' }, 401)
+    })
+
+    await run(post('/logout', ending))
+
+    expect(bearers).toEqual(['Bearer A-expired', 'Bearer A2'])
+    expect(ending.update).not.toHaveBeenCalled()
+    expect(ending.clear).toHaveBeenCalled()
   })
 
   it('gives every sign-in a new session id, and leaves a session that was never signed in unmarked', async () => {

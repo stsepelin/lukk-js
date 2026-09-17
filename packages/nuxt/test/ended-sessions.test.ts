@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { ENDED_SESSION_LIMIT, ENDED_SESSION_TTL_MS, forgetEndedSessions, isSessionEnded, markSessionEnded, newSessionId, sessionKey } from '../src/runtime/server/ended-sessions'
+import { ENDED_SESSION_LIMIT, ENDED_SESSION_TTL_MS, endedSessionCount, forgetEndedSessions, isSessionEnded, markSessionEnded, newSessionId, sessionKey } from '../src/runtime/server/ended-sessions'
 
 afterEach(() => forgetEndedSessions())
 
@@ -29,6 +29,26 @@ describe('ended sessions', () => {
 
     expect(isSessionEnded('old', ENDED_SESSION_TTL_MS + 1)).toBe(true)
     expect(isSessionEnded('kept', ENDED_SESSION_TTL_MS + 1)).toBe(true)
+  })
+
+  it('actually removes expired entries, not just reports them as expired', () => {
+    markSessionEnded('a', 0)
+    markSessionEnded('b', 1)
+
+    markSessionEnded('c', ENDED_SESSION_TTL_MS + 0.5) // a has expired, b has not
+
+    expect(endedSessionCount()).toBe(2)
+  })
+
+  it('keeps expiry order when an entry is re-marked, so an expired one behind it is still pruned', () => {
+    markSessionEnded('a', 0)
+    markSessionEnded('b', 1)
+    markSessionEnded('a', 2) // must move behind b; left in place, a would stop the prune before b
+
+    markSessionEnded('c', ENDED_SESSION_TTL_MS + 1.5) // b expired, a not
+
+    expect(endedSessionCount()).toBe(2)
+    expect(isSessionEnded('a', ENDED_SESSION_TTL_MS + 1.5)).toBe(true)
   })
 
   it('stays bounded whatever the sign-in rate, dropping the oldest first', () => {

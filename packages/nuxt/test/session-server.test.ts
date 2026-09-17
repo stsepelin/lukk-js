@@ -75,11 +75,14 @@ describe('session.server (BFF SSR hydration)', () => {
       useState(USER_KEY, () => null).value = { id: 'A' }
     })
     hydratedSessionEnded.mockReturnValueOnce(true)
+    const nuxtApp = app()
 
-    await run(app())
+    await run(nuxtApp)
 
     expect(useState(USER_KEY, () => null).value).toBeNull()
     expect(useState(READY_KEY, () => false).value).toBe(false)
+    // Withheld right away, before any render hook — a streamed render sends headers before those run.
+    expect(withholdIfReplaced).toHaveBeenCalledWith(nuxtApp.ssrContext.event)
   })
 
   it('seeds the user and marks the render no-store when a usable access token is resolved', async () => {

@@ -4,7 +4,7 @@ import { defineEventHandler, getCookie, getRequestHeader, readRawBody, setRespon
 import { useRuntimeConfig } from '#imports'
 import { LUKK_BFF_PREFIX, confirmationHeaderName, sessionCookieName } from '../shared'
 import { isForeignOrigin, rejectUnresolvedTarget, resolveTarget, viaHeader, visitorIp } from './proxy-utils'
-import { isSessionEnded, markSessionEnded, newSessionId, sessionKey } from './ended-sessions'
+import { isSessionEnded, markSessionEnded, newSessionId, sessionKey, withholdSessionCookie } from './ended-sessions'
 import { readSealedSession } from './sealed-session'
 import { warnIfSessionTooLarge } from './session-size'
 import { refreshOnce, type TokenSession } from './utils/refresh'
@@ -129,6 +129,10 @@ export default defineEventHandler(async (event) => {
 
     await s.update(pair)
     warnIfSessionTooLarge(s)
+    if (isSessionEnded(sessionKey(s))) {
+      withholdSessionCookie(event.node.res, sessionName)
+      return replaced()
+    }
 
     // The same shape the proxied token-pair capture returns — the browser never sees a token.
     return { ok: true, expires_in: expiresIn }
@@ -143,10 +147,13 @@ export default defineEventHandler(async (event) => {
     // A session a sign-in replaced or a logout ended is neither rotated nor written — before the
     // refresh or after it — and the 401 goes back as it came. See the `/refresh` branch above.
     const ended = () => isSessionEnded(sessionKey(s))
+    // Except for a logout: it still renews an ended session's token — never writing it back — so that
+    // lukk actually revokes it. Skipping it left a replaced session's family alive after the logout.
+    const endingIt = subpath === '/logout'
 
-    if (!ended()) {
+    if (!ended() || endingIt) {
       const { pair, retryable } = await refreshOnce(s, baseURL, clientIp)
-      if (pair && !ended()) {
+      if (pair && (!ended() || endingIt)) {
         currentRefresh = pair.refresh
         // Seal AFTER the retried call, so a sign-in or logout during it is still seen — the response
         // carries this cookie only once that call is done. In `finally`: the refresh token has been
@@ -176,6 +183,10 @@ export default defineEventHandler(async (event) => {
 
   const text = await res.text()
   const data: unknown = text ? safeParse(text) : undefined
+
+  // Reading the body can take as long as the upstream likes. A session re-sealed above that a sign-in or
+  // logout ended meanwhile must not leave with this response — the last point before it does.
+  if (rwSession && isSessionEnded(sessionKey(await rwSession))) withholdSessionCookie(event.node.res, sessionName)
 
   // Capture + strip minted tokens. Login / 2FA / passkey login / register only — `/refresh` is
   // served above and returns before reaching here, which is why wiping `confirmation` below is safe:

@@ -7,7 +7,8 @@ import { shallowRef, useState } from '#imports'
  *
  * `ready` is ALSO kept in `useState` — that is how the server hands "I hydrated a user" to the client
  * through the payload. But `useState` is the documented target of `clearNuxtState()`, a common logout
- * idiom: it resets the key (Nuxt 3 to `undefined`, Nuxt 4 deletes it), nothing sets it again, and every
+ * idiom: it resets the key (Nuxt 3 to `undefined`; Nuxt 4 deletes it, or with `resetOnClear` puts it back to
+ * its initial `false`), nothing sets it to `true` again, and every
  * later `whenReady()` hung. The restore has happened once per app, so the app is where that fact lives.
  */
 export interface RestoreState {
@@ -26,6 +27,11 @@ export interface RestoreState {
   logouts: number
   /** The refresh in flight, if any. Written by the client plugin's single-flight. */
   refreshing: Promise<unknown> | null
+  /**
+   * Direct mode: the `sub` of the access token the displayed user was loaded with. A refresh that comes
+   * back for a different subject means the tab is showing one account while acting as another.
+   */
+  subject?: string
   /**
    * A sign-in or logout request on the wire, if any. A refresh that starts meanwhile waits for it: sent
    * alongside, it renews the session that request is replacing or ending — see `signIn`.
@@ -89,6 +95,10 @@ export async function signIn<T>(nuxtApp: object, send: () => Promise<T>, startsS
   await settleRefresh(nuxtApp)
 
   const state = restoreState(nuxtApp)
+  // And for a logout still on the wire: its cleanup — and the cleared cookie its response carries —
+  // would otherwise land after this sign-in succeeded, leaving the visitor signed out and the new
+  // session alive upstream with nothing pointing at it.
+  await settle(state.handover)
   const logouts = state.logouts
 
   const request = send().then((result) => {

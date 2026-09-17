@@ -131,7 +131,12 @@ export function createLukkClient(hooks: LukkClientHooks) {
     refreshTokens: (refresh_token?: string) => request<TokenPair>('/refresh', json(refresh_token ? { refresh_token } : {}), false),
     /** Silently restore a session on app load (returns null when there's no valid refresh). */
     restore: () => request<TokenPair>('/refresh', json({}), false).then(commit).catch(() => null as TokenPair | null),
-    logout: () => request<void>('/logout', { method: 'POST' }),
+    /**
+     * End the session. `retry: false` skips the refresh-and-retry on a 401, for a binding that renews
+     * the token itself: one that holds refreshes back while a logout is on the wire would otherwise
+     * have that refresh wait on the very logout waiting for it.
+     */
+    logout: (options: { retry?: boolean } = {}) => request<void>('/logout', { method: 'POST' }, options.retry ?? true),
     revokeAllSessions: () => request<void>('/sessions', { method: 'DELETE' }),
     revokeOtherSessions: () => request<void>('/sessions/others', { method: 'DELETE' }),
 

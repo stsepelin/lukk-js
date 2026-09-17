@@ -27,7 +27,7 @@ import clientPlugin, { REPLACED_SESSION_RETRY_DELAY_MS } from '../src/runtime/pl
 // eslint-disable-next-line import/first
 import sessionPlugin from '../src/runtime/plugins/session.client'
 
-afterEach(() => { __test.reset(); captured.hooks = undefined; loggedIn.value = false; user.value = null; vi.clearAllMocks() })
+afterEach(() => { __test.reset(); captured.hooks = undefined; loggedIn.value = false; user.value = null; vi.clearAllMocks(); vi.useRealTimers() })
 
 describe('client plugin', () => {
   it('targets the lukk URL in direct mode and wires the token hooks', async () => {
@@ -136,7 +136,6 @@ describe('client plugin — $lukkRestore', () => {
 
     await expect(restoring).resolves.toEqual({ pair: { access_token: 'fresh', expires_in: 900 }, unavailable: false })
     expect(captured.client!.refreshTokens).toHaveBeenCalledTimes(2)
-    vi.useRealTimers()
   })
 
   it('reports a second replaced answer as signed out — a retry could never succeed — and stops there', async () => {
@@ -153,7 +152,6 @@ describe('client plugin — $lukkRestore', () => {
 
     await expect(restoring).resolves.toEqual({ pair: null, unavailable: false })
     expect(captured.client!.refreshTokens).toHaveBeenCalledTimes(2)
-    vi.useRealTimers()
   })
 
   it('shares ONE refresh with $lukkRefresh, so a restore cannot replay the rotating token', async () => {
@@ -269,6 +267,36 @@ describe('keeping abilities in step with a refreshed token', () => {
     user.value = {}
     const { provide } = boot()
 
+    await provide.lukkRefresh()
+    await Promise.resolve()
+
+    expect(fetchUser).not.toHaveBeenCalled()
+  })
+
+  it('reloads the user when the refreshed token belongs to a different account than the one on screen', async () => {
+    // Another tab signed in, or a refresh outlived this tab's handover: the shared refresh cookie now
+    // belongs to someone else, and without this the tab kept one account's name while acting as another.
+    const token = (sub: string) => `h.${Buffer.from(JSON.stringify({ sub })).toString('base64url')}.s`
+    user.value = {} // an app that does not use abilities
+    restoreState(__test.nuxtApp).subject = 'A'
+    const { provide } = boot()
+
+    captured.client!.refreshTokens.mockResolvedValueOnce({ access_token: token('A'), expires_in: 900 })
+    await provide.lukkRefresh()
+    await Promise.resolve()
+    expect(fetchUser).not.toHaveBeenCalled()
+
+    captured.client!.refreshTokens.mockResolvedValueOnce({ access_token: token('B'), expires_in: 900 })
+    await provide.lukkRefresh()
+    await Promise.resolve()
+    expect(fetchUser).toHaveBeenCalledOnce()
+  })
+
+  it('does not treat an unknown subject as a switch', async () => {
+    user.value = {}
+    const { provide } = boot() // no subject recorded (BFF, or a token without `sub`)
+
+    captured.client!.refreshTokens.mockResolvedValueOnce({ access_token: `h.${Buffer.from('{"sub":"B"}').toString('base64url')}.s`, expires_in: 900 })
     await provide.lukkRefresh()
     await Promise.resolve()
 

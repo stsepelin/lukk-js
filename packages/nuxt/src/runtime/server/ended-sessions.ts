@@ -77,3 +77,8 @@ export function isSessionEnded(key: string | undefined, now = Date.now()): boole
 export function forgetEndedSessions(): void {
   ended.clear()
 }
+
+/** Test seam: how many entries are held — pruning is only observable through this. */
+export function endedSessionCount(): number {
+  return ended.size
+}

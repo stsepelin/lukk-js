@@ -14,12 +14,14 @@ const getCookie = vi.fn(() => cookieValue)
 const unsealSession = vi.fn(async () => { if (unsealThrows) throw new Error('bad seal'); return unsealResult })
 const useSession = vi.fn(async () => sessionObj)
 const sealSession = vi.fn(async () => 'FRESH_SEAL')
+const setResponseHeader = vi.fn()
 
 vi.mock('h3', () => ({
   getCookie: (...a: unknown[]) => getCookie(...a),
   unsealSession: (...a: unknown[]) => unsealSession(...a),
   useSession: (...a: unknown[]) => useSession(...a),
   sealSession: (...a: unknown[]) => sealSession(...a),
+  setResponseHeader: (...a: unknown[]) => setResponseHeader(...a),
   getRequestHeader: (event: { headers?: Record<string, string> }, name: string) => event.headers?.[name],
 }))
 
@@ -228,8 +230,19 @@ describe('resolveHydrationAccess', () => {
       // The tab would show that account while every call it makes acts as the newer session.
       unsealResult = { data: { access: freshJwt(), refresh: 'r', sid: 'session-A' } }
       markSessionEnded('session-A')
+      const event = ev()
 
-      expect(await resolveHydrationAccess(ev())).toBeNull()
+      expect(await resolveHydrationAccess(event)).toBeNull()
+      // Still per-user: components fetching during SSR render its data through the app-API proxy.
+      expect(setResponseHeader).toHaveBeenCalledWith(event, 'cache-control', 'no-store')
+    })
+
+    it('marks nothing no-store for a visitor with no session', async () => {
+      unsealResult = { data: {} }
+
+      await resolveHydrationAccess(ev())
+
+      expect(setResponseHeader).not.toHaveBeenCalled()
     })
 
     it('is reported ended when that happens during the render, for a fresh and a re-sealed token alike', async () => {
@@ -250,7 +263,7 @@ describe('resolveHydrationAccess', () => {
       refreshOnce.mockResolvedValue({ pair: { access: 'NEW_ACCESS', refresh: 'r2' }, retryable: false })
       const event = ev()
       await resolveHydrationAccess(event)
-      event.node.res.setHeader('set-cookie', ['__Host-lukk-session=RESEALED; Path=/', 'locale=en; Path=/'])
+      event.node.res.setHeader('set-cookie', ['__Host-lukk-session=RESEALED; Path=/', 'locale=en; Path=/', '__Host-lukk-session-other=1; Path=/'])
       return event
     }
 
@@ -260,7 +273,8 @@ describe('resolveHydrationAccess', () => {
 
       withholdIfReplaced(event)
 
-      expect(event.node.res.getHeader('set-cookie')).toEqual(['locale=en; Path=/'])
+      // Only this app's cookie — not a co-hosted app's whose name merely starts the same way.
+      expect(event.node.res.getHeader('set-cookie')).toEqual(['locale=en; Path=/', '__Host-lukk-session-other=1; Path=/'])
     })
 
     it('removes the header entirely when the session cookie was the only one', async () => {
@@ -278,7 +292,24 @@ describe('resolveHydrationAccess', () => {
 
       withholdIfReplaced(event)
 
-      expect(event.node.res.getHeader('set-cookie')).toHaveLength(2)
+      expect(event.node.res.getHeader('set-cookie')).toHaveLength(3)
+    })
+
+    it('leaves a response that has already started alone — a streamed render runs the hooks too late', async () => {
+      const event = await resealed()
+      markSessionEnded('sid')
+      ;(event.node.res as unknown as { headersSent: boolean }).headersSent = true
+
+      expect(() => withholdIfReplaced(event)).not.toThrow()
+      expect(event.node.res.getHeader('set-cookie')).toHaveLength(3)
+    })
+
+    it('does not throw when the response starts between the check and the write', async () => {
+      const event = await resealed()
+      markSessionEnded('sid')
+      event.node.res.setHeader = () => { throw new Error('ERR_HTTP_HEADERS_SENT') }
+
+      expect(() => withholdIfReplaced(event)).not.toThrow()
     })
 
     it('does nothing for a render that re-sealed nothing, or queued no cookie', async () => {

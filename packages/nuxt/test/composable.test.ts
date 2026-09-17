@@ -149,6 +149,24 @@ describe('useLukkAuth', () => {
     expect(user.value).toEqual({ id: 1 })
   })
 
+  it('records which account the loaded user belongs to, and forgets it on sign-out', async () => {
+    const token = `h.${Buffer.from('{"sub":"7"}').toString('base64url')}.s`
+    withApp({ logout: vi.fn().mockResolvedValue(undefined) })
+    useState<string | null>('lukk:access', () => null).value = token
+    const { fetchUser, logout } = useLukkAuth()
+
+    await fetchUser()
+    expect(restoreState(__test.nuxtApp).subject).toBe('7')
+
+    api.mockRejectedValueOnce({ statusCode: 401 })
+    await fetchUser()
+    expect(restoreState(__test.nuxtApp).subject).toBeUndefined()
+
+    await fetchUser()
+    await logout()
+    expect(restoreState(__test.nuxtApp).subject).toBeUndefined()
+  })
+
   it('logout clears state on success', async () => {
     withApp({ logout: vi.fn().mockResolvedValue(undefined) })
     const { user, logout } = useLukkAuth()

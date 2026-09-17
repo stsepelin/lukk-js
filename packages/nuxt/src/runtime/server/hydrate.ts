@@ -1,5 +1,5 @@
 import type { H3Event } from 'h3'
-import { sealSession, useSession } from 'h3'
+import { sealSession, setResponseHeader, useSession } from 'h3'
 import { useRuntimeConfig } from '#imports'
 import { sessionCookieName } from '../shared'
 import { accessExpired } from './access-token'
@@ -54,6 +54,11 @@ export async function resolveHydrationAccess(event: H3Event): Promise<string | n
   const access = sealed.access
   if (!access) return null
 
+  // Any request carrying a real session is per-user, whether or not this render ends up hydrating it:
+  // components that fetch during SSR without gating on `ready` still render that account's data (the
+  // app-API proxy serves a still-valid token), and a shared cache must not store the page.
+  setResponseHeader(event, 'cache-control', 'no-store')
+
   // A session a sign-in replaced or a logout ended is not rendered as signed in, even with a token still
   // valid: the tab would show that account while every call it makes acts as the newer session. The
   // client restores with the cookie the browser now holds. (A seal from before `sid` existed can only
@@ -105,7 +110,14 @@ export async function resolveHydrationAccess(event: H3Event): Promise<string | n
  */
 export function withholdIfReplaced(event: H3Event): void {
   const hydrated = hydratedSession(event)
-  if (hydrated && isSessionEnded(hydrated.key)) withholdSessionCookie(event.node.res, hydrated.name)
+  if (!hydrated || !isSessionEnded(hydrated.key)) return
+
+  // Too late once the headers are out — a streamed render (Nuxt's `ssrStreaming`) calls the render
+  // hooks after the response has started, and touching a sent header throws. The plugin's own check
+  // right after the user load covers that case while the headers are still open.
+  if (event.node.res.headersSent) return
+  try { withholdSessionCookie(event.node.res, hydrated.name) }
+  catch { /* the response started meanwhile; nothing left to withhold */ }
 }
 
 /** Did a sign-in or logout end the session this render hydrated, while it was rendering? */

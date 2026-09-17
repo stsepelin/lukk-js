@@ -450,6 +450,112 @@ describe('onUnauthenticated after a superseded refresh', () => {
   })
 })
 
+describe('gaps found by mutation testing', () => {
+  it('clears a dead token after a sign-in, not only in the first session generation', async () => {
+    // The flight must record the generation it runs in; frozen at the first, `onUnauthenticated` kept a
+    // rejected token after any sign-in.
+    boot()
+    const auth = useLukkAuth()
+    await auth.login({ email: 'b', password: 'p' })
+    expect(access()).toBe('B')
+
+    wire.client.refreshTokens!.mockRejectedValueOnce({ status: 401 })
+    expect(await (__test.nuxtApp as { $lukkRefresh: () => Promise<unknown> }).$lukkRefresh()).toBeNull()
+    wire.hooks!.onUnauthenticated()
+
+    expect(access()).toBeNull()
+  })
+
+  it('a finished sign-in does not release a refresh held for a logout that is still out', async () => {
+    const loginResponse = deferred<void>()
+    const logoutResponse = deferred<void>()
+    wire.client.login!.mockImplementationOnce(slowSignIn('B', loginResponse.promise, () => { throw { status: 422 } }))
+    wire.client.logout!.mockImplementationOnce(async () => { await logoutResponse.promise })
+    boot()
+    const auth = useLukkAuth()
+
+    const signingIn = auth.login({ email: 'b', password: 'p' }).catch(() => {})
+    await macrotask()
+    const loggingOut = auth.logout()
+    await macrotask()
+    loginResponse.resolve()
+    await signingIn
+
+    const refreshing = (__test.nuxtApp as { $lukkRefresh: () => Promise<unknown> }).$lukkRefresh()
+    await macrotask()
+    expect(wire.client.refreshTokens).not.toHaveBeenCalled()
+
+    logoutResponse.resolve()
+    await Promise.all([loggingOut, refreshing])
+  })
+
+  it('a finished logout does not release a refresh held for a sign-in that is still out', async () => {
+    // Reachable when the sign-in stopped waiting for a slow logout (the settle cap) and went out first.
+    vi.useFakeTimers()
+    const logoutResponse = deferred<void>()
+    const loginResponse = deferred<void>()
+    wire.client.logout!.mockImplementationOnce(async () => { await logoutResponse.promise })
+    wire.client.login!.mockImplementationOnce(slowSignIn('B', loginResponse.promise))
+    userEndpoint()
+    boot()
+    const auth = useLukkAuth()
+
+    const loggingOut = auth.logout()
+    await vi.advanceTimersByTimeAsync(0)
+    const signingIn = auth.login({ email: 'b', password: 'p' })
+    await vi.advanceTimersByTimeAsync(REFRESH_SETTLE_TIMEOUT)
+    expect(wire.client.login).toHaveBeenCalledOnce() // gave up waiting; now on the wire
+    logoutResponse.resolve()
+    await loggingOut
+
+    const refreshing = (__test.nuxtApp as { $lukkRefresh: () => Promise<unknown> }).$lukkRefresh()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(wire.client.refreshTokens).not.toHaveBeenCalled()
+
+    loginResponse.resolve()
+    await vi.advanceTimersByTimeAsync(0)
+    await Promise.all([signingIn, refreshing])
+  })
+
+  it('a sign-in waits for a logout still on the wire, so the logout cannot sign the new session out', async () => {
+    // The logout's cleanup and the cleared cookie in its response landed after the login succeeded.
+    const logoutResponse = deferred<void>()
+    wire.client.logout!.mockImplementationOnce(async () => { await logoutResponse.promise })
+    userEndpoint()
+    boot()
+    const auth = useLukkAuth()
+
+    const loggingOut = auth.logout()
+    await macrotask()
+    const signingIn = auth.login({ email: 'b', password: 'p' })
+    await macrotask()
+    expect(wire.client.login).not.toHaveBeenCalled()
+
+    logoutResponse.resolve()
+    await Promise.all([loggingOut, signingIn])
+
+    expect(wire.client.login).toHaveBeenCalledOnce()
+    expect(auth.user.value).toEqual({ id: 'B' })
+    expect(access()).toBe('B')
+  })
+
+  it('a registration answered with a two-factor challenge leaves a restore in progress alone', async () => {
+    const slowA = deferred<void>()
+    userEndpoint({ A: slowA.promise })
+    boot()
+    wire.client.register!.mockResolvedValueOnce({ two_factor: true, challenge_token: 'c' })
+    const auth = useLukkAuth()
+
+    const restoring = auth.initSession()
+    await macrotask()
+    await auth.register({ email: 'b', password: 'p', password_confirmation: 'p' })
+    slowA.resolve()
+    await restoring
+
+    expect(auth.user.value).toEqual({ id: 'A' })
+  })
+})
+
 describe('after clearNuxtState()', () => {
   it('reads as signed out with nothing pending or failed, not the opposite', () => {
     // Nuxt 3 leaves each key `undefined`; a strict `!== null` read that as signed in with a challenge.

@@ -4,6 +4,7 @@ import { useLukkAuth } from '../composables/useLukkAuth'
 import { ACCESS_KEY, CONFIRMATION_KEY } from '../keys'
 import { confirmationHeaderName, isAuthRejection, LUKK_BFF_PREFIX } from '../shared'
 import { restoreState, settle } from '../utils/restore-state'
+import { tokenSubject } from '../utils/token-subject'
 
 /**
  * A refresh that finished after the session it belonged to had ended or been replaced. Thrown, not
@@ -95,13 +96,23 @@ export default defineNuxtPlugin({
     // feature pays nothing — and only on the client, since a server render reloads the user itself
     // (`plugins/session.server.ts`). Fire-and-forget: a UI hint must not delay the request that
     // triggered the refresh.
+    //
+    // Also fires, whatever the app uses, when the refreshed token belongs to a DIFFERENT account than the
+    // user on screen (direct mode, where the token is readable). The refresh cookie is shared by every tab
+    // and outlives this tab's handover: another tab's sign-in, or a refresh slower than the handover cap,
+    // leaves a cookie for another account — and the next refresh silently acted as that account under the
+    // previous one's name.
     let resyncing = false
 
-    async function resyncAbilities(): Promise<void> {
+    async function resyncUser(pair: TokenPair): Promise<void> {
       const { user, fetchUser } = useLukkAuth()
+      if (resyncing || user.value == null) return
+
+      const subject = tokenSubject(pair.access_token)
+      const switched = subject !== undefined && state.subject !== undefined && subject !== state.subject
 
       // `resyncing` breaks the cycle where `fetchUser`'s own 401 refreshes again and re-enters here.
-      if (resyncing || user.value?.abilities === undefined) return
+      if (!switched && user.value.abilities === undefined) return
 
       resyncing = true
       try { await fetchUser() }
@@ -111,7 +122,7 @@ export default defineNuxtPlugin({
     // A throwing refresh means "not refreshable" → null (the documented contract).
     const safeRefresh = () => refresh()
       .then((pair) => {
-        if (import.meta.client) void resyncAbilities().catch(() => {})
+        if (import.meta.client) void resyncUser(pair).catch(() => {})
         return pair
       })
       .catch((error: unknown) => {

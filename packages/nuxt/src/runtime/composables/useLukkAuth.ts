@@ -4,6 +4,7 @@ import { computed, useNuxtApp, useRuntimeConfig, useState } from '#imports'
 import { ACCESS_KEY, CHALLENGE_KEY, CONFIRMATION_KEY, CONFIRMED_KEY, READY_KEY, RESTORE_FAILED_KEY, USER_KEY } from '../keys'
 import { isAuthRejection } from '../shared'
 import { restoreState, settleRefresh, signIn } from '../utils/restore-state'
+import { tokenSubject } from '../utils/token-subject'
 import { isPrematureWait, whenReady as settled } from '../utils/when-ready'
 import type { RestoreOutcome } from '../plugins/client'
 import { useLukkFetch } from './useLukkFetch'
@@ -61,7 +62,7 @@ export function useLukkAuth(): LukkAuth {
   const confirmation = useState<string | null>(CONFIRMATION_KEY, () => null)
   const confirmed = useState<boolean>(CONFIRMED_KEY, () => false)
 
-  // Loose `!= null`: `clearNuxtState()` leaves these keys `undefined` (Nuxt 3) or deleted (Nuxt 4), and
+  // Loose `!= null`: `clearNuxtState()` leaves these keys `undefined` (Nuxt 3) or deletes them (Nuxt 4 without `resetOnClear`), and
   // a strict check read that as signed in with a pending challenge.
   const loggedIn = computed(() => user.value != null)
   const pendingTwoFactor = computed(() => challenge.value != null)
@@ -202,7 +203,7 @@ export function useLukkAuth(): LukkAuth {
       state.epoch++
       state.logouts++
       // Published like a sign-in, so a refresh starting while this is out waits for the cookie to clear.
-      const request = $lukk.logout()
+      const request = endSession()
       state.handover = request
       try { await request }
       finally { if (state.handover === request) state.handover = null }
@@ -210,10 +211,40 @@ export function useLukkAuth(): LukkAuth {
     finally {
       access.value = null
       user.value = null
+      state.subject = undefined
       restoreFailedFlag.value = false
       challenge.value = null
       confirmation.value = null
       confirmed.value = false
+    }
+  }
+
+  /**
+   * Send the logout, renewing an expired access token once if lukk rejects it.
+   *
+   * Not lukk-core's own refresh-and-retry: this request is published as the handover, and a refresh
+   * waits for the handover — so core's refresh waited on the logout that was waiting for it, and every
+   * logout with an expired token (an idle user, an erased account) hung for the full settle timeout.
+   *
+   * The renewal still costs a round trip before the retry. A page that navigates away without awaiting
+   * `logout()` can cancel it — then lukk never revokes the session. Await it before navigating.
+   */
+  async function endSession(): Promise<void> {
+    try {
+      await $lukk.logout({ retry: false })
+    }
+    catch (error) {
+      if ((error as { status?: number } | null)?.status !== 401) throw error
+
+      // Release this logout's own hold for the renewal, and restore it for the retry.
+      const own = state.handover
+      state.handover = null
+      let renewed: unknown
+      try { renewed = await (nuxtApp as { $lukkRefresh?: () => Promise<unknown> }).$lukkRefresh?.() }
+      finally { state.handover = own }
+
+      if (!renewed) throw error
+      await $lukk.logout({ retry: false })
     }
   }
 
@@ -254,6 +285,7 @@ export function useLukkAuth(): LukkAuth {
       if (!isCurrent()) return 'stale'
       user.value = shapeUser(body, cfg.userKey || false)
       restoreFailedFlag.value = false
+      state.subject = tokenSubject(access.value)
       // Dev-only: nudge the developer if the endpoint shape wasn't handled (no `id`, still wrapped).
       if (import.meta.dev) {
         const warning = userShapeWarning(user.value)
@@ -268,6 +300,7 @@ export function useLukkAuth(): LukkAuth {
       if (!isCurrent()) return 'stale'
       user.value = null
       restoreFailedFlag.value = false
+      state.subject = undefined
       return 'signed-out'
     }
   }
@@ -317,7 +350,8 @@ export function useLukkAuth(): LukkAuth {
    * **Do not await it in the setup of a plugin that runs before `lukk:session-restore`** — plugins run
    * in sequence, so that plugin can wait on one that cannot start until it returns, and the app never
    * boots. Put such a plugin in a `.client.ts` file with `dependsOn: ['lukk:session-restore']` (the
-   * restore plugin is client-only, so a universal plugin naming it logs a build error). Warned about in
+   * restore plugin is client-only, so a universal plugin naming it is reported — logged as an error during
+   * a Nuxt 3 build, which still succeeds; a development warning on Nuxt 4). Warned about in
    * development.
    */
   function whenReady(): Promise<void> {

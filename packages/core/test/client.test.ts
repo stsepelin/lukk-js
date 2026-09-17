@@ -235,6 +235,29 @@ describe('createLukkClient', () => {
     expect(fetch).toHaveBeenCalledOnce()
   })
 
+  it('logout refreshes and retries on a 401 by default, and not when asked not to', async () => {
+    const calls: string[] = []
+    let refreshed = false
+    const fetch = vi.fn(async (url: string) => {
+      calls.push(String(url).replace('https://x/auth', ''))
+      if (String(url).endsWith('/refresh')) return json({ access_token: 'new', expires_in: 900 })
+      return refreshed ? json({}) : json({ message: 'Unauthenticated.' }, 401)
+    })
+    const refresh = vi.fn(async () => { refreshed = true; return { access_token: 'new', expires_in: 900 } })
+    const client = createLukkClient({ baseURL: 'https://x/auth', fetch, refresh })
+
+    await client.logout()
+    expect(refresh).toHaveBeenCalledOnce()
+    expect(calls).toEqual(['/logout', '/logout'])
+
+    refreshed = false
+    refresh.mockClear()
+    calls.length = 0
+    await expect(client.logout({ retry: false })).rejects.toMatchObject({ status: 401 })
+    expect(refresh).not.toHaveBeenCalled()
+    expect(calls).toEqual(['/logout'])
+  })
+
   it('throws a typed LukkError on a failed request', async () => {
     const fetch = vi.fn(async () => json({ message: 'Nope', errors: { email: ['bad'] } }, 422))
     const client = createLukkClient({ baseURL: 'https://x/auth', fetch })
