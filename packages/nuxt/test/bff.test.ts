@@ -27,7 +27,7 @@ vi.mock('h3', () => ({
 // eslint-disable-next-line import/first
 import handler from '../src/runtime/server/bff'
 // eslint-disable-next-line import/first
-import { forgetEndedSessions, markSessionEnded } from '../src/runtime/server/ended-sessions'
+import { endSession, forgetEndedSessions, markSessionEnded, useSharedEndedSessions } from '../src/runtime/server/ended-sessions'
 
 interface TokenSession { access?: string, refresh?: string, confirmation?: string, sid?: string }
 
@@ -717,7 +717,7 @@ describe('a session replaced or ended while a refresh for it was out', () => {
   it('still renews an ended session on logout, so lukk revokes it — without writing it back', async () => {
     // After a lost sign-in response the browser keeps the replaced session. Skipping the refresh on its
     // expired token meant no authenticated /logout ever reached lukk, and the family stayed alive.
-    markSessionEnded('session-A')
+    await endSession('session-A', { replaced: true })
     const ending = makeSession({ access: 'A-expired', refresh: 'rA', sid: 'session-A' } as TokenSession)
     const bearers: (string | undefined)[] = []
     mockFetch().fetch = vi.fn(async (url: string, init?: { headers?: Record<string, string> }) => {
@@ -732,6 +732,18 @@ describe('a session replaced or ended while a refresh for it was out', () => {
     expect(ending.update).not.toHaveBeenCalled()
     // Already replaced: the browser may hold the newer session's cookie, which a clear would wipe.
     expect(ending.clear).not.toHaveBeenCalled()
+  })
+
+  it('clears the cookie again for a logout resent after its first response was lost', async () => {
+    // The first logout ended the session (not a sign-in replacing it), so the browser holds no newer
+    // cookie — only the dead one the lost response would have cleared.
+    await endSession('session-A')
+    const resent = makeSession({ access: 'A', refresh: 'rA', sid: 'session-A' } as TokenSession)
+    mockFetch().fetch = vi.fn(async () => jsonRes(null, 204))
+
+    await run(post('/logout', resent))
+
+    expect(resent.clear).toHaveBeenCalledOnce()
   })
 
   it('does not clear the cookie of a newer sign-in when a slow logout from the replaced session lands', async () => {
@@ -749,6 +761,48 @@ describe('a session replaced or ended while a refresh for it was out', () => {
     await pending
 
     expect(loggingOut.clear).not.toHaveBeenCalled()
+  })
+
+  it('ends the session a sign-in replaces on lukk too, not only in the browser', async () => {
+    // Its cookie is overwritten, so nothing reaches it again — but it stayed live on lukk until it expired,
+    // and when the sign-in's response never reached the browser the browser kept using it all along.
+    const replaced = makeSession({ access: 'A', refresh: 'rA', sid: 'session-A' } as TokenSession)
+    mockFetch().fetch = vi.fn(async (url: string) => (String(url).endsWith('/logout') ? jsonRes(null, 204) : jsonRes({ access_token: 'B', refresh_token: 'rB', expires_in: 900 })))
+
+    await run(post('/login', replaced))
+
+    const revocations = mockFetch().fetch.mock.calls.filter(([url]) => String(url).endsWith('/logout'))
+    expect(revocations).toHaveLength(1)
+    const init = revocations[0]![1] as { headers: Record<string, string>, body: string }
+    expect(init.headers.Authorization).toBe('Bearer A')
+    expect(JSON.parse(init.body)).toEqual({ refresh_token: 'rA' })
+  })
+
+  it('does not answer a sign-in before the shared store has recorded the session it replaced', async () => {
+    // Another instance must already see the old session as ended by the time the browser holds the new
+    // cookie — or a late refresh served there writes it back.
+    let recorded!: () => void
+    const marked = new Promise<void>((resolve) => { recorded = resolve })
+    useSharedEndedSessions({ mark: () => marked, has: async () => false })
+    mockFetch().fetch = vi.fn(async (url: string) => (String(url).endsWith('/logout') ? jsonRes(null, 204) : jsonRes({ access_token: 'B', refresh_token: 'rB', expires_in: 900 })))
+
+    let answered = false
+    const signingIn = run(post('/login', makeSession({ access: 'A', refresh: 'rA', sid: 'session-A' } as TokenSession))).then(() => { answered = true })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(answered).toBe(false)
+
+    recorded()
+    await signingIn
+    expect(answered).toBe(true)
+    useSharedEndedSessions(undefined)
+  })
+
+  it('revokes nothing when the sign-in replaced no session', async () => {
+    mockFetch().fetch = vi.fn(async () => jsonRes({ access_token: 'B', refresh_token: 'rB', expires_in: 900 }))
+
+    await run(makeEvent({ path: '/api/_lukk/login', method: 'POST', body: '{}', headers: sameOrigin, session: makeSession({}), cookiePresent: false }))
+
+    expect(mockFetch().fetch.mock.calls.filter(([url]) => String(url).endsWith('/logout'))).toHaveLength(0)
   })
 
   it('gives every sign-in a new session id, and leaves a session that was never signed in unmarked', async () => {

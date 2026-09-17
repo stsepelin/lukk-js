@@ -361,7 +361,7 @@ describe('app-API proxy', () => {
       await run(e)
 
       expect(e.node.res.getHeader('set-cookie')).toBeUndefined()
-      expect(revokeDroppedSession).toHaveBeenCalledWith(e, 'new-tok', 'https://api/auth', '')
+      expect(revokeDroppedSession).toHaveBeenCalledWith(e, { access: 'new-tok', refresh: 'r2' }, 'https://api/auth', '')
     })
 
     it('is not re-sealed, nor its new token used, when it ended during the refresh', async () => {
@@ -377,7 +377,7 @@ describe('app-API proxy', () => {
 
       expect(proxyRequest).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ headers: expect.objectContaining({ authorization: `Bearer ${stale}` }) }))
       expect(e.node.res.setHeader).not.toHaveBeenCalledWith('set-cookie', expect.anything())
-      expect(revokeDroppedSession).toHaveBeenCalledWith(e, 'new-tok', 'https://api/auth', '')
+      expect(revokeDroppedSession).toHaveBeenCalledWith(e, { access: 'new-tok', refresh: 'r2' }, 'https://api/auth', '')
     })
   })
 

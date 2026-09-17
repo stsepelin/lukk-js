@@ -16,13 +16,21 @@ import type { TokenSession } from './utils/refresh'
  * access-token view via `getLukkAccessToken`.
  */
 export async function readSealedSession(event: H3Event, password: string | undefined, name: string): Promise<TokenSession> {
+  return (await readSealedSessionWithId(event, password, name)).data
+}
+
+/**
+ * The same read, with h3's session id — the identity a session sealed before `sid` existed is recorded
+ * under when it ends. Still read-only: nothing is minted or slid.
+ */
+export async function readSealedSessionWithId(event: H3Event, password: string | undefined, name: string): Promise<{ id?: string, data: TokenSession }> {
   const sealed = getCookie(event, name)
-  if (!sealed || !password) return {}
+  if (!sealed || !password) return { data: {} }
   try {
-    const unsealed = await unsealSession(event, { password, name }, sealed)
-    return (unsealed as { data?: TokenSession }).data ?? {}
+    const unsealed = await unsealSession(event, { password, name }, sealed) as { id?: string, data?: TokenSession }
+    return { id: unsealed.id, data: unsealed.data ?? {} }
   }
   catch {
-    return {}
+    return { data: {} }
   }
 }

@@ -1,5 +1,5 @@
 import { isSameOrigin } from 'lukk-core'
-import { ofetch } from 'ofetch'
+import { type $Fetch, ofetch } from 'ofetch'
 import { navigateTo, useNuxtApp, useRequestFetch, useRequestHeaders, useRuntimeConfig, useState } from '#imports'
 import { ACCESS_KEY } from '../keys'
 import { createLukkFetch, createRequestFetch, type LukkFetchDeps, type RequestFetch } from '../utils/create-lukk-fetch'
@@ -23,7 +23,7 @@ interface PublicLukk {
  * Always JSON, `redirect: 'manual'`, and rejects with a typed `LukkError`.
  * In a server route, pair with `getLukkAccessToken(event)` instead.
  */
-export function useLukkFetch() {
+export function useLukkFetch(): $Fetch {
   const cfg = useRuntimeConfig().public.lukk as PublicLukk
   const access = useState<string | null>(ACCESS_KEY, () => null)
   const nuxtApp = useNuxtApp() as { $lukkRefresh?: () => Promise<unknown> }

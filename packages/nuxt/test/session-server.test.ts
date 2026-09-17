@@ -6,7 +6,7 @@ const fetchUser = vi.fn()
 const loggedIn = { value: false }
 const resolveHydrationAccess = vi.fn()
 const withholdIfReplaced = vi.fn()
-const hydratedSessionEnded = vi.fn(() => false)
+const hydratedSessionEnded = vi.fn(async () => false)
 const setResponseHeader = vi.fn()
 
 vi.mock('h3', () => ({ setResponseHeader: (...a: unknown[]) => setResponseHeader(...a) }))
@@ -74,7 +74,7 @@ describe('session.server (BFF SSR hydration)', () => {
       loggedIn.value = true
       useState(USER_KEY, () => null).value = { id: 'A' }
     })
-    hydratedSessionEnded.mockReturnValueOnce(true)
+    hydratedSessionEnded.mockResolvedValueOnce(true)
     const nuxtApp = app()
 
     await run(nuxtApp)

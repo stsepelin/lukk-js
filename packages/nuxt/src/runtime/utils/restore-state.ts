@@ -46,6 +46,14 @@ export interface RestoreState {
   ending: Promise<unknown> | null
   /** Tell other tabs of this app that the session changed. Set by the client plugin where supported. */
   announce?: () => void
+  /** The Web Lock shared by this app's tabs. Set by the client plugin where the browser has one. */
+  lockName?: string
+  /** How many of this tab's operations are using the tab lock — the lock is released when it reaches 0. */
+  lockUsers: number
+  /** Settles once this tab holds the lock (or gave up waiting for it). */
+  lockHeld?: Promise<void>
+  /** Hands the lock back. */
+  releaseLock?: () => void
 }
 
 /**
@@ -54,9 +62,16 @@ export interface RestoreState {
  */
 export const REFRESH_SETTLE_TIMEOUT = 10_000
 
+/**
+ * How long an operation waits for another tab's session lock before going ahead without it. Short: a
+ * lock held by a healthy tab is released within one request, and any script on the origin can hold the
+ * name — every sign-in, logout, refresh and page-load restore would otherwise pay the full wait.
+ */
+export const TAB_LOCK_WAIT_MS = 3_000
+
 export function restoreState(nuxtApp: object): RestoreState {
   const app = nuxtApp as { _lukkRestore?: RestoreState }
-  return (app._lukkRestore ??= { started: false, restored: shallowRef(false), epoch: 0, logouts: 0, refreshing: null, handover: null, ending: null })
+  return (app._lukkRestore ??= { started: false, restored: shallowRef(false), epoch: 0, logouts: 0, refreshing: null, handover: null, ending: null, lockUsers: 0 })
 }
 
 /**
@@ -100,7 +115,11 @@ export function settle(pending: Promise<unknown> | null, timeoutMs = REFRESH_SET
  * `current` is `false` when `logout()` ran while the request was out: the session the server just
  * issued must then be ended, not started — the caller logs out again.
  */
-export async function signIn<T>(nuxtApp: object, send: () => Promise<T>, startsSession: (result: T) => boolean): Promise<{ result: T, current: boolean }> {
+export function signIn<T>(nuxtApp: object, send: () => Promise<T>, startsSession: (result: T) => boolean): Promise<{ result: T, current: boolean }> {
+  return acrossTabs(nuxtApp, () => handOver(nuxtApp, send, startsSession))
+}
+
+async function handOver<T>(nuxtApp: object, send: () => Promise<T>, startsSession: (result: T) => boolean): Promise<{ result: T, current: boolean }> {
   await settleRefresh(nuxtApp)
 
   const state = restoreState(nuxtApp)
@@ -126,6 +145,72 @@ export async function signIn<T>(nuxtApp: object, send: () => Promise<T>, startsS
   finally {
     if (state.handover === request) state.handover = null
   }
+}
+
+/**
+ * Run `operation` while holding this app's session lock ACROSS TABS.
+ *
+ * Every tab shares the session cookie, and the in-tab holds above can't see another tab: a logout there
+ * cleared the cookie a sign-in here had just set, and tabs refreshing the same token at once leaned on
+ * lukk's grace window to not revoke each other. A Web Lock (`navigator.locks`) queues sign-ins, logouts
+ * and refreshes across every tab of the app.
+ *
+ * Within a tab the lock is SHARED rather than re-acquired: a logout renewing its token runs a refresh
+ * inside the logout, and a second acquisition of the same exclusive lock would wait on itself. The
+ * in-tab holds already order what happens inside one tab.
+ *
+ * Both sides are capped, so a stuck tab can't lock the others out: an operation waits at most
+ * `TAB_LOCK_WAIT_MS` for the lock before going ahead without it, and a tab gives the lock back after
+ * `REFRESH_SETTLE_TIMEOUT` even if its operation is still running. Where the browser has no Web Locks
+ * (an older browser, plain http), it simply runs.
+ */
+export async function acrossTabs<T>(nuxtApp: object, operation: () => Promise<T>): Promise<T> {
+  const state = restoreState(nuxtApp)
+  const locks = state.lockName && typeof navigator !== 'undefined'
+    ? (navigator as { locks?: TabLocks }).locks
+    : undefined
+  if (!locks) return operation()
+
+  if (state.lockUsers++ === 0) state.lockHeld = holdTabLock(locks, state)
+  try {
+    await state.lockHeld
+    return await operation()
+  }
+  finally {
+    if (--state.lockUsers === 0) {
+      state.releaseLock?.()
+      state.releaseLock = undefined
+    }
+  }
+}
+
+interface TabLocks {
+  request: (name: string, options: { signal?: AbortSignal }, callback: () => Promise<void>) => Promise<unknown>
+}
+
+function holdTabLock(locks: TabLocks, state: RestoreState): Promise<void> {
+  return new Promise((granted) => {
+    const giveUp = new AbortController()
+    const timer = setTimeout(() => giveUp.abort(), TAB_LOCK_WAIT_MS)
+
+    locks.request(state.lockName!, { signal: giveUp.signal }, () => {
+      clearTimeout(timer)
+      granted()
+      // Held while this tab's operations run — but no longer than the settle cap. A request that hangs
+      // (a flaky mobile network) otherwise kept every other tab waiting on each of its operations.
+      return new Promise<void>((release) => {
+        const cap = setTimeout(release, REFRESH_SETTLE_TIMEOUT)
+        state.releaseLock = () => {
+          clearTimeout(cap)
+          release()
+        }
+      })
+    }).catch(() => {
+      // Not granted in time — go ahead without it.
+      clearTimeout(timer)
+      granted()
+    })
+  })
 }
 
 /**

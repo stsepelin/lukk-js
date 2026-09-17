@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ENDED_SESSION_LIMIT, ENDED_SESSION_TTL_MS, endedSessionCount, forgetEndedSessions, isSessionEnded, markSessionEnded, newSessionId, sessionKey } from '../src/runtime/server/ended-sessions'
+import { ENDED_SESSION_LIMIT, ENDED_SESSION_TTL_MS, endedSessionCount, forgetEndedSessions, isSessionEnded, markSessionEnded, newSessionId, sessionEnded as sessionEndedHere, sessionKey } from '../src/runtime/server/ended-sessions'
 
 afterEach(() => { forgetEndedSessions(); vi.restoreAllMocks() })
 
@@ -79,6 +79,20 @@ describe('ended sessions', () => {
 })
 
 describe('ended sessions across bundles', () => {
+  it('shares its outage flags too, so one outage is reported once and backed off everywhere', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.resetModules()
+    const copy = await import('../src/runtime/server/ended-sessions')
+    const failing = { mark: async () => { throw new Error('down') }, has: async () => { throw new Error('down') } }
+    copy.useSharedEndedSessions(failing)
+
+    await copy.sessionEnded('a')
+    await sessionEndedHere('b')
+
+    expect(error).toHaveBeenCalledOnce()
+    copy.useSharedEndedSessions(undefined)
+  })
+
   it('shares one record between separately bundled copies of the module', async () => {
     // Nitro's handlers and the Nuxt app's server bundle each get their own copy. A module-level Map let
     // SSR hydration check a record that the proxies' sign-ins and logouts never wrote to.

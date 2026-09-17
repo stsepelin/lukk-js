@@ -3,7 +3,7 @@ import { defineNuxtPlugin, useNuxtApp, useRuntimeConfig, useState } from '#impor
 import { useLukkAuth } from '../composables/useLukkAuth'
 import { ACCESS_KEY, CONFIRMATION_KEY } from '../keys'
 import { confirmationHeaderName, isAuthRejection, LUKK_BFF_PREFIX } from '../shared'
-import { restoreState, settle } from '../utils/restore-state'
+import { acrossTabs, restoreState, settle } from '../utils/restore-state'
 import { tokenSubject } from '../utils/token-subject'
 
 /**
@@ -59,10 +59,11 @@ export default defineNuxtPlugin({
     // a sign-in has moved on by the time it lands. Checked HERE, where the token is written, rather than
     // only by the restore: a restore joins a flight that may have started before the logout it is
     // racing, and the write already happened by the time the restore saw the result.
-    const state = restoreState(useNuxtApp())
+    const nuxtApp = useNuxtApp()
+    const state = restoreState(nuxtApp)
     let flightEpoch = state.epoch
 
-    const flight = singleFlight(async () => {
+    const flight = singleFlight(() => acrossTabs(nuxtApp, async () => {
       const epoch = flightEpoch = state.epoch
 
       try {
@@ -76,14 +77,37 @@ export default defineNuxtPlugin({
         }
 
         const pair = await client.refreshTokens()
-        if (epoch !== state.epoch) throw new SupersededRefresh('lukk: the session changed while this refresh was in flight')
+        if (epoch !== state.epoch) {
+          if (import.meta.client && cfg.mode === 'direct') await endStaleRotation(pair.access_token)
+          throw new SupersededRefresh('lukk: the session changed while this refresh was in flight')
+        }
         if (import.meta.client) accessToken.value = pair.access_token
         return pair
       }
       finally {
         state.refreshing = null
       }
-    })
+    }))
+    // A refresh answered after the session it belonged to was replaced — past the wait caps, or across
+    // tabs past the lock's. Dropping its token isn't enough in direct mode: its response has already set
+    // the refresh cookie, and it landed AFTER the newer session's, so a reload (or this tab following the
+    // other) would silently continue as the previous account. End that rotated session with the token it
+    // just minted, and tell the other tabs to re-check: they find a revoked cookie and read as signed out
+    // rather than as someone else. Bearer only — `credentials: 'omit'`: had the newer session's cookie
+    // landed after all, sending it would have ended that session too.
+    async function endStaleRotation(access: string): Promise<void> {
+      try {
+        await fetch(`${cfg.baseURL.replace(/\/$/, '')}/logout`, {
+          method: 'POST',
+          credentials: 'omit',
+          redirect: 'manual',
+          headers: { 'Accept': 'application/json', 'Content-Type': 'application/json', 'Authorization': `Bearer ${access}` },
+          body: '{}',
+        })
+      }
+      catch { /* best effort: the next refresh with that cookie will be refused once lukk revokes it */ }
+      state.announce?.()
+    }
     // Published so a sign-in or `logout()` can wait for it — see `settleRefresh`.
     const refresh = (): Promise<TokenPair> => (state.refreshing = flight())
     // Abilities are re-derived on EVERY mint server-side — that is what makes revoking one take
@@ -181,13 +205,18 @@ export default defineNuxtPlugin({
     // next refresh (`resyncUser`); a BFF tab never sees a token, so without this it went on showing the
     // previous account while its requests ran as the new one. A tab that begins or ends a session says
     // so; the others drop what they had in flight and re-check.
-    if (import.meta.client && typeof window !== 'undefined' && typeof window.BroadcastChannel === 'function') {
-      // Scoped to this app: a channel is already per origin, and two apps sharing an origin live under
-      // different router bases. Unscoped, each re-checked the other's tabs for nothing.
+    if (import.meta.client && typeof window !== 'undefined') {
+      // Scoped to this app: channels and locks are already per origin, and two apps sharing an origin live
+      // under different router bases. Unscoped, each re-checked (and queued behind) the other's tabs.
       const appBase = (useRuntimeConfig() as { app?: { baseURL?: string } }).app?.baseURL ?? '/'
-      const channel = new window.BroadcastChannel(`lukk:session:${appBase}`)
-      state.announce = () => channel.postMessage('changed')
-      channel.onmessage = () => { void followOtherTab().catch(() => {}) }
+      // Tabs also queue their sign-ins, logouts and refreshes behind one Web Lock — see `acrossTabs`.
+      state.lockName = `lukk:session:${appBase}`
+
+      if (typeof window.BroadcastChannel === 'function') {
+        const channel = new window.BroadcastChannel(`lukk:session:${appBase}`)
+        state.announce = () => channel.postMessage('changed')
+        channel.onmessage = () => { void followOtherTab().catch(() => {}) }
+      }
     }
 
     async function followOtherTab(): Promise<void> {
@@ -197,8 +226,10 @@ export default defineNuxtPlugin({
 
       if (cfg.mode === 'direct') {
         // The in-memory token is the old session's; the cookie is the new one's. Renew from the cookie,
-        // and read "no session" as signed out.
-        const outcome = await restore()
+        // and read "no session" as signed out. A restore that joined a refresh started before the change
+        // is superseded — ask again once that refresh has settled, with the cookie it left.
+        let outcome = await restore()
+        if (outcome.superseded) outcome = await restore()
         if (!outcome.pair) {
           if (!outcome.unavailable && !outcome.superseded) {
             accessToken.value = null

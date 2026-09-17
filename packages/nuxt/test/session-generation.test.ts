@@ -664,6 +664,26 @@ describe('a sign-in or logout in another tab', () => {
     expect(access()).toBeNull()
   })
 
+  it('direct: asks again when its first restore joined a refresh from before the change', async () => {
+    const stale = deferred<{ access_token: string }>()
+    wire.client.refreshTokens!.mockReturnValueOnce(stale.promise).mockResolvedValueOnce(pairFor('B'))
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status: 204 })))
+    userEndpoint()
+    boot()
+    const auth = useLukkAuth()
+    auth.user.value = { id: 'A' }
+
+    void (__test.nuxtApp as { $lukkRefresh: () => Promise<unknown> }).$lukkRefresh()
+    await macrotask() // under way — holding the lock, on the wire — when the other tab's change arrives
+    FakeChannel.instances.at(-1)!.onmessage!({ data: 'changed' } as MessageEvent)
+    stale.resolve(pairFor('A2'))
+    await macrotask()
+    await macrotask()
+
+    expect(wire.client.refreshTokens).toHaveBeenCalledTimes(2)
+    expect(auth.user.value).toEqual({ id: 'B' })
+  })
+
   it('drops what this tab still had in flight for the previous session', async () => {
     const slowA = deferred<void>()
     userEndpoint({ A: slowA.promise })
@@ -694,6 +714,110 @@ describe('a sign-in or logout in another tab', () => {
 
     expect(FakeChannel.instances).toHaveLength(0)
     expect(restoreState(__test.nuxtApp).announce).toBeUndefined()
+  })
+})
+
+describe('queued across tabs with a Web Lock', () => {
+  function recordingLocks() {
+    const names: string[] = []
+    vi.stubGlobal('window', {})
+    vi.stubGlobal('navigator', {
+      locks: {
+        request: (name: string, _options: unknown, callback: () => Promise<void>) => {
+          names.push(name)
+          return callback()
+        },
+      },
+    })
+    return names
+  }
+
+  it('takes the app\'s lock for a sign-in', async () => {
+    const names = recordingLocks()
+    userEndpoint()
+    boot()
+
+    await useLukkAuth().login({ email: 'b', password: 'p' })
+
+    expect(names[0]).toBe('lukk:session:/')
+  })
+
+  it('takes it for a logout', async () => {
+    const names = recordingLocks()
+    boot()
+
+    await useLukkAuth().logout()
+
+    expect(names).toEqual(['lukk:session:/'])
+  })
+
+  it('takes it for a refresh', async () => {
+    const names = recordingLocks()
+    boot()
+
+    await (__test.nuxtApp as { $lukkRefresh: () => Promise<unknown> }).$lukkRefresh()
+
+    expect(names).toEqual(['lukk:session:/'])
+  })
+})
+
+describe('a refresh that answers after its session was replaced (past the caps)', () => {
+  it('direct: ends that rotation with the token it minted, and tells the other tabs', async () => {
+    // Its response already set the refresh cookie, after the newer session's: kept, a reload (or this tab
+    // following the other) would continue as the previous account.
+    const flight = deferred<{ access_token: string }>()
+    wire.client.refreshTokens!.mockReturnValueOnce(flight.promise)
+    const revocations = vi.fn(async () => new Response(null, { status: 204 }))
+    vi.stubGlobal('fetch', revocations)
+    boot()
+    const announce = vi.fn()
+    restoreState(__test.nuxtApp).announce = announce
+    const refresh = (__test.nuxtApp as { $lukkRefresh: () => Promise<unknown> }).$lukkRefresh
+
+    const refreshing = refresh()
+    restoreState(__test.nuxtApp).epoch++ // a sign-in, here or in another tab, landed meanwhile
+    flight.resolve(pairFor('A2'))
+
+    expect(await refreshing).toBeNull()
+    expect(revocations).toHaveBeenCalledWith('https://api/auth/logout', expect.objectContaining({
+      method: 'POST',
+      // Bearer only: the cookie may already be the newer session's.
+      credentials: 'omit',
+      headers: expect.objectContaining({ 'Authorization': 'Bearer A2', 'Content-Type': 'application/json' }),
+    }))
+    expect(announce).toHaveBeenCalledOnce()
+    expect(access()).not.toBe('A2')
+  })
+
+  it('direct: still tells the other tabs when that logout can\'t be sent', async () => {
+    const flight = deferred<{ access_token: string }>()
+    wire.client.refreshTokens!.mockReturnValueOnce(flight.promise)
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('Failed to fetch') }))
+    boot()
+    const announce = vi.fn()
+    restoreState(__test.nuxtApp).announce = announce
+
+    const refreshing = (__test.nuxtApp as { $lukkRefresh: () => Promise<unknown> }).$lukkRefresh()
+    restoreState(__test.nuxtApp).epoch++
+    flight.resolve(pairFor('A2'))
+
+    expect(await refreshing).toBeNull()
+    expect(announce).toHaveBeenCalledOnce()
+  })
+
+  it('BFF: leaves it to the proxy — the browser never holds that token', async () => {
+    const flight = deferred<{ ok: boolean }>()
+    wire.client.refreshTokens!.mockReturnValueOnce(flight.promise as never)
+    const revocations = vi.fn()
+    vi.stubGlobal('fetch', revocations)
+    boot('bff')
+
+    const refreshing = (__test.nuxtApp as { $lukkRefresh: () => Promise<unknown> }).$lukkRefresh()
+    restoreState(__test.nuxtApp).epoch++
+    flight.resolve({ ok: true })
+
+    expect(await refreshing).toBeNull()
+    expect(revocations).not.toHaveBeenCalled()
   })
 })
 

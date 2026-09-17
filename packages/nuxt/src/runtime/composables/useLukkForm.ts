@@ -33,24 +33,30 @@ export interface UseLukkFormOptions {
   rememberKey?: string
 }
 
-/** The reactive form returned by {@link useLukkForm}. Every mutator returns the form for chaining. */
+/**
+ * The reactive form returned by {@link useLukkForm}. Every mutator returns the form for chaining.
+ *
+ * Declared rather than inferred, like every composable's return type — the module build cannot resolve
+ * `#imports`. Derived and submit-owned state is `readonly`: writing a computed through the reactive form
+ * fails at runtime, and replacing `data` would detach it from what `submit` sends (mutate its fields).
+ */
 export interface LukkForm<T extends FormFields> {
   /** The live, editable fields — bind with `v-model="form.data.x"`. */
-  data: T
+  readonly data: T
   /** First validation message per field, from the last `422`. */
   errors: FormErrors<T>
   /** `errors` with Laravel's dotted keys (`address.street`) expanded into a nested object. */
-  nestedErrors: Record<string, unknown>
+  readonly nestedErrors: Record<string, unknown>
   /** True while a submit is in flight. */
-  processing: boolean
+  readonly processing: boolean
   /** True after the last submit succeeded (reset at the next submit). */
-  wasSuccessful: boolean
+  readonly wasSuccessful: boolean
   /** True briefly after a success — for a transient "Saved!" indicator. */
-  recentlySuccessful: boolean
+  readonly recentlySuccessful: boolean
   /** Whether any field currently has an error. */
-  hasErrors: boolean
+  readonly hasErrors: boolean
   /** Whether `data` differs from the current defaults (structural comparison). */
-  isDirty: boolean
+  readonly isDirty: boolean
   setError: {
     (field: keyof T, message: string): LukkForm<T>
     (errors: FormErrors<T>): LukkForm<T>

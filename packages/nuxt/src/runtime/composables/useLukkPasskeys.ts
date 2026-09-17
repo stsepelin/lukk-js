@@ -1,14 +1,26 @@
-import { credentialToJSON, toCreationOptions, toRequestOptions } from 'lukk-core'
+import { credentialToJSON, type PasskeySummary, toCreationOptions, toRequestOptions } from 'lukk-core'
 import { useNuxtApp } from '#imports'
 import { signIn } from '../utils/restore-state'
 import { useLukkAuth } from './useLukkAuth'
 import { useLukkConfirmation } from './useLukkConfirmation'
 
 /**
+ * Declared rather than inferred: the module build cannot resolve `#imports`, so an inferred return type
+ * shipped as `any` in the published declarations — `list()` and `remove()` returned `any`.
+ */
+export interface LukkPasskeys {
+  register: (name?: string) => Promise<void>
+  login: () => Promise<void>
+  confirm: () => Promise<void>
+  list: () => Promise<{ passkeys: PasskeySummary[] }>
+  remove: (id: string) => Promise<void>
+}
+
+/**
  * Passkeys (WebAuthn). Drives the browser ceremony (`navigator.credentials`)
  * and lukk-core's base64url (de)serialization, so callers just await a verb.
  */
-export function useLukkPasskeys() {
+export function useLukkPasskeys(): LukkPasskeys {
   const nuxtApp = useNuxtApp()
   const { $lukk } = nuxtApp
 
@@ -47,12 +59,12 @@ export function useLukkPasskeys() {
   }
 
   /** List the user's passkeys. */
-  function list() {
+  function list(): Promise<{ passkeys: PasskeySummary[] }> {
     return $lukk.listPasskeys()
   }
 
   /** Remove a passkey by credential id. */
-  function remove(id: string) {
+  function remove(id: string): Promise<void> {
     return $lukk.deletePasskey(id)
   }
 

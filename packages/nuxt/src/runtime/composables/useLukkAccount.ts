@@ -1,7 +1,19 @@
-import type { AccountExport } from 'lukk-core'
+import type { AccountExport, LukkUser } from 'lukk-core'
+import type { ComputedRef, Ref } from 'vue'
 import { computed, ref, useNuxtApp } from '#imports'
 import { useLukkAuth } from './useLukkAuth'
 import { useLukkConfirmation } from './useLukkConfirmation'
+
+/**
+ * Declared rather than inferred: the module build cannot resolve `#imports`, so an inferred return type
+ * shipped as `any` in the published declarations — and `busy.value = false` type-checked in a consumer app.
+ */
+export interface LukkAccount {
+  user: Ref<LukkUser | null>
+  busy: ComputedRef<boolean>
+  deleteAccount: () => Promise<void>
+  exportAccount: () => Promise<AccountExport>
+}
 
 /**
  * The signed-in user's own account: export it (GDPR Art. 15 / 20) or erase it (Art. 17).
@@ -9,7 +21,7 @@ import { useLukkConfirmation } from './useLukkConfirmation'
  * Both go through `withConfirmation`, so a missing or stale step-up surfaces your confirmation UI
  * and retries once — the same flow the two-factor and passkey management calls already use.
  */
-export function useLukkAccount() {
+export function useLukkAccount(): LukkAccount {
   const { $lukk } = useNuxtApp()
   const { withConfirmation } = useLukkConfirmation()
   const { user, logout } = useLukkAuth()

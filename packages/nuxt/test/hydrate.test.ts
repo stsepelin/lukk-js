@@ -226,7 +226,7 @@ describe('resolveHydrationAccess', () => {
 
     expect(await resolveHydrationAccess(event)).toBeNull()
     expect(sessionUpdate).not.toHaveBeenCalled()
-    expect(revokeDroppedSession).toHaveBeenCalledWith(event, 'NEW_ACCESS', 'https://lukk/auth', '')
+    expect(revokeDroppedSession).toHaveBeenCalledWith(event, { access: 'NEW_ACCESS', refresh: 'r2' }, 'https://lukk/auth', '')
   })
 
   it('revokes nothing on a render that hydrated a still-valid token, and a re-sealed one only once', async () => {
@@ -234,7 +234,7 @@ describe('resolveHydrationAccess', () => {
     const event = ev()
     await resolveHydrationAccess(event)
     markSessionEnded('session-A')
-    withholdIfReplaced(event)
+    await withholdIfReplaced(event)
     expect(revokeDroppedSession).not.toHaveBeenCalled()
 
     // A re-sealed one revokes exactly once, though the check runs after the user load AND at render end.
@@ -243,12 +243,20 @@ describe('resolveHydrationAccess', () => {
     const resealedEvent = ev()
     await resolveHydrationAccess(resealedEvent)
     markSessionEnded('sid')
-    withholdIfReplaced(resealedEvent)
-    withholdIfReplaced(resealedEvent)
+    await withholdIfReplaced(resealedEvent)
+    await withholdIfReplaced(resealedEvent)
     expect(revokeDroppedSession).toHaveBeenCalledOnce()
   })
 
   describe('a session a sign-in replaced or a logout ended', () => {
+    it('is not rendered as signed in when sealed before `sid` existed, recognised by h3\'s id', async () => {
+      // Its replacement is recorded under h3's id; checking only `sid` rendered it as the old account.
+      unsealResult = { id: 'h3-legacy', data: { access: freshJwt(), refresh: 'r' } } as typeof unsealResult
+      markSessionEnded('h3-legacy')
+
+      expect(await resolveHydrationAccess(ev())).toBeNull()
+    })
+
     it('is not rendered as signed in, even while its access token is still valid', async () => {
       // The tab would show that account while every call it makes acts as the newer session.
       unsealResult = { data: { access: freshJwt(), refresh: 'r', sid: 'session-A' } }
@@ -272,11 +280,11 @@ describe('resolveHydrationAccess', () => {
       unsealResult = { data: { access: freshJwt(), sid: 'session-A' } }
       const fresh = ev()
       expect(await resolveHydrationAccess(fresh)).not.toBeNull()
-      expect(hydratedSessionEnded(fresh)).toBe(false)
+      expect(await hydratedSessionEnded(fresh)).toBe(false)
 
       markSessionEnded('session-A')
-      expect(hydratedSessionEnded(fresh)).toBe(true)
-      expect(hydratedSessionEnded(ev())).toBe(false) // a render that hydrated nothing
+      expect(await hydratedSessionEnded(fresh)).toBe(true)
+      expect(await hydratedSessionEnded(ev())).toBe(false) // a render that hydrated nothing
     })
   })
 
@@ -294,11 +302,11 @@ describe('resolveHydrationAccess', () => {
       const event = await resealed()
       markSessionEnded('sid')
 
-      withholdIfReplaced(event)
+      await withholdIfReplaced(event)
 
       // And revokes the tokens that re-seal minted, so a browser still holding the old cookie can't
       // replay a consumed refresh token into a false theft report.
-      expect(revokeDroppedSession).toHaveBeenCalledWith(event, 'NEW_ACCESS', 'https://lukk/auth', '')
+      expect(revokeDroppedSession).toHaveBeenCalledWith(event, { access: 'NEW_ACCESS', refresh: 'r2' }, 'https://lukk/auth', '')
       // Only this app's cookie — not a co-hosted app's whose name merely starts the same way.
       expect(event.node.res.getHeader('set-cookie')).toEqual(['locale=en; Path=/', '__Host-lukk-session-other=1; Path=/'])
     })
@@ -308,7 +316,7 @@ describe('resolveHydrationAccess', () => {
       event.node.res.setHeader('set-cookie', '__Host-lukk-session=RESEALED; Path=/')
       markSessionEnded('sid')
 
-      withholdIfReplaced(event)
+      await withholdIfReplaced(event)
 
       expect(event.node.res.getHeader('set-cookie')).toBeUndefined()
     })
@@ -316,7 +324,7 @@ describe('resolveHydrationAccess', () => {
     it('leaves the cookie alone when the session is still current', async () => {
       const event = await resealed()
 
-      withholdIfReplaced(event)
+      await withholdIfReplaced(event)
 
       expect(event.node.res.getHeader('set-cookie')).toHaveLength(3)
     })
@@ -326,7 +334,7 @@ describe('resolveHydrationAccess', () => {
       markSessionEnded('sid')
       ;(event.node.res as unknown as { headersSent: boolean }).headersSent = true
 
-      expect(() => withholdIfReplaced(event)).not.toThrow()
+      await expect(withholdIfReplaced(event)).resolves.toBeUndefined()
       expect(event.node.res.getHeader('set-cookie')).toHaveLength(3)
     })
 
@@ -335,19 +343,19 @@ describe('resolveHydrationAccess', () => {
       markSessionEnded('sid')
       event.node.res.setHeader = () => { throw new Error('ERR_HTTP_HEADERS_SENT') }
 
-      expect(() => withholdIfReplaced(event)).not.toThrow()
+      await expect(withholdIfReplaced(event)).resolves.toBeUndefined()
     })
 
     it('does nothing for a render that re-sealed nothing, or queued no cookie', async () => {
       const event = await resealed()
       event.node.res.removeHeader('set-cookie')
       markSessionEnded('sid')
-      withholdIfReplaced(event)
+      await withholdIfReplaced(event)
       expect(event.node.res.getHeader('set-cookie')).toBeUndefined()
 
       const untouched = ev()
       untouched.node.res.setHeader('set-cookie', ['__Host-lukk-session=CURRENT'])
-      withholdIfReplaced(untouched)
+      await withholdIfReplaced(untouched)
       expect(untouched.node.res.getHeader('set-cookie')).toEqual(['__Host-lukk-session=CURRENT'])
     })
   })

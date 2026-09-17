@@ -12,10 +12,11 @@
  * right before the response headers go out, withholding the session cookie if the session ended
  * meanwhile. What remains is the time between those headers and the browser storing them.
  *
- * Per server process, like the refresh single-flight in `utils/refresh.ts`: behind a load balancer
- * without sticky sessions, a request served by another instance is not covered. Within the process it
- * lives on `globalThis`: Nitro's handlers and the Nuxt app's server bundle (SSR hydration) each get
- * their OWN copy of this module, and a module-level Map left hydration checking one nothing ever wrote.
+ * Kept per server process, on `globalThis` — Nitro's handlers and the Nuxt app's server bundle (SSR
+ * hydration) each get their OWN copy of this module, and a module-level Map left hydration checking one
+ * nothing ever wrote. Behind a load balancer without sticky sessions, or on serverless and edge runtimes,
+ * another instance never sees that record: configure `session.sharedStore` (a Nitro storage mount such
+ * as Redis) and it is written there too, and read there when the process has no entry.
  *
  * Deliberately NOT under `server/utils`, so it is not auto-imported into the app.
  */
@@ -76,17 +77,110 @@ export function isSessionEnded(key: string | undefined, now = Date.now()): boole
   return expires !== undefined && expires > now
 }
 
-let warned = false
+// Flags on `globalThis` too, for the reason the record is: each server bundle has its own module copy,
+// and module-level flags reported an outage twice and backed off in one bundle only.
+interface RecordFlags { warned: boolean, storeFailureReported: boolean, storeDownUntil: number }
+const flags: RecordFlags = ((globalThis as { __lukkEndedSessionFlags?: RecordFlags }).__lukkEndedSessionFlags ??= { warned: false, storeFailureReported: false, storeDownUntil: 0 })
 function warnSaturated(): void {
-  if (warned) return
-  warned = true
+  if (flags.warned) return
+  flags.warned = true
   console.warn(`[lukk-nuxt] More than ${ENDED_SESSION_LIMIT} sessions were replaced or ended within ${ENDED_SESSION_TTL_MS / 60_000} minutes; the oldest are no longer guarded against a late refresh writing them back.`)
+}
+
+/** A store every server instance reads and writes — see `session.sharedStore` and the server plugin. */
+export interface SharedEndedSessions {
+  mark: (key: string, ttlMs: number) => Promise<void>
+  has: (key: string) => Promise<boolean>
+}
+
+const sharedStore = (): SharedEndedSessions | undefined =>
+  (globalThis as { __lukkSharedEndedSessions?: SharedEndedSessions }).__lukkSharedEndedSessions
+
+export function useSharedEndedSessions(store: SharedEndedSessions | undefined): void {
+  (globalThis as { __lukkSharedEndedSessions?: SharedEndedSessions }).__lukkSharedEndedSessions = store
+}
+
+/** How long a sign-in, logout, refresh or render waits on the shared store before going on without it. */
+export const SHARED_STORE_TIMEOUT_MS = 300
+
+/** After a store failure, how long the store is left alone before it is asked again. */
+export const SHARED_STORE_BACKOFF_MS = 30_000
+
+/**
+ * Record that a session ended — in this process, and in the shared store when one is configured.
+ * Awaited before the sign-in or logout's response leaves, so another instance already sees it by the
+ * time the browser holds the newer cookie. A store that fails is reported once and the process-local
+ * record still stands: that is the guarantee without a shared store, not a failed request.
+ *
+ * `replaced`: a SIGN-IN ended it, so the browser already holds a newer session's cookie — which a late
+ * logout for this one must not clear. A logout's own record doesn't say that, so a logout resent after
+ * its first response was lost still clears the dead cookie.
+ */
+export async function endSession(key: string | undefined, options: { replaced?: boolean } = {}): Promise<void> {
+  if (!key) return
+  markSessionEnded(key)
+  if (options.replaced) markSessionEnded(replacedKey(key))
+
+  await viaStore(async (store) => {
+    await store.mark(key, ENDED_SESSION_TTL_MS)
+    if (options.replaced) await store.mark(replacedKey(key), ENDED_SESSION_TTL_MS)
+  }, undefined)
+}
+
+/** Has this session ended — here, or (with a shared store) on any instance? */
+export async function sessionEnded(key: string | undefined): Promise<boolean> {
+  if (!key) return false
+  if (isSessionEnded(key)) return true
+  return viaStore(store => store.has(key), false)
+}
+
+/** Was it ended by a sign-in that replaced it (rather than by a logout)? */
+export async function sessionReplaced(key: string | undefined): Promise<boolean> {
+  if (!key) return false
+  if (isSessionEnded(replacedKey(key))) return true
+  return viaStore(store => store.has(replacedKey(key)), false)
+}
+
+const replacedKey = (key: string) => `replaced:${key}`
+
+/**
+ * Ask the shared store, bounded. A store that is slow or unreachable must not hold up the requests it
+ * protects: a Redis client retrying a dead host took over ten seconds to give up, on every sign-in,
+ * logout, refresh — and three times per signed-in page. Past the timeout the answer is the fallback,
+ * and the store is left alone for a while before it is asked again.
+ */
+async function viaStore<T>(operation: (store: SharedEndedSessions) => Promise<T>, fallback: T): Promise<T> {
+  const store = sharedStore()
+  if (!store || Date.now() < flags.storeDownUntil) return fallback
+
+  return new Promise<T>((resolve) => {
+    const fail = (error: unknown) => {
+      clearTimeout(timer)
+      flags.storeDownUntil = Date.now() + SHARED_STORE_BACKOFF_MS
+      reportStoreFailure(error)
+      resolve(fallback)
+    }
+    const timer = setTimeout(() => fail(new Error(`no answer within ${SHARED_STORE_TIMEOUT_MS}ms`)), SHARED_STORE_TIMEOUT_MS)
+
+    Promise.resolve().then(() => operation(store)).then((answer) => {
+      clearTimeout(timer)
+      resolve(answer)
+    }, fail)
+  })
+}
+
+function reportStoreFailure(error: unknown): void {
+  if (flags.storeFailureReported) return
+  flags.storeFailureReported = true
+  console.error('[lukk-nuxt] session.sharedStore failed or timed out; replaced sessions are only guarded within each server process until it answers again.', error)
 }
 
 /** Test seam. */
 export function forgetEndedSessions(): void {
   ended.clear()
-  warned = false
+  flags.warned = false
+  flags.storeFailureReported = false
+  flags.storeDownUntil = 0
 }
 
 /** Test seam: how many entries are held — pruning is only observable through this. */

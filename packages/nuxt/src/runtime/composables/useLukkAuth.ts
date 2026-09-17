@@ -3,7 +3,7 @@ import type { ComputedRef, Ref } from 'vue'
 import { computed, useNuxtApp, useRuntimeConfig, useState } from '#imports'
 import { ACCESS_KEY, CHALLENGE_KEY, CONFIRMATION_KEY, CONFIRMED_KEY, READY_KEY, RESTORE_FAILED_KEY, USER_KEY } from '../keys'
 import { isAuthRejection } from '../shared'
-import { restoreState, settleRefresh, signIn } from '../utils/restore-state'
+import { acrossTabs, restoreState, settleRefresh, signIn } from '../utils/restore-state'
 import { tokenSubject } from '../utils/token-subject'
 import { isPrematureWait, whenReady as settled } from '../utils/when-ready'
 import type { RestoreOutcome } from '../plugins/client'
@@ -194,7 +194,7 @@ export function useLukkAuth(): LukkAuth {
   }
 
   async function logout(): Promise<void> {
-    const ending = endAndClear()
+    const ending = acrossTabs(nuxtApp, endAndClear)
     state.ending = ending
     try { await ending }
     finally { if (state.ending === ending) state.ending = null }

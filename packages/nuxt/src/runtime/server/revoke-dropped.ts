@@ -17,13 +17,17 @@ import { resolveTarget } from './proxy-utils'
  *
  * Deliberately NOT under `server/utils`, so it is not auto-imported into the app.
  */
-export function revokeDroppedSession(event: H3Event, access: string | undefined, baseURL: string, clientIp = ''): void {
-  const target = access ? resolveTarget(baseURL, '/logout') : null
+export function revokeDroppedSession(event: H3Event, tokens: { access?: string, refresh?: string }, baseURL: string, clientIp = ''): void {
+  const target = tokens.access || tokens.refresh ? resolveTarget(baseURL, '/logout') : null
   if (!target) return
 
-  const headers: Record<string, string> = { Accept: 'application/json', Authorization: `Bearer ${access}` }
+  // Both credentials: the access token for any lukk release, the refresh token for those that accept
+  // it — which still ends the session when the access token has already expired.
+  const headers: Record<string, string> = { 'Accept': 'application/json', 'Content-Type': 'application/json' }
+  if (tokens.access) headers.Authorization = `Bearer ${tokens.access}`
   if (clientIp) headers['X-Forwarded-For'] = clientIp
+  const body = JSON.stringify(tokens.refresh ? { refresh_token: tokens.refresh } : {})
 
-  const revocation = fetch(target, { method: 'POST', headers, redirect: 'manual' }).then(() => {}, () => {})
+  const revocation = fetch(target, { method: 'POST', headers, body, redirect: 'manual' }).then(() => {}, () => {})
   ;(event as { waitUntil?: (promise: Promise<unknown>) => void }).waitUntil?.(revocation)
 }

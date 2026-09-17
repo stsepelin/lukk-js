@@ -1,5 +1,15 @@
 import type { ChangePasswordInput } from 'lukk-core'
+import type { Ref } from 'vue'
 import { ref, useNuxtApp } from '#imports'
+
+/**
+ * Declared rather than inferred: the module build cannot resolve `#imports`, so an inferred return type
+ * shipped as `any` in the published declarations. `changing` is read-only: the in-flight guard owns it.
+ */
+export interface LukkChangePassword {
+  changing: Readonly<Ref<boolean>>
+  changePassword: (input: ChangePasswordInput) => Promise<void>
+}
 
 /**
  * Change the signed-in user's password (pairs with lukk's `features.change_password`).
@@ -16,7 +26,7 @@ import { ref, useNuxtApp } from '#imports'
  * password is a `422` on `current_password`; the endpoint shares the step-up throttle, so a burst
  * of wrong guesses is a `429` and, where the account lockout is on, eventually a `423`.
  */
-export function useLukkChangePassword() {
+export function useLukkChangePassword(): LukkChangePassword {
   const { $lukk } = useNuxtApp()
 
   /** True while the change is in flight — bind a submit button's disabled state to it. */

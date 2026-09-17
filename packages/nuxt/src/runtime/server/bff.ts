@@ -4,7 +4,7 @@ import { defineEventHandler, getCookie, getRequestHeader, readRawBody, setRespon
 import { useRuntimeConfig } from '#imports'
 import { LUKK_BFF_PREFIX, confirmationHeaderName, sessionCookieName } from '../shared'
 import { isForeignOrigin, rejectUnresolvedTarget, resolveTarget, viaHeader, visitorIp } from './proxy-utils'
-import { isSessionEnded, markSessionEnded, newSessionId, sessionKey, withholdSessionCookie } from './ended-sessions'
+import { endSession, newSessionId, sessionEnded, sessionKey, sessionReplaced, withholdSessionCookie } from './ended-sessions'
 import { revokeDroppedSession } from './revoke-dropped'
 import { readSealedSession } from './sealed-session'
 import { warnIfSessionTooLarge } from './session-size'
@@ -124,11 +124,11 @@ export default defineEventHandler(async (event) => {
       setResponseStatus(event, 409)
       return { message: 'The session was replaced.' }
     }
-    if (isSessionEnded(sessionKey(s))) return replaced()
+    if (await sessionEnded(sessionKey(s))) return replaced()
 
     const { pair, expiresIn, retryable } = await refreshOnce(s, baseURL, clientIp)
-    if (isSessionEnded(sessionKey(s))) {
-      revokeDroppedSession(event, pair?.access, baseURL, clientIp)
+    if (await sessionEnded(sessionKey(s))) {
+      revokeDroppedSession(event, { access: pair?.access, refresh: pair?.refresh }, baseURL, clientIp)
       return replaced()
     }
 
@@ -140,9 +140,9 @@ export default defineEventHandler(async (event) => {
 
     await s.update(pair)
     warnIfSessionTooLarge(s)
-    if (isSessionEnded(sessionKey(s))) {
+    if (await sessionEnded(sessionKey(s))) {
       withholdSessionCookie(event.node.res, sessionName)
-      revokeDroppedSession(event, pair.access, baseURL, clientIp)
+      revokeDroppedSession(event, pair, baseURL, clientIp)
       return replaced()
     }
 
@@ -152,7 +152,7 @@ export default defineEventHandler(async (event) => {
 
   let res = await callLukk(sealed.access)
   // Rotated tokens this request re-sealed, if any — revoked should the session turn out to be replaced.
-  let resealedAccess: string | undefined
+  let resealedTokens: TokenSession | undefined
   // A refresh that failed without lukk rejecting the token (a throttle, an outage): the session is live.
   let stillRefreshable = false
 
@@ -160,37 +160,37 @@ export default defineEventHandler(async (event) => {
     const s = await session()
     // A session a sign-in replaced or a logout ended is neither rotated nor written — before the
     // refresh or after it — and the 401 goes back as it came. See the `/refresh` branch above.
-    const ended = () => isSessionEnded(sessionKey(s))
+    const ended = () => sessionEnded(sessionKey(s))
     // Except for a logout: it still renews an ended session's token — never writing it back — so that
     // lukk actually revokes it. Skipping it left a replaced session's family alive after the logout.
     const endingIt = subpath === '/logout'
 
-    if (!ended() || endingIt) {
+    if (endingIt || !(await ended())) {
       const { pair, retryable } = await refreshOnce(s, baseURL, clientIp)
-      if (pair && (!ended() || endingIt)) {
+      if (pair && (endingIt || !(await ended()))) {
         logoutRefresh = pair.refresh
         // Seal AFTER the retried call, so a sign-in or logout during it is still seen — the response
         // carries this cookie only once that call is done. In `finally`: the refresh token has been
         // rotated either way, and a throw that skipped the write would strand the session on a consumed one.
         try { res = await callLukk(pair.access) }
         finally {
-          if (!ended()) {
+          if (!(await ended())) {
             await s.update(pair)
             warnIfSessionTooLarge(s)
-            resealedAccess = pair.access
+            resealedTokens = pair
           }
           // The logout is about to revoke it itself.
           else if (!endingIt) {
-            revokeDroppedSession(event, pair.access, baseURL, clientIp)
+            revokeDroppedSession(event, pair, baseURL, clientIp)
           }
         }
       }
       else if (pair) {
-        revokeDroppedSession(event, pair.access, baseURL, clientIp)
+        revokeDroppedSession(event, pair, baseURL, clientIp)
       }
       // Clear ONLY on a definitive rejection. A throttled or failed refresh leaves the token valid, and
       // discarding the session there turns a transient 429 into an unrecoverable logout.
-      else if (!pair && !retryable && !ended()) {
+      else if (!pair && !retryable && !(await ended())) {
         await s.clear()
       }
       else if (!pair && retryable) {
@@ -211,9 +211,9 @@ export default defineEventHandler(async (event) => {
 
   // Reading the body can take as long as the upstream likes. A session re-sealed above that a sign-in or
   // logout ended meanwhile must not leave with this response — the last point before it does.
-  if (rwSession && isSessionEnded(sessionKey(await rwSession))) {
+  if (rwSession && await sessionEnded(sessionKey(await rwSession))) {
     withholdSessionCookie(event.node.res, sessionName)
-    revokeDroppedSession(event, resealedAccess, baseURL, clientIp)
+    revokeDroppedSession(event, resealedTokens ?? {}, baseURL, clientIp)
   }
 
   // Capture + strip minted tokens. Login / 2FA / passkey login / register only — `/refresh` is
@@ -222,8 +222,14 @@ export default defineEventHandler(async (event) => {
   // `refreshOnce`'s merge-update deliberately preserves the step-up across it.
   if (res.ok && isTokenPair(data)) {
     const s = await session()
-    // The session this request arrived with is over: a refresh still out for it must not write it back.
-    if (sealed.access || sealed.refresh) markSessionEnded(sessionKey(s))
+    // The session this request arrived with is over: a refresh still out for it must not write it back,
+    // and lukk is told to end it now. Its cookie is about to be overwritten, so nothing could reach it
+    // again — but it stayed live on lukk until it expired, and if this response never reaches the
+    // browser (a dropped connection, an aborted fetch), the browser kept using it for as long.
+    if (sealed.access || sealed.refresh) {
+      await endSession(sessionKey(s), { replaced: true })
+      revokeDroppedSession(event, sealed, baseURL, clientIp)
+    }
     // `confirmation: undefined` too: a fresh token pair means a new SESSION, and a step-up earned by
     // the previous one must not carry over. Before confirmations were bound to the earning session
     // that was a silent no-op for the same subject; now it is a hard 423 on every step-up-gated
@@ -243,7 +249,7 @@ export default defineEventHandler(async (event) => {
     const s = await session()
     // h3 re-seals the WHOLE session on any update — a confirmation answering after a sign-in or logout
     // would write the replaced session back. It also belongs to that session, so it is not recorded.
-    if (isSessionEnded(sessionKey(s))) {
+    if (await sessionEnded(sessionKey(s))) {
       setResponseStatus(event, 409)
       return { message: 'The session was replaced.' }
     }
@@ -264,11 +270,12 @@ export default defineEventHandler(async (event) => {
     const unsealed = Boolean(sealed.access || sealed.refresh)
     // Not for a session a sign-in has ALREADY replaced: the browser holds the newer cookie, and clearing
     // here would land after it and sign that newer session out — leaving it alive on lukk with nothing
-    // pointing at it. The logout above still revoked this one upstream.
-    if (!unsealed || !isSessionEnded(sessionKey(s))) {
+    // pointing at it. The logout above still revoked this one upstream. (One a LOGOUT ended is cleared
+    // again: a logout resent after its first response was lost carries the same, now dead, cookie.)
+    if (!unsealed || !(await sessionReplaced(sessionKey(s)))) {
       // Only a session that unsealed: a forged or expired cookie still gets an h3 id, and recording
       // those let anyone flood the record past its bound and evict the entries that matter.
-      if (unsealed) markSessionEnded(sessionKey(s))
+      if (unsealed) await endSession(sessionKey(s))
       await s.clear()
     }
   }

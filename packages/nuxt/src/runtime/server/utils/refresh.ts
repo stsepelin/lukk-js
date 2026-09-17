@@ -62,15 +62,24 @@ async function rawRefresh(refreshToken: string, baseURL: string, clientIp: strin
   // itself; with it, login and the refresh that follows also key on the same identity.
   const headers: Record<string, string> = { 'Content-Type': 'application/json', 'Accept': 'application/json' }
   if (clientIp) headers['X-Forwarded-For'] = clientIp
-  const res = await fetch(target, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ refresh_token: refreshToken }),
-    // Never follow an upstream 3xx: a 307/308 preserves this POST body, which would
-    // re-send the rotating refresh token to the redirect host (CWE-918/200). An opaque
-    // redirect is not `ok`, so it falls through to the not-ok branch below.
-    redirect: 'manual',
-  })
+  let res: Response
+  try {
+    res = await fetch(target, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ refresh_token: refreshToken }),
+      // Never follow an upstream 3xx: a 307/308 preserves this POST body, which would
+      // re-send the rotating refresh token to the redirect host (CWE-918/200). An opaque
+      // redirect is not `ok`, so it falls through to the not-ok branch below.
+      redirect: 'manual',
+    })
+  }
+  catch {
+    // lukk unreachable, or the connection dropped mid-request: an outage, not a verdict on the token.
+    // It threw straight out of the handler as a 500 before. (If lukk did rotate it, the next refresh
+    // replays it inside the grace window and gets a sibling.)
+    return { pair: null, retryable: true }
+  }
 
   // Only lukk actually rejecting the token ends the session. Anything else — a throttle, an outage,
   // a redirect we refused — left it unconsumed, so report it retryable and keep the session.

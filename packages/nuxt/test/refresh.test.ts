@@ -37,6 +37,16 @@ describe('refreshOnce with an unusable baseURL', () => {
   })
 })
 
+describe('refreshOnce when lukk can\'t be reached', () => {
+  it('reports it retryable instead of throwing out of the handler as a 500', async () => {
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('fetch failed'))
+
+    const result = await refreshOnce({ id: `h3-${Math.random()}`, data: { refresh: 'rt', sid: `s-${Math.random()}` } }, 'https://lukk/auth')
+
+    expect(result).toEqual({ pair: null, retryable: true })
+  })
+})
+
 describe('refreshOnce single-flight identity', () => {
   it('keys on the session\'s own sid, so a new session never joins a refresh for the one it replaced', async () => {
     // A sign-in re-seals the NEW session under the OLD h3 id. Keyed on that id, a refresh for the new

@@ -64,6 +64,38 @@ describe('logout() with an access token lukk rejects', () => {
     expect(useState<string | null>(ACCESS_KEY, () => null).value).toBeNull()
   })
 
+  it('does not wait on itself under the cross-tab lock either — the renewal shares the logout\'s hold', async () => {
+    vi.useFakeTimers()
+    let requests = 0
+    let held = false
+    vi.stubGlobal('window', {})
+    vi.stubGlobal('navigator', {
+      locks: {
+        request: (_name: string, _options: unknown, callback: () => Promise<void>) => {
+          requests++
+          if (held) return new Promise(() => {}) // a second acquisition would wait forever
+          held = true
+          return callback().finally(() => { held = false })
+        },
+      },
+    })
+    let renewed = false
+    const calls = boot('direct', (path) => {
+      if (path === '/refresh') { renewed = true; return json({ access_token: 'fresh', expires_in: 900 }) }
+      return renewed ? json(undefined, 204) : json({ message: 'Unauthenticated.' }, 401)
+    })
+    useState<string | null>(ACCESS_KEY, () => null).value = 'expired'
+
+    let done = false
+    const loggingOut = useLukkAuth().logout().then(() => { done = true })
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(done).toBe(true)
+    await loggingOut
+    expect(requests).toBe(1)
+    expect(calls.map(c => c.path)).toEqual(['/logout', '/refresh', '/logout'])
+  })
+
   it('fails fast when there is no session left to renew (an erased account, a revoked session)', async () => {
     vi.useFakeTimers()
     const calls = boot('bff', () => json({ message: 'Unauthenticated.' }, 401))
@@ -84,13 +116,20 @@ describe('logout() with an access token lukk rejects', () => {
     ['a 500', () => json({ message: 'Server Error' }, 500)],
     ['a 403', () => json({ message: 'Forbidden.' }, 403)],
     ['a 429', () => json({ message: 'Too Many Attempts.' }, 429)],
-    ['a network failure', () => { throw new TypeError('Failed to fetch') }],
   ])('does not renew for %s — only an expired token is renewable', async (_, answer) => {
     vi.useFakeTimers()
     const calls = boot('direct', answer)
 
     await expect(useLukkAuth().logout()).rejects.toBeDefined()
     expect(calls.map(c => c.path)).toEqual(['/logout'])
+  })
+
+  it('does not renew for a network failure either (it is sent once more without keepalive, then given up)', async () => {
+    vi.useFakeTimers()
+    const calls = boot('direct', () => { throw new TypeError('Failed to fetch') })
+
+    await expect(useLukkAuth().logout()).rejects.toBeInstanceOf(TypeError)
+    expect(calls.map(c => c.path)).toEqual(['/logout', '/logout'])
   })
 
   it('does not stall when another request\'s refresh started while the first attempt was out', async () => {
@@ -173,9 +212,11 @@ describe('logout() with an access token lukk rejects', () => {
   it('still holds back a refresh that starts while the retried logout is out', async () => {
     let answer!: (r: Response) => void
     let renewed = false
+    let logouts = 0
     const calls = boot('direct', (path) => {
       if (path === '/refresh') { renewed = true; return json({ access_token: 'fresh', expires_in: 900 }) }
       if (!renewed) return json({ message: 'Unauthenticated.' }, 401)
+      if (++logouts > 1) return json(undefined, 204)
       return new Promise<Response>((resolve) => { answer = resolve }) as unknown as Response
     })
     useState<string | null>(ACCESS_KEY, () => null).value = 'expired'
@@ -189,7 +230,10 @@ describe('logout() with an access token lukk rejects', () => {
     answer(json(undefined, 204))
     await loggingOut
     await refreshing
-    expect(calls.map(c => c.path)).toEqual(['/logout', '/refresh', '/logout', '/refresh'])
+    // Released only once the logout answered — and, having raced a logout, that refresh's rotation is
+    // ended too, with the token it minted.
+    expect(calls.map(c => c.path)).toEqual(['/logout', '/refresh', '/logout', '/refresh', '/logout'])
+    expect(calls.at(-1)!.bearer).toBe('Bearer fresh')
   })
 
   it(`resolves long before the ${REFRESH_SETTLE_TIMEOUT}ms cap when the retry succeeds`, async () => {

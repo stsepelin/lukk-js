@@ -141,7 +141,15 @@ export function createLukkClient(hooks: LukkClientHooks) {
     // access token otherwise left the session alive), and requires a non-simple request for that path so
     // a cross-site form can't log anyone out. `application/json` is that signal — and it forces a CORS
     // preflight, which a plain `POST` with no body did not.
-    logout: (options: { retry?: boolean } = {}) => request<void>('/logout', json({}), options.retry ?? true),
+    //
+    // `keepalive`, so a page that navigates away right after starting it doesn't cancel it — a cancelled
+    // logout never reached lukk, and the session outlived what the user saw. A browser that refuses a
+    // keepalive request needing a CORS preflight rejects it with a TypeError; it is sent again without.
+    logout: (options: { retry?: boolean } = {}) => request<void>('/logout', { ...json({}), keepalive: true }, options.retry ?? true)
+      .catch((error: unknown) => {
+        if (!(error instanceof TypeError)) throw error
+        return request<void>('/logout', json({}), options.retry ?? true)
+      }),
     revokeAllSessions: () => request<void>('/sessions', { method: 'DELETE' }),
     revokeOtherSessions: () => request<void>('/sessions/others', { method: 'DELETE' }),
 

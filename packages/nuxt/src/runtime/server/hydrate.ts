@@ -4,9 +4,9 @@ import { useRuntimeConfig } from '#imports'
 import { sessionCookieName } from '../shared'
 import { accessExpired } from './access-token'
 import { visitorIp } from './proxy-utils'
-import { isSessionEnded, sessionKey, withholdSessionCookie } from './ended-sessions'
+import { sessionEnded, sessionKey, withholdSessionCookie } from './ended-sessions'
 import { revokeDroppedSession } from './revoke-dropped'
-import { readSealedSession } from './sealed-session'
+import { readSealedSessionWithId } from './sealed-session'
 import { warnIfSessionTooLarge } from './session-size'
 import { refreshOnce, type TokenSession } from './utils/refresh'
 
@@ -51,7 +51,8 @@ export async function resolveHydrationAccess(event: H3Event): Promise<string | n
   // A truthy access proves `sessionPassword` was present: readSealed only returns data when it
   // unseals, and returns {} without a password — so the rotate path can assert `sessionPassword!`
   // rather than re-check an always-false branch.
-  const sealed = await readSealedSession(event, sessionPassword, name)
+  const read = await readSealedSessionWithId(event, sessionPassword, name)
+  const sealed = read.data
   const access = sealed.access
   if (!access) return null
 
@@ -62,11 +63,12 @@ export async function resolveHydrationAccess(event: H3Event): Promise<string | n
 
   // A session a sign-in replaced or a logout ended is not rendered as signed in, even with a token still
   // valid: the tab would show that account while every call it makes acts as the newer session. The
-  // client restores with the cookie the browser now holds. (A seal from before `sid` existed can only
-  // be checked on the refresh path, which opens the session and so knows h3's id.)
-  if (isSessionEnded(sealed.sid)) return null
+  // client restores with the cookie the browser now holds. A seal from before `sid` existed is keyed by
+  // h3's id, which the read-only unseal also returns.
+  const key = sessionKey(read)
+  if (await sessionEnded(key)) return null
   if (!accessExpired(access)) {
-    remember(event, sealed.sid, name)
+    remember(event, key, name)
     return access
   }
   if (!sealed.refresh || !baseURL) return null
@@ -85,18 +87,18 @@ export async function resolveHydrationAccess(event: H3Event): Promise<string | n
     })
     // A session a sign-in replaced or a logout ended while this render was out is not re-sealed — that
     // would put it back in the browser. The client decides instead.
-    if (isSessionEnded(sessionKey(session))) return null
+    if (await sessionEnded(sessionKey(session))) return null
     const { pair } = await refreshOnce(session, baseURL, visitorIp(event, clientIpHeader))
     if (!pair?.access) return null
-    if (isSessionEnded(sessionKey(session))) {
-      revokeDroppedSession(event, pair.access, baseURL, visitorIp(event, clientIpHeader))
+    if (await sessionEnded(sessionKey(session))) {
+      revokeDroppedSession(event, pair, baseURL, visitorIp(event, clientIpHeader))
       return null
     }
 
     await session.update(pair)
     warnIfSessionTooLarge(session) // parity with bff.ts — the SSR reseal can cross the budget first
     // The render takes a while, and the cookie only goes out with the page — see `withholdIfReplaced`.
-    remember(event, sessionKey(session), name, () => revokeDroppedSession(event, pair.access, baseURL, visitorIp(event, clientIpHeader)))
+    remember(event, sessionKey(session), name, () => revokeDroppedSession(event, pair, baseURL, visitorIp(event, clientIpHeader)))
     const fresh = await sealSession(event, { password: sessionPassword!, name })
     replaceRequestCookie(event, name, fresh)
     return pair.access
@@ -113,9 +115,9 @@ export async function resolveHydrationAccess(event: H3Event): Promise<string | n
  * itself was still rendered for the old session — a tab that loaded during a sign-in shows the
  * account it loaded with until it reloads — but the browser keeps the newer session.
  */
-export function withholdIfReplaced(event: H3Event): void {
+export async function withholdIfReplaced(event: H3Event): Promise<void> {
   const hydrated = hydratedSession(event)
-  if (!hydrated || !isSessionEnded(hydrated.key)) return
+  if (!hydrated || !(await sessionEnded(hydrated.key))) return
 
   // The tokens this render re-sealed are being dropped: revoke them, once — this runs both right after
   // the user load and again from the render hooks.
@@ -133,8 +135,8 @@ export function withholdIfReplaced(event: H3Event): void {
 }
 
 /** Did a sign-in or logout end the session this render hydrated, while it was rendering? */
-export function hydratedSessionEnded(event: H3Event): boolean {
-  return isSessionEnded(hydratedSession(event)?.key)
+export function hydratedSessionEnded(event: H3Event): Promise<boolean> {
+  return sessionEnded(hydratedSession(event)?.key)
 }
 
 /** `revoke` only when this render re-sealed the session: those rotated tokens are the ones to end. */
