@@ -1,7 +1,7 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ENDED_SESSION_LIMIT, ENDED_SESSION_TTL_MS, endedSessionCount, forgetEndedSessions, isSessionEnded, markSessionEnded, newSessionId, sessionKey } from '../src/runtime/server/ended-sessions'
 
-afterEach(() => forgetEndedSessions())
+afterEach(() => { forgetEndedSessions(); vi.restoreAllMocks() })
 
 describe('ended sessions', () => {
   it('remembers an ended session for the TTL, then forgets it', () => {
@@ -31,13 +31,15 @@ describe('ended sessions', () => {
     expect(isSessionEnded('kept', ENDED_SESSION_TTL_MS + 1)).toBe(true)
   })
 
-  it('actually removes expired entries, not just reports them as expired', () => {
+  it('actually removes expired entries, not just reports them as expired — and does not warn about those', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     markSessionEnded('a', 0)
     markSessionEnded('b', 1)
 
     markSessionEnded('c', ENDED_SESSION_TTL_MS + 0.5) // a has expired, b has not
 
     expect(endedSessionCount()).toBe(2)
+    expect(warn).not.toHaveBeenCalled() // only evicting a LIVE entry loses protection
   })
 
   it('keeps expiry order when an entry is re-marked, so an expired one behind it is still pruned', () => {
@@ -51,12 +53,16 @@ describe('ended sessions', () => {
     expect(isSessionEnded('a', ENDED_SESSION_TTL_MS + 1.5)).toBe(true)
   })
 
-  it('stays bounded whatever the sign-in rate, dropping the oldest first', () => {
-    for (let i = 0; i <= ENDED_SESSION_LIMIT; i++) markSessionEnded(`s${i}`, 0)
+  it('stays bounded whatever the sign-in rate, dropping the oldest first — and says so, once', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    for (let i = 0; i <= ENDED_SESSION_LIMIT + 1; i++) markSessionEnded(`s${i}`, 0)
+    expect(warn).toHaveBeenCalledOnce()
+    expect(String(warn.mock.calls[0]![0])).toContain('no longer guarded')
 
     expect(isSessionEnded('s0', 0)).toBe(false)
-    expect(isSessionEnded('s1', 0)).toBe(true)
-    expect(isSessionEnded(`s${ENDED_SESSION_LIMIT}`, 0)).toBe(true)
+    expect(isSessionEnded('s1', 0)).toBe(false)
+    expect(isSessionEnded('s2', 0)).toBe(true)
+    expect(isSessionEnded(`s${ENDED_SESSION_LIMIT + 1}`, 0)).toBe(true)
   })
 
   it('keys a session by its own sid, falling back to h3\'s id for one sealed before sid existed', () => {

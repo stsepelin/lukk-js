@@ -27,6 +27,8 @@ vi.mock('h3', () => ({
 
 const refreshOnce = vi.fn<(s: unknown, b: string) => Promise<TokenSession | null>>()
 vi.mock('../src/runtime/server/utils/refresh', () => ({ refreshOnce: (...a: unknown[]) => refreshOnce(...(a as [unknown, string])) }))
+const revokeDroppedSession = vi.fn()
+vi.mock('../src/runtime/server/revoke-dropped', () => ({ revokeDroppedSession: (...a: unknown[]) => revokeDroppedSession(...a) }))
 
 // eslint-disable-next-line import/first
 import { hydratedSessionEnded, resolveHydrationAccess, withholdIfReplaced } from '../src/runtime/server/hydrate'
@@ -214,15 +216,36 @@ describe('resolveHydrationAccess', () => {
     expect(sessionUpdate).not.toHaveBeenCalled()
   })
 
-  it('does not re-seal a session that ended while the render was refreshing it', async () => {
+  it('does not re-seal a session that ended while the render was refreshing it — and revokes what it minted', async () => {
     unsealResult = { data: { access: expiredJwt(), refresh: 'r' } }
     refreshOnce.mockImplementation(async () => {
       markSessionEnded('sid')
       return { pair: { access: 'NEW_ACCESS', refresh: 'r2' }, retryable: false }
     })
+    const event = ev()
 
-    expect(await resolveHydrationAccess(ev())).toBeNull()
+    expect(await resolveHydrationAccess(event)).toBeNull()
     expect(sessionUpdate).not.toHaveBeenCalled()
+    expect(revokeDroppedSession).toHaveBeenCalledWith(event, 'NEW_ACCESS', 'https://lukk/auth', '')
+  })
+
+  it('revokes nothing on a render that hydrated a still-valid token, and a re-sealed one only once', async () => {
+    unsealResult = { data: { access: freshJwt(), sid: 'session-A' } }
+    const event = ev()
+    await resolveHydrationAccess(event)
+    markSessionEnded('session-A')
+    withholdIfReplaced(event)
+    expect(revokeDroppedSession).not.toHaveBeenCalled()
+
+    // A re-sealed one revokes exactly once, though the check runs after the user load AND at render end.
+    unsealResult = { data: { access: expiredJwt(), refresh: 'r' } }
+    refreshOnce.mockResolvedValue({ pair: { access: 'NEW_ACCESS', refresh: 'r2' }, retryable: false })
+    const resealedEvent = ev()
+    await resolveHydrationAccess(resealedEvent)
+    markSessionEnded('sid')
+    withholdIfReplaced(resealedEvent)
+    withholdIfReplaced(resealedEvent)
+    expect(revokeDroppedSession).toHaveBeenCalledOnce()
   })
 
   describe('a session a sign-in replaced or a logout ended', () => {
@@ -273,6 +296,9 @@ describe('resolveHydrationAccess', () => {
 
       withholdIfReplaced(event)
 
+      // And revokes the tokens that re-seal minted, so a browser still holding the old cookie can't
+      // replay a consumed refresh token into a false theft report.
+      expect(revokeDroppedSession).toHaveBeenCalledWith(event, 'NEW_ACCESS', 'https://lukk/auth', '')
       // Only this app's cookie — not a co-hosted app's whose name merely starts the same way.
       expect(event.node.res.getHeader('set-cookie')).toEqual(['locale=en; Path=/', '__Host-lukk-session-other=1; Path=/'])
     })

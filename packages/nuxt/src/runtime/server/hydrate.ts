@@ -5,6 +5,7 @@ import { sessionCookieName } from '../shared'
 import { accessExpired } from './access-token'
 import { visitorIp } from './proxy-utils'
 import { isSessionEnded, sessionKey, withholdSessionCookie } from './ended-sessions'
+import { revokeDroppedSession } from './revoke-dropped'
 import { readSealedSession } from './sealed-session'
 import { warnIfSessionTooLarge } from './session-size'
 import { refreshOnce, type TokenSession } from './utils/refresh'
@@ -86,12 +87,16 @@ export async function resolveHydrationAccess(event: H3Event): Promise<string | n
     // would put it back in the browser. The client decides instead.
     if (isSessionEnded(sessionKey(session))) return null
     const { pair } = await refreshOnce(session, baseURL, visitorIp(event, clientIpHeader))
-    if (!pair?.access || isSessionEnded(sessionKey(session))) return null
+    if (!pair?.access) return null
+    if (isSessionEnded(sessionKey(session))) {
+      revokeDroppedSession(event, pair.access, baseURL, visitorIp(event, clientIpHeader))
+      return null
+    }
 
     await session.update(pair)
     warnIfSessionTooLarge(session) // parity with bff.ts — the SSR reseal can cross the budget first
     // The render takes a while, and the cookie only goes out with the page — see `withholdIfReplaced`.
-    remember(event, sessionKey(session), name)
+    remember(event, sessionKey(session), name, () => revokeDroppedSession(event, pair.access, baseURL, visitorIp(event, clientIpHeader)))
     const fresh = await sealSession(event, { password: sessionPassword!, name })
     replaceRequestCookie(event, name, fresh)
     return pair.access
@@ -112,6 +117,13 @@ export function withholdIfReplaced(event: H3Event): void {
   const hydrated = hydratedSession(event)
   if (!hydrated || !isSessionEnded(hydrated.key)) return
 
+  // The tokens this render re-sealed are being dropped: revoke them, once — this runs both right after
+  // the user load and again from the render hooks.
+  if (hydrated.revoke) {
+    hydrated.revoke()
+    hydrated.revoke = undefined
+  }
+
   // Too late once the headers are out — a streamed render (Nuxt's `ssrStreaming`) calls the render
   // hooks after the response has started, and touching a sent header throws. The plugin's own check
   // right after the user load covers that case while the headers are still open.
@@ -125,10 +137,11 @@ export function hydratedSessionEnded(event: H3Event): boolean {
   return isSessionEnded(hydratedSession(event)?.key)
 }
 
-interface HydratedSession { key?: string, name: string }
+/** `revoke` only when this render re-sealed the session: those rotated tokens are the ones to end. */
+interface HydratedSession { key?: string, name: string, revoke?: () => void }
 
-function remember(event: H3Event, key: string | undefined, name: string): void {
-  (event.context as { lukkHydrated?: HydratedSession }).lukkHydrated = { key, name }
+function remember(event: H3Event, key: string | undefined, name: string, revoke?: () => void): void {
+  (event.context as { lukkHydrated?: HydratedSession }).lukkHydrated = { key, name, revoke }
 }
 
 function hydratedSession(event: H3Event): HydratedSession | undefined {

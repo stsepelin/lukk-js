@@ -78,5 +78,8 @@ async function rawRefresh(refreshToken: string, baseURL: string, clientIp: strin
 
   const pair = await res.json() as { access_token: string, refresh_token?: string, expires_in?: number }
 
-  return { pair: { access: pair.access_token, refresh: pair.refresh_token ?? refreshToken }, expiresIn: pair.expires_in, retryable: false }
+  // No fallback to the token just sent: lukk has consumed it. Kept, the next refresh would replay it
+  // past the grace window and reuse detection would revoke the family as stolen. Without a new one the
+  // session ends when this access token does.
+  return { pair: { access: pair.access_token, refresh: pair.refresh_token }, expiresIn: pair.expires_in, retryable: false }
 }

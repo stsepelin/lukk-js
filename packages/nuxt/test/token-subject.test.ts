@@ -5,7 +5,8 @@ const jwt = (claims: unknown) => `h.${Buffer.from(JSON.stringify(claims)).toStri
 
 describe('tokenSubject', () => {
   it('reads a string or numeric sub, including base64url characters that plain base64 lacks', () => {
-    expect(tokenSubject(jwt({ sub: 'user-?>~' }))).toBe('user-?>~')
+    expect(tokenSubject(jwt({ sub: 'user-?>~' }))).toBe('user-?>~') // encodes to `-`
+    expect(tokenSubject(jwt({ sub: '??' }))).toBe('??') // encodes to `_` — common in real tokens (`iss` URLs)
     expect(tokenSubject(jwt({ sub: 42 }))).toBe('42')
   })
 

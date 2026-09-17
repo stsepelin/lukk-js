@@ -50,6 +50,8 @@ vi.mock('h3', () => ({
 
 const refreshOnce = vi.fn<(s: unknown, b: string) => Promise<TokenSession | null>>()
 vi.mock('../src/runtime/server/utils/refresh', () => ({ refreshOnce: (...a: unknown[]) => refreshOnce(...(a as [unknown, string])) }))
+const revokeDroppedSession = vi.fn()
+vi.mock('../src/runtime/server/revoke-dropped', () => ({ revokeDroppedSession: (...a: unknown[]) => revokeDroppedSession(...a) }))
 
 // eslint-disable-next-line import/first
 import handler from '../src/runtime/server/api-proxy'
@@ -359,6 +361,7 @@ describe('app-API proxy', () => {
       await run(e)
 
       expect(e.node.res.getHeader('set-cookie')).toBeUndefined()
+      expect(revokeDroppedSession).toHaveBeenCalledWith(e, 'new-tok', 'https://api/auth', '')
     })
 
     it('is not re-sealed, nor its new token used, when it ended during the refresh', async () => {
@@ -374,6 +377,7 @@ describe('app-API proxy', () => {
 
       expect(proxyRequest).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ headers: expect.objectContaining({ authorization: `Bearer ${stale}` }) }))
       expect(e.node.res.setHeader).not.toHaveBeenCalledWith('set-cookie', expect.anything())
+      expect(revokeDroppedSession).toHaveBeenCalledWith(e, 'new-tok', 'https://api/auth', '')
     })
   })
 

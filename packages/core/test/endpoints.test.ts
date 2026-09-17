@@ -43,6 +43,17 @@ describe('endpoint methods → route + verb', () => {
   })
 })
 
+describe('logout request shape', () => {
+  it('sends a JSON body, so a cookie-authenticated logout is a non-simple request', async () => {
+    // lukk only honours the refresh cookie on logout for a request a cross-site form couldn't have made.
+    const fetch = vi.fn(async () => new Response(null, { status: 204 }))
+    await createLukkClient({ baseURL: 'https://x/auth', fetch }).logout()
+    const init = fetch.mock.calls[0]![1] as RequestInit
+    expect(new Headers(init.headers).get('Content-Type')).toBe('application/json')
+    expect(init.body).toBe('{}')
+  })
+})
+
 describe('request behaviour', () => {
   it('returns undefined for an empty/204 body', async () => {
     const fetch = vi.fn(async () => new Response(null, { status: 204 }))

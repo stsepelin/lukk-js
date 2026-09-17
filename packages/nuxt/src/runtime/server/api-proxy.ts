@@ -4,6 +4,7 @@ import { LUKK_BFF_PREFIX, confirmationHeaderName, isSessionCookieName, sessionCo
 import { accessExpired } from './access-token'
 import { hopByHopHeaders, isForeignOrigin, reportProxyFailure, rejectUnresolvedTarget, resolveTarget, SPOOFABLE_FORWARDING, viaHeader, visitorIp } from './proxy-utils'
 import { isSessionEnded, sessionKey } from './ended-sessions'
+import { revokeDroppedSession } from './revoke-dropped'
 import { readSealedSession } from './sealed-session'
 import { refreshOnce, type TokenSession } from './utils/refresh'
 
@@ -96,6 +97,9 @@ export default defineEventHandler(async (event) => {
       access = pair.access
       resealed = ended
     }
+    else if (pair) {
+      revokeDroppedSession(event, pair.access, baseURL, clientIp)
+    }
   }
   // Carry any Set-Cookie h3 queued (the rotated session, on a refresh) through the
   // proxied response — the streamed upstream reply would otherwise drop it.
@@ -165,7 +169,9 @@ export default defineEventHandler(async (event) => {
       ev.node.res.removeHeader('set-cookie')
       // The rotated session cookie (if any) — unless a sign-in or logout ended that session while the
       // upstream was answering. This is the last point before the headers go out.
-      const keep = resealed?.() ? [] : toCookieArray(sessionCookie)
+      const replaced = resealed?.() === true
+      if (replaced) revokeDroppedSession(event, access, baseURL, clientIp)
+      const keep = replaced ? [] : toCookieArray(sessionCookie)
       // Opt-in passthrough: forward only allow-listed names — and NEVER a lukk sealed session
       // cookie (this app's OR a co-hosted app's, whatever the list says); an upstream must not be
       // able to set/overwrite any lukk session.

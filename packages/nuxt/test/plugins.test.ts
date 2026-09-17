@@ -292,6 +292,49 @@ describe('keeping abilities in step with a refreshed token', () => {
     expect(fetchUser).toHaveBeenCalledOnce()
   })
 
+  it('reloads on every switch, not only the first — the re-entry guard is released after each', async () => {
+    const token = (sub: string) => `h.${Buffer.from(JSON.stringify({ sub })).toString('base64url')}.s`
+    user.value = {}
+    restoreState(__test.nuxtApp).subject = 'A'
+    fetchUser.mockResolvedValue(undefined)
+    const { provide } = boot()
+
+    captured.client!.refreshTokens.mockResolvedValueOnce({ access_token: token('B'), expires_in: 900 })
+    await provide.lukkRefresh()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    captured.client!.refreshTokens.mockResolvedValueOnce({ access_token: token('C'), expires_in: 900 })
+    await provide.lukkRefresh()
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    expect(fetchUser).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not re-enter while its own user reload triggers another refresh', async () => {
+    // `fetchUser`'s own 401 refreshes again; without the guard that refresh reloaded again, and again.
+    const token = (sub: string) => `h.${Buffer.from(JSON.stringify({ sub })).toString('base64url')}.s`
+    user.value = { abilities: ['orders.read'] }
+    const { provide } = boot()
+    fetchUser.mockImplementation(async () => { await provide.lukkRefresh() })
+    captured.client!.refreshTokens.mockResolvedValue({ access_token: token('A'), expires_in: 900 })
+
+    await provide.lukkRefresh()
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    expect(fetchUser).toHaveBeenCalledOnce()
+  })
+
+  it('does not treat a token without a subject as a switch', async () => {
+    user.value = {}
+    restoreState(__test.nuxtApp).subject = 'A'
+    const { provide } = boot()
+
+    captured.client!.refreshTokens.mockResolvedValueOnce({ access_token: 'not-a-jwt', expires_in: 900 })
+    await provide.lukkRefresh()
+    await Promise.resolve()
+
+    expect(fetchUser).not.toHaveBeenCalled()
+  })
+
   it('does not treat an unknown subject as a switch', async () => {
     user.value = {}
     const { provide } = boot() // no subject recorded (BFF, or a token without `sub`)

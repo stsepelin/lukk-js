@@ -37,6 +37,15 @@ export interface RestoreState {
    * alongside, it renews the session that request is replacing or ending — see `signIn`.
    */
   handover: Promise<unknown> | null
+  /**
+   * The whole of a `logout()`, if one is running — including the gap between an attempt lukk rejected
+   * and its retry, when `handover` is deliberately empty so the token can be renewed. Sign-ins wait on
+   * this rather than on `handover`: in that gap a sign-in slipped through, and the logout's cleanup then
+   * signed the new session out.
+   */
+  ending: Promise<unknown> | null
+  /** Tell other tabs of this app that the session changed. Set by the client plugin where supported. */
+  announce?: () => void
 }
 
 /**
@@ -47,7 +56,7 @@ export const REFRESH_SETTLE_TIMEOUT = 10_000
 
 export function restoreState(nuxtApp: object): RestoreState {
   const app = nuxtApp as { _lukkRestore?: RestoreState }
-  return (app._lukkRestore ??= { started: false, restored: shallowRef(false), epoch: 0, logouts: 0, refreshing: null, handover: null })
+  return (app._lukkRestore ??= { started: false, restored: shallowRef(false), epoch: 0, logouts: 0, refreshing: null, handover: null, ending: null })
 }
 
 /**
@@ -95,9 +104,10 @@ export async function signIn<T>(nuxtApp: object, send: () => Promise<T>, startsS
   await settleRefresh(nuxtApp)
 
   const state = restoreState(nuxtApp)
-  // And for a logout still on the wire: its cleanup — and the cleared cookie its response carries —
-  // would otherwise land after this sign-in succeeded, leaving the visitor signed out and the new
-  // session alive upstream with nothing pointing at it.
+  // And for a logout still running: its cleanup — and the cleared cookie its response carries — would
+  // otherwise land after this sign-in succeeded, leaving the visitor signed out and the new session
+  // alive upstream with nothing pointing at it. The whole logout, not only its request on the wire.
+  await settle(state.ending)
   await settle(state.handover)
   const logouts = state.logouts
 
@@ -125,6 +135,8 @@ export async function signIn<T>(nuxtApp: object, send: () => Promise<T>, startsS
  * no `fetchUser` to do that.
  */
 export function beginSession(nuxtApp: object): void {
-  restoreState(nuxtApp).epoch++
+  const state = restoreState(nuxtApp)
+  state.epoch++
   useState<boolean>(RESTORE_FAILED_KEY, () => false).value = false
+  state.announce?.()
 }

@@ -194,6 +194,13 @@ export function useLukkAuth(): LukkAuth {
   }
 
   async function logout(): Promise<void> {
+    const ending = endAndClear()
+    state.ending = ending
+    try { await ending }
+    finally { if (state.ending === ending) state.ending = null }
+  }
+
+  async function endAndClear(): Promise<void> {
     try {
       // Let a refresh already on the wire finish first, so its cookie cannot land after logout cleared
       // the session — and so the logout itself carries the token it just minted.
@@ -202,13 +209,12 @@ export function useLukkAuth(): LukkAuth {
       // not write its result after this.
       state.epoch++
       state.logouts++
-      // Published like a sign-in, so a refresh starting while this is out waits for the cookie to clear.
-      const request = endSession()
-      state.handover = request
-      try { await request }
-      finally { if (state.handover === request) state.handover = null }
+      await endSession()
     }
     finally {
+      // Once more: the renewal inside `endSession` can itself start a user reload, which captured the
+      // generation bumped above — landing after this, it put the user back, signed in with no token.
+      state.epoch++
       access.value = null
       user.value = null
       state.subject = undefined
@@ -216,36 +222,43 @@ export function useLukkAuth(): LukkAuth {
       challenge.value = null
       confirmation.value = null
       confirmed.value = false
+      state.announce?.()
     }
   }
 
   /**
    * Send the logout, renewing an expired access token once if lukk rejects it.
    *
-   * Not lukk-core's own refresh-and-retry: this request is published as the handover, and a refresh
-   * waits for the handover — so core's refresh waited on the logout that was waiting for it, and every
-   * logout with an expired token (an idle user, an erased account) hung for the full settle timeout.
+   * Not lukk-core's own refresh-and-retry: each attempt is published as the handover, and a refresh waits
+   * for the handover — so core's refresh waited on the logout that was waiting for it, and every logout
+   * with an expired token (an idle user, an erased account) hung for the full settle timeout.
+   *
+   * The hold is per ATTEMPT. Between the rejected attempt and the retry there is none, so the renewal —
+   * or a refresh another request already started while the first attempt was out, which the renewal then
+   * joins — goes out at once. Holding it across the gap made that joined refresh wait on this logout
+   * again. Sign-ins stay out of the gap by waiting on the whole `logout()` (`state.ending`).
    *
    * The renewal still costs a round trip before the retry. A page that navigates away without awaiting
    * `logout()` can cancel it — then lukk never revokes the session. Await it before navigating.
    */
   async function endSession(): Promise<void> {
     try {
-      await $lukk.logout({ retry: false })
+      await sendLogout()
     }
     catch (error) {
       if ((error as { status?: number } | null)?.status !== 401) throw error
 
-      // Release this logout's own hold for the renewal, and restore it for the retry.
-      const own = state.handover
-      state.handover = null
-      let renewed: unknown
-      try { renewed = await (nuxtApp as { $lukkRefresh?: () => Promise<unknown> }).$lukkRefresh?.() }
-      finally { state.handover = own }
-
+      const renewed = await (nuxtApp as { $lukkRefresh?: () => Promise<unknown> }).$lukkRefresh?.()
       if (!renewed) throw error
-      await $lukk.logout({ retry: false })
+      await sendLogout()
     }
+  }
+
+  async function sendLogout(): Promise<void> {
+    const request = $lukk.logout({ retry: false })
+    state.handover = request
+    try { await request }
+    finally { if (state.handover === request) state.handover = null }
   }
 
   /** Revoke every *other* session (e.g. after a password change). */

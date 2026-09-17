@@ -60,6 +60,9 @@ export function markSessionEnded(key: string | undefined, now = Date.now()): voi
 
   for (const [id, expires] of ended) {
     if (expires > now && ended.size < ENDED_SESSION_LIMIT) break
+    // Evicting a LIVE entry means the guard has stopped covering that session. Not a memory problem —
+    // but a silent loss of protection, so say so once.
+    if (expires > now) warnSaturated()
     ended.delete(id)
   }
 
@@ -73,9 +76,17 @@ export function isSessionEnded(key: string | undefined, now = Date.now()): boole
   return expires !== undefined && expires > now
 }
 
+let warned = false
+function warnSaturated(): void {
+  if (warned) return
+  warned = true
+  console.warn(`[lukk-nuxt] More than ${ENDED_SESSION_LIMIT} sessions were replaced or ended within ${ENDED_SESSION_TTL_MS / 60_000} minutes; the oldest are no longer guarded against a late refresh writing them back.`)
+}
+
 /** Test seam. */
 export function forgetEndedSessions(): void {
   ended.clear()
+  warned = false
 }
 
 /** Test seam: how many entries are held — pruning is only observable through this. */

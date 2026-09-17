@@ -136,7 +136,12 @@ export function createLukkClient(hooks: LukkClientHooks) {
      * the token itself: one that holds refreshes back while a logout is on the wire would otherwise
      * have that refresh wait on the very logout waiting for it.
      */
-    logout: (options: { retry?: boolean } = {}) => request<void>('/logout', { method: 'POST' }, options.retry ?? true),
+    //
+    // Sent with a JSON body: lukk accepts a logout authenticated only by the refresh cookie (an expired
+    // access token otherwise left the session alive), and requires a non-simple request for that path so
+    // a cross-site form can't log anyone out. `application/json` is that signal — and it forces a CORS
+    // preflight, which a plain `POST` with no body did not.
+    logout: (options: { retry?: boolean } = {}) => request<void>('/logout', json({}), options.retry ?? true),
     revokeAllSessions: () => request<void>('/sessions', { method: 'DELETE' }),
     revokeOtherSessions: () => request<void>('/sessions/others', { method: 'DELETE' }),
 

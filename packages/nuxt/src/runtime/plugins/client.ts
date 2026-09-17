@@ -176,6 +176,41 @@ export default defineNuxtPlugin({
     )
     const restore = () => attempt(false)
 
+    // Other tabs share the session cookie, so a sign-in or logout in one changes what every other tab is
+    // acting as — while each keeps showing the account it loaded. Direct mode catches a switch at the
+    // next refresh (`resyncUser`); a BFF tab never sees a token, so without this it went on showing the
+    // previous account while its requests ran as the new one. A tab that begins or ends a session says
+    // so; the others drop what they had in flight and re-check.
+    if (import.meta.client && typeof window !== 'undefined' && typeof window.BroadcastChannel === 'function') {
+      // Scoped to this app: a channel is already per origin, and two apps sharing an origin live under
+      // different router bases. Unscoped, each re-checked the other's tabs for nothing.
+      const appBase = (useRuntimeConfig() as { app?: { baseURL?: string } }).app?.baseURL ?? '/'
+      const channel = new window.BroadcastChannel(`lukk:session:${appBase}`)
+      state.announce = () => channel.postMessage('changed')
+      channel.onmessage = () => { void followOtherTab().catch(() => {}) }
+    }
+
+    async function followOtherTab(): Promise<void> {
+      const auth = useLukkAuth()
+      // Anything this tab still had in flight belongs to the session that just changed.
+      state.epoch++
+
+      if (cfg.mode === 'direct') {
+        // The in-memory token is the old session's; the cookie is the new one's. Renew from the cookie,
+        // and read "no session" as signed out.
+        const outcome = await restore()
+        if (!outcome.pair) {
+          if (!outcome.unavailable && !outcome.superseded) {
+            accessToken.value = null
+            auth.user.value = null
+          }
+          return
+        }
+      }
+
+      await auth.fetchUser()
+    }
+
     return { provide: { lukk: client, lukkRefresh: safeRefresh, lukkRestore: restore } }
   },
 })

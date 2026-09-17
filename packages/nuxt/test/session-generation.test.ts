@@ -52,9 +52,9 @@ const signsIn = (account: string) => vi.fn(async () => {
   return pair
 })
 
-function boot(): void {
+function boot(mode: 'direct' | 'bff' = 'direct'): void {
   __test.runtimeConfig.public.lukk = {
-    mode: 'direct',
+    mode,
     baseURL: 'https://api/auth',
     confirmationHeader: 'X-Lukk-Confirmation',
     userEndpoint: 'https://app/me',
@@ -503,7 +503,8 @@ describe('gaps found by mutation testing', () => {
     const loggingOut = auth.logout()
     await vi.advanceTimersByTimeAsync(0)
     const signingIn = auth.login({ email: 'b', password: 'p' })
-    await vi.advanceTimersByTimeAsync(REFRESH_SETTLE_TIMEOUT)
+    // Two capped waits — the whole logout, then its request on the wire — before it gives up.
+    await vi.advanceTimersByTimeAsync(REFRESH_SETTLE_TIMEOUT * 2)
     expect(wire.client.login).toHaveBeenCalledOnce() // gave up waiting; now on the wire
     logoutResponse.resolve()
     await loggingOut
@@ -539,6 +540,38 @@ describe('gaps found by mutation testing', () => {
     expect(access()).toBe('B')
   })
 
+  it('a finished logout does not release sign-ins held for a second logout still renewing its token', async () => {
+    // In the renewal gap nothing but the whole-logout hold keeps a sign-in out; the first logout must
+    // not clear the second one's.
+    const first = deferred<void>()
+    const renewal = deferred<{ access_token: string }>()
+    wire.client.logout!
+      .mockImplementationOnce(async () => { await first.promise })
+      .mockImplementationOnce(async () => { throw { status: 401 } })
+      .mockImplementationOnce(async () => undefined)
+    wire.client.refreshTokens!.mockReturnValueOnce(renewal.promise)
+    boot()
+    const auth = useLukkAuth()
+
+    const firstLogout = auth.logout()
+    await macrotask()
+    const secondLogout = auth.logout()
+    await macrotask() // second attempt rejected; its renewal is on the wire
+    expect(wire.client.refreshTokens).toHaveBeenCalledOnce()
+    first.resolve()
+    await firstLogout
+
+    const signingIn = auth.login({ email: 'b', password: 'p' })
+    await macrotask()
+    expect(wire.client.login).not.toHaveBeenCalled()
+
+    renewal.resolve(pairFor('A'))
+    // The first logout ended the generation that renewal belonged to, so the second rejects — the session
+    // was already revoked by the first.
+    await Promise.all([secondLogout.catch(() => {}), signingIn])
+    expect(wire.client.login).toHaveBeenCalledOnce()
+  })
+
   it('a registration answered with a two-factor challenge leaves a restore in progress alone', async () => {
     const slowA = deferred<void>()
     userEndpoint({ A: slowA.promise })
@@ -553,6 +586,114 @@ describe('gaps found by mutation testing', () => {
     await restoring
 
     expect(auth.user.value).toEqual({ id: 'A' })
+  })
+})
+
+describe('a sign-in or logout in another tab', () => {
+  // A stand-in for the browser's BroadcastChannel: only created where `window` has one.
+  class FakeChannel {
+    static instances: FakeChannel[] = []
+    posted: unknown[] = []
+    onmessage: ((event: MessageEvent) => void) | null = null
+    constructor(public name: string) { FakeChannel.instances.push(this) }
+    postMessage(message: unknown) { this.posted.push(message) }
+  }
+  const otherTabSays = async () => {
+    FakeChannel.instances.at(-1)!.onmessage!({ data: 'changed' } as MessageEvent)
+    await macrotask()
+  }
+
+  beforeEach(() => {
+    FakeChannel.instances = []
+    vi.stubGlobal('window', { BroadcastChannel: FakeChannel })
+  })
+
+  it('announces a sign-in and a logout to other tabs', async () => {
+    userEndpoint()
+    boot()
+    const auth = useLukkAuth()
+    const channel = FakeChannel.instances[0]!
+    expect(channel.name).toBe('lukk:session:/')
+
+    await auth.login({ email: 'b', password: 'p' })
+    expect(channel.posted).toEqual(['changed'])
+    await auth.logout()
+    expect(channel.posted).toEqual(['changed', 'changed'])
+  })
+
+  it('BFF: reloads the user, so the tab stops showing the account it loaded', async () => {
+    // The browser's cookie now belongs to the other tab's session; a BFF tab holds no token to notice.
+    api.mockResolvedValue({ id: 'B' })
+    boot('bff')
+    const auth = useLukkAuth()
+    auth.user.value = { id: 'A' }
+
+    await otherTabSays()
+
+    expect(auth.user.value).toEqual({ id: 'B' })
+    expect(wire.client.refreshTokens).not.toHaveBeenCalled()
+  })
+
+  it('direct: renews from the shared cookie first, then reloads the user', async () => {
+    wire.client.refreshTokens!.mockResolvedValueOnce(pairFor('B'))
+    userEndpoint()
+    boot()
+    const auth = useLukkAuth()
+    auth.user.value = { id: 'A' }
+    useState<string | null>(ACCESS_KEY, () => null).value = 'A'
+
+    await otherTabSays()
+
+    expect(access()).toBe('B')
+    expect(auth.user.value).toEqual({ id: 'B' })
+  })
+
+  it('direct: signs out when the other tab logged out, but keeps the user when it could not tell', async () => {
+    boot()
+    const auth = useLukkAuth()
+    useState<string | null>(ACCESS_KEY, () => null).value = 'A'
+
+    auth.user.value = { id: 'A' }
+    wire.client.refreshTokens!.mockRejectedValueOnce({ status: 503 })
+    await otherTabSays()
+    expect(auth.user.value).toEqual({ id: 'A' })
+
+    wire.client.refreshTokens!.mockRejectedValueOnce({ status: 401 })
+    await otherTabSays()
+    expect(auth.user.value).toBeNull()
+    expect(access()).toBeNull()
+  })
+
+  it('drops what this tab still had in flight for the previous session', async () => {
+    const slowA = deferred<void>()
+    userEndpoint({ A: slowA.promise })
+    boot('bff')
+    const auth = useLukkAuth()
+    useState<string | null>(ACCESS_KEY, () => null).value = 'A'
+    api.mockImplementationOnce(async () => { await slowA.promise; return { id: 'A' } })
+
+    const loading = auth.fetchUser()
+    api.mockResolvedValue({ id: 'B' })
+    await otherTabSays()
+    slowA.resolve()
+    await loading
+
+    expect(auth.user.value).toEqual({ id: 'B' })
+  })
+
+  it('names its channel after the app\'s base, so apps sharing an origin don\'t re-check each other', () => {
+    ;(__test.runtimeConfig as Record<string, unknown>).app = { baseURL: '/admin/' }
+    boot()
+
+    expect(FakeChannel.instances[0]!.name).toBe('lukk:session:/admin/')
+  })
+
+  it('does not listen where the browser has no BroadcastChannel', () => {
+    vi.stubGlobal('window', {})
+    boot()
+
+    expect(FakeChannel.instances).toHaveLength(0)
+    expect(restoreState(__test.nuxtApp).announce).toBeUndefined()
   })
 })
 

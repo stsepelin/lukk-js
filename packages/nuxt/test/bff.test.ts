@@ -131,11 +131,13 @@ describe('BFF proxy', () => {
     expect(revoked.clear).toHaveBeenCalled()
   })
 
-  it('keeps the existing refresh token when a response omits it', async () => {
-    const session = makeSession({ refresh: 'existing' })
+  it('never carries the previous session\'s refresh token into a sign-in that issued none', async () => {
+    // Sealed under the new access token, the next refresh turned the browser back into the previous
+    // account, and replayed a token lukk had already rotated — reported by reuse detection as theft.
+    const session = makeSession({ access: 'previous', refresh: 'previous-refresh' })
     mockFetch().fetch = vi.fn().mockResolvedValue(jsonRes({ access_token: 'a', expires_in: 900 }))
     await run(makeEvent({ path: '/api/_lukk/login', method: 'POST', headers: sameOrigin, session }))
-    expect(session.update).toHaveBeenCalledWith({ access: 'a', refresh: 'existing', confirmation: undefined, sid: expect.any(String) })
+    expect(session.update).toHaveBeenCalledWith({ access: 'a', refresh: undefined, confirmation: undefined, sid: expect.any(String) })
   })
 
   it('writes the sealed session under the per-app namespaced cookie name', async () => {
@@ -183,14 +185,15 @@ describe('BFF proxy', () => {
     expect(session.clear).not.toHaveBeenCalled()
   })
 
-  it('keeps the refresh token when the refresh response omits it', async () => {
+  it('does not keep a refresh token lukk just consumed when the rotation returned none', async () => {
+    // Kept, the next refresh replayed it past the grace window: a false reuse, and a family revoke.
     const session = makeSession({ access: 'old', refresh: 'rt' })
     mockFetch().fetch = vi.fn(async (url: string, init?: { headers?: Record<string, string> }) =>
       String(url).endsWith('/refresh')
         ? jsonRes({ access_token: 'new', expires_in: 900 })
         : (init?.headers?.Authorization === 'Bearer new' ? jsonRes({ ok: true }) : jsonRes({ message: 'x' }, 401)))
     await run(makeEvent({ path: '/api/_lukk/data', session }))
-    expect(session.update).toHaveBeenCalledWith({ access: 'new', refresh: 'rt' })
+    expect(session.update).toHaveBeenCalledWith({ access: 'new', refresh: undefined })
   })
 
   it('single-flights the server-side refresh across concurrent requests', async () => {
@@ -299,10 +302,79 @@ describe('BFF proxy', () => {
     expect(warn).not.toHaveBeenCalled()
   })
 
+  it('presents the sealed refresh token to lukk on logout, as JSON — whatever the browser sent', async () => {
+    // lukk can then end the session even with an expired access token and a throttled refresh.
+    const session = makeSession({ access: 'A', refresh: 'rA' })
+    mockFetch().fetch = vi.fn(async () => jsonRes(null, 204))
+
+    await run(makeEvent({ path: '/api/_lukk/logout', method: 'POST', body: 'ignored', headers: { ...sameOrigin, 'content-type': 'text/plain' }, session }))
+
+    const init = mockFetch().fetch.mock.calls[0]![1] as { body: string, headers: Record<string, string> }
+    expect(JSON.parse(init.body)).toEqual({ refresh_token: 'rA' })
+    expect(init.headers['Content-Type']).toBe('application/json')
+    expect(init.headers.Authorization).toBe('Bearer A')
+  })
+
+  it('presents the ROTATED refresh token when the logout had to renew first, and an empty body with none', async () => {
+    const session = makeSession({ access: 'A-expired', refresh: 'rA' })
+    mockFetch().fetch = vi.fn(async (url: string, init?: { headers?: Record<string, string> }) => {
+      if (String(url).endsWith('/refresh')) return jsonRes({ access_token: 'A2', refresh_token: 'rA2', expires_in: 900 })
+      return init?.headers?.Authorization === 'Bearer A2' ? jsonRes(null, 204) : jsonRes({ message: 'Unauthenticated.' }, 401)
+    })
+
+    await run(makeEvent({ path: '/api/_lukk/logout', method: 'POST', headers: sameOrigin, session }))
+    const logouts = mockFetch().fetch.mock.calls.filter(([url]) => String(url).endsWith('/logout'))
+    expect(logouts.map(([, init]) => JSON.parse((init as { body: string }).body))).toEqual([{ refresh_token: 'rA' }, { refresh_token: 'rA2' }])
+
+    const anonymous = makeSession({ access: 'A' })
+    mockFetch().fetch = vi.fn(async () => jsonRes(null, 204))
+    await run(makeEvent({ path: '/api/_lukk/logout', method: 'POST', headers: sameOrigin, session: anonymous }))
+    expect(JSON.parse((mockFetch().fetch.mock.calls[0]![1] as { body: string }).body)).toEqual({})
+  })
+
   it('clears the session on logout', async () => {
     const session = makeSession({ access: 'tok' })
     mockFetch().fetch = vi.fn().mockResolvedValue(jsonRes(null, 204))
     await run(makeEvent({ path: '/api/_lukk/logout', method: 'POST', headers: sameOrigin, session }))
+    expect(session.clear).toHaveBeenCalledOnce()
+  })
+
+  it.each([
+    ['a throttled logout (429)', () => jsonRes({ message: 'Too Many Attempts.' }, 429)],
+    ['an upstream outage (503)', () => jsonRes({ message: 'Service Unavailable' }, 503)],
+  ])('keeps the session when lukk did not end it: %s', async (_, answer) => {
+    // Clearing left the session live on lukk with nothing pointing at it, and the visitor thinking they
+    // had logged out. The status reaches the client, which can retry.
+    const session = makeSession({ access: 'A', refresh: 'rA', sid: 'session-A' } as TokenSession)
+    mockFetch().fetch = vi.fn(async () => answer())
+    const event = makeEvent({ path: '/api/_lukk/logout', method: 'POST', body: '{}', headers: sameOrigin, session })
+
+    await run(event)
+
+    expect(event.status).toBe(answer().status)
+    expect(session.clear).not.toHaveBeenCalled()
+    // Nor recorded as ended: its refreshes must keep working until the retry succeeds.
+    mockFetch().fetch = vi.fn(async () => jsonRes({ access_token: 'A2', refresh_token: 'rA2', expires_in: 900 }))
+    const refresh = makeEvent({ path: '/api/_lukk/refresh', method: 'POST', body: '{}', headers: sameOrigin, session: makeSession({ access: 'A', refresh: 'rA', sid: 'session-A' } as TokenSession) })
+    await run(refresh)
+    expect(refresh.status).toBe(200)
+  })
+
+  it('keeps the session when the logout 401s only because its refresh was throttled', async () => {
+    const session = makeSession({ access: 'A-expired', refresh: 'rA' })
+    mockFetch().fetch = vi.fn(async (url: string) => (String(url).endsWith('/refresh') ? jsonRes({ message: 'Too Many Attempts.' }, 429) : jsonRes({ message: 'Unauthenticated.' }, 401)))
+
+    await run(makeEvent({ path: '/api/_lukk/logout', method: 'POST', body: '{}', headers: sameOrigin, session }))
+
+    expect(session.clear).not.toHaveBeenCalled()
+  })
+
+  it('clears a session lukk says is gone, even when nothing could renew it', async () => {
+    const session = makeSession({ access: 'A-dead' })
+    mockFetch().fetch = vi.fn(async () => jsonRes({ message: 'Unauthenticated.' }, 401))
+
+    await run(makeEvent({ path: '/api/_lukk/logout', method: 'POST', body: '{}', headers: sameOrigin, session }))
+
     expect(session.clear).toHaveBeenCalledOnce()
   })
 
@@ -439,6 +511,8 @@ describe('a session replaced or ended while a refresh for it was out', () => {
     expect(refreshEvent.status).toBe(409)
     expect(refreshing.update).not.toHaveBeenCalled()
     expect(refreshing.clear).not.toHaveBeenCalled()
+    // The rotation it dropped is revoked, so its consumed refresh token can't later look like theft.
+    expect(mockFetch().fetch).toHaveBeenCalledWith('https://lukk/auth/logout', expect.objectContaining({ headers: expect.objectContaining({ Authorization: 'Bearer A2' }) }))
   })
 
   it('does not clear the newer session over a definitive reject that answers late', async () => {
@@ -501,8 +575,10 @@ describe('a session replaced or ended while a refresh for it was out', () => {
 
     expect(event.status).toBe(401)
     expect(refreshing.update).not.toHaveBeenCalled()
-    // Nor retried with the replaced session's fresh token: the original call, the refresh, the logout.
-    expect(mockFetch().fetch).toHaveBeenCalledTimes(3)
+    // Nor retried with the replaced session's fresh token: the original call, the refresh, the logout —
+    // then, in the background, a logout with the tokens that refresh minted so they can't linger.
+    const calls = mockFetch().fetch.mock.calls.map(([url, init]) => [String(url).replace('https://lukk/auth', ''), (init as { headers?: Record<string, string> })?.headers?.Authorization])
+    expect(calls).toEqual([['/passkeys', 'Bearer A'], ['/refresh', undefined], ['/logout', 'Bearer A'], ['/logout', 'Bearer A2']])
   })
 
   it('does not clear the newer session when a proxied request\'s refresh is rejected after a login', async () => {
@@ -542,6 +618,8 @@ describe('a session replaced or ended while a refresh for it was out', () => {
     await pending
 
     expect(refreshing.update).not.toHaveBeenCalled()
+    // Its rotation is dropped, so it is revoked rather than left to trip reuse detection later.
+    expect(mockFetch().fetch).toHaveBeenCalledWith('https://lukk/auth/logout', expect.objectContaining({ headers: expect.objectContaining({ Authorization: 'Bearer A2' }) }))
   })
 
   it('still seals the rotated session when the retried call throws, so it is not stranded on a spent token', async () => {
@@ -617,6 +695,7 @@ describe('a session replaced or ended while a refresh for it was out', () => {
 
     expect(await pending).toEqual({ passkeys: [] })
     expect(event.node.res.getHeader('set-cookie')).toEqual(['other=1'])
+    expect(mockFetch().fetch).toHaveBeenCalledWith('https://lukk/auth/logout', expect.objectContaining({ headers: expect.objectContaining({ Authorization: 'Bearer A2' }) }))
   })
 
   it('withholds a /refresh re-seal when the session ends while that write is being made', async () => {
@@ -632,6 +711,7 @@ describe('a session replaced or ended while a refresh for it was out', () => {
     expect(await run(event)).toEqual({ message: 'The session was replaced.' })
     expect(event.status).toBe(409)
     expect(event.node.res.getHeader('set-cookie')).toBeUndefined()
+    expect(mockFetch().fetch).toHaveBeenCalledWith('https://lukk/auth/logout', expect.objectContaining({ headers: expect.objectContaining({ Authorization: 'Bearer A2' }) }))
   })
 
   it('still renews an ended session on logout, so lukk revokes it — without writing it back', async () => {
@@ -650,7 +730,25 @@ describe('a session replaced or ended while a refresh for it was out', () => {
 
     expect(bearers).toEqual(['Bearer A-expired', 'Bearer A2'])
     expect(ending.update).not.toHaveBeenCalled()
-    expect(ending.clear).toHaveBeenCalled()
+    // Already replaced: the browser may hold the newer session's cookie, which a clear would wipe.
+    expect(ending.clear).not.toHaveBeenCalled()
+  })
+
+  it('does not clear the cookie of a newer sign-in when a slow logout from the replaced session lands', async () => {
+    // Another tab signed in while this tab's logout was out; the clear landed last and signed that
+    // newer session out, leaving it alive on lukk with nothing pointing at it.
+    const loggingOut = makeSession({ access: 'A', refresh: 'rA', sid: 'session-A' } as TokenSession)
+    const upstream = deferredFetch()
+    mockFetch().fetch = vi.fn(async (url: string) => (String(url).endsWith('/logout') ? upstream.pending : jsonRes({ access_token: 'B', refresh_token: 'rB', expires_in: 900 })))
+
+    const event = post('/logout', loggingOut)
+    const pending = run(event)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    await run(post('/login', makeSession({ access: 'A', refresh: 'rA', sid: 'session-A' } as TokenSession)))
+    upstream.answer(jsonRes(null, 204))
+    await pending
+
+    expect(loggingOut.clear).not.toHaveBeenCalled()
   })
 
   it('gives every sign-in a new session id, and leaves a session that was never signed in unmarked', async () => {

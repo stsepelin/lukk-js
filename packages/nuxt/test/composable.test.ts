@@ -478,6 +478,17 @@ describe('useLukkAuth — restoreFailed tracks the LATEST definitive answer', ()
     expect(loggedIn.value).toBe(false)
   })
 
+  it('keeps the user on screen when there is no restore provide to ask at all', async () => {
+    __test.nuxtApp = { $lukk: {} }
+    __test.runtimeConfig.public.lukk = { mode: 'direct', baseURL: '', confirmationHeader: 'X', userEndpoint: '/me', userKey: '' }
+    const { initSession, user, loggedIn } = useLukkAuth()
+    user.value = { id: 1 }
+
+    await initSession()
+
+    expect(loggedIn.value).toBe(true)
+  })
+
   it('keeps the user on screen when the retry merely could not tell, or was superseded', async () => {
     for (const outcome of [{ pair: null, unavailable: true }, { pair: null, unavailable: false, superseded: true }]) {
       withApp({}, () => Promise.resolve(outcome))
