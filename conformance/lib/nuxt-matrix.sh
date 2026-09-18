@@ -28,6 +28,22 @@ resolve_nuxt_version() {
   esac
 }
 
+# Rename a fresh pack after its own bytes, and echo the new file name.
+#
+# pnpm resolves a `file:` tarball by PATH: re-packing over `lukk-core.tgz` leaves the lockfile, the
+# store entry and the install on the PREVIOUS build, so the matrix silently tested stale code — and
+# failed the build outright once the app reached for an export the old pack didn't have. A content
+# digest makes a changed package a changed specifier. `pnpm pack` is byte-reproducible, so an
+# unchanged package keeps its name and its install, which is what makes re-runs cheap.
+name_pack_by_content() {
+  local out="$1" prefix="$2" packed digest
+  packed="$(find "$out" -maxdepth 1 -name "$prefix-*.tgz" | head -1)"
+  [ -n "$packed" ] || { echo "no pack produced for $prefix" >&2; return 1; }
+  digest="$(shasum -a 256 "$packed" | cut -c1-12)"
+  mv "$packed" "$out/$prefix-$digest.tgz"
+  echo "$prefix-$digest.tgz"
+}
+
 # Copy the app + pin the version. Echoes the prepared directory.
 prepare_matrix_app() {
   local repo_root="$1" app_dir="$2" version="$3"
@@ -46,19 +62,22 @@ prepare_matrix_app() {
   # the app then runs two Vue instances — state the module writes lands in one and the page reads the
   # other (a 2FA challenge that never shows, a cross-tab logout no other tab sees). A tarball is also
   # what a consumer actually installs.
+  ( cd "$out" && rm -f lukk-core-*.tgz lukk-nuxt-*.tgz )
   pnpm -C "$repo_root/packages/core" pack --pack-destination "$out" >/dev/null || return 1
   pnpm -C "$repo_root/packages/nuxt" pack --pack-destination "$out" >/dev/null || return 1
-  ( cd "$out" && mv lukk-core-*.tgz lukk-core.tgz && mv lukk-nuxt-*.tgz lukk-nuxt.tgz )
+  local core_pack nuxt_pack
+  core_pack="$(name_pack_by_content "$out" lukk-core)" || return 1
+  nuxt_pack="$(name_pack_by_content "$out" lukk-nuxt)" || return 1
 
-  node - "$app_dir/package.json" "$out/package.json" "$version" "$repo_root" <<'NODE'
+  node - "$app_dir/package.json" "$out/package.json" "$version" "$core_pack" "$nuxt_pack" <<'NODE'
 const { readFileSync, writeFileSync } = require('node:fs')
-const [, , from, to, version, repoRoot] = process.argv
+const [, , from, to, version, corePack, nuxtPack] = process.argv
 const pkg = JSON.parse(readFileSync(from, 'utf8'))
 pkg.name = `${pkg.name}-matrix`
-pkg.dependencies = { ...pkg.dependencies, 'nuxt': version, 'lukk-nuxt': 'file:./lukk-nuxt.tgz' }
+pkg.dependencies = { ...pkg.dependencies, 'nuxt': version, 'lukk-nuxt': `file:./${nuxtPack}` }
 // `pnpm pack` rewrites `workspace:*` to the version, which would pull lukk-core from the REGISTRY —
 // the published one, not the one under test. The override points it back at the local pack.
-pkg.pnpm = { ...pkg.pnpm, overrides: { ...pkg.pnpm?.overrides, 'lukk-core': 'file:./lukk-core.tgz' } }
+pkg.pnpm = { ...pkg.pnpm, overrides: { ...pkg.pnpm?.overrides, 'lukk-core': `file:./${corePack}` } }
 // Playwright EXACTLY as the source app resolved it: a caret would float to a release whose browser
 // build isn't the one installed here, and every spec would fail on a missing executable.
 const playwright = require(`${from.replace(/package\.json$/, '')}node_modules/@playwright/test/package.json`).version
