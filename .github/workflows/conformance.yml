@@ -29,6 +29,7 @@ permissions:
 jobs:
   conformance:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -83,6 +84,7 @@ jobs:
 
   browser:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       # The module supports Nuxt 3.13 through 4.x, but one app can only pin one of them — so the
@@ -140,6 +142,7 @@ jobs:
 
   browser-direct:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       # The direct transport (no proxy: token in memory, refresh on the `__Host-` cookie) across the

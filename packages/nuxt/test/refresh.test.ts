@@ -38,6 +38,19 @@ describe('refreshOnce with an unusable baseURL', () => {
 })
 
 describe('refreshOnce when lukk can\'t be reached', () => {
+  it('never follows an upstream redirect — it would re-send the rotating token to the redirect host', async () => {
+    // Pinned on the proxy fetch and the revoke fetch, but not on the ONE fetch that actually carries a
+    // rotating refresh token: a 307/308 preserves the method and body, so a followed redirect hands the
+    // credential to whatever host lukk (or something in front of it) names. CWE-918/200.
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ access_token: 'a', refresh_token: 'r', expires_in: 900 }), { status: 200, headers: { 'content-type': 'application/json' } }),
+    )
+
+    await refreshOnce({ id: 'sid', data: { refresh: 'rt' } }, 'https://api.example.com/auth')
+
+    expect(fetchSpy).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ redirect: 'manual' }))
+  })
+
   it('reports it retryable instead of throwing out of the handler as a 500', async () => {
     vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('fetch failed'))
 

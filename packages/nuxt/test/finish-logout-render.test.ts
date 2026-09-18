@@ -27,6 +27,7 @@ function call(hooks: Record<string, Hook>, name: string, event: unknown) {
 function pageEvent(ended: unknown, headersSent = false) {
   const headers = new Map<string, unknown>([['set-cookie', [
     '__Host-lukk-signed-out=1; Max-Age=10; Path=/; Secure; SameSite=Strict',
+    '__Host-lukk-session=RESEALED; Path=/; Secure; HttpOnly; SameSite=Strict',
     'theme=dark; Path=/',
   ]]])
   return {
@@ -46,13 +47,15 @@ function pageEvent(ended: unknown, headersSent = false) {
 afterEach(() => vi.clearAllMocks())
 
 describe('finish-logout late check (BFF)', () => {
-  const ended = (key: string | undefined) => ({ key, marker: '__Host-lukk-signed-out' })
+  const ended = (key: string | undefined) => ({ key, marker: '__Host-lukk-signed-out', session: '__Host-lukk-session' })
 
   // `beforeResponse`: pages, redirects, API routes, errors; `render:html`: a page behind a cached route rule.
   it.each(['beforeResponse', 'render:html'])('%s holds back the signed-out cookie when a sign-in replaced that session meanwhile', async (name) => {
     const hooks = install()
     const page = pageEvent(ended('REPLACED'))
     await call(hooks, name, page.event)
+    // BOTH of ours go, not just the marker: the re-sealed session belongs to the session that was ended,
+    // and this response is finalised late enough to land over the newer one the sign-in just set.
     expect(page.headers.get('set-cookie')).toEqual(['theme=dark; Path=/'])
   })
 
@@ -73,7 +76,7 @@ describe('finish-logout late check (BFF)', () => {
     const hooks = install()
     for (const page of [pageEvent(ended('S1')), pageEvent(ended(undefined)), pageEvent(undefined), pageEvent(ended('REPLACED'), true)]) {
       await call(hooks, name, page.event)
-      expect(page.headers.get('set-cookie')).toHaveLength(2)
+      expect(page.headers.get('set-cookie')).toHaveLength(3) // marker + re-sealed session + the app's own
     }
   })
 })

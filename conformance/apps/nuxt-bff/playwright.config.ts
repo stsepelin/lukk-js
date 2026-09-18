@@ -13,6 +13,8 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   timeout: 30_000,
+  // A stray `test.only` would otherwise reduce the suite to one test and leave CI green.
+  forbidOnly: !!process.env.CI,
   use: {
     baseURL: `https://${HOST}:${PORT}`,
     ignoreHTTPSErrors: true, // self-signed E2E cert

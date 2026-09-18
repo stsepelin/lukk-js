@@ -62,6 +62,12 @@ test('the next page ends only the session that logout was for — not one signed
   await page.getByTestId('logout-leave').click()
   await page.waitForURL(AWAY)
 
+  // The note is really standing, and names A. Without this the test is vacuous: every assertion below is
+  // about B SURVIVING, which an implementation with no note mechanism at all satisfies too.
+  const note = await page.evaluate(() => sessionStorage.getItem('lukk:logging-out:/'))
+  expect(note, 'the tab left a note naming the session it was logging out of').toBeTruthy()
+  expect(JSON.parse(note!).fid).toBeTruthy()
+
   // B signs in straight against lukk — no lukk-js, so nothing is recorded in this browser's storage.
   const signedIn = await page.request.post(`${API_ROOT}/auth/login`, {
     data: { email: b.email, password: b.password },
@@ -71,6 +77,9 @@ test('the next page ends only the session that logout was for — not one signed
   await context.addCookies([]) // the refresh cookie rode the response; nothing else to do
 
   await visit(page, '/')
+  // Consumed, not merely ignored: this load restored B, saw the note names a different family, and
+  // dropped it. A note still standing here would end B on some later load.
+  expect(await page.evaluate(() => sessionStorage.getItem('lukk:logging-out:/'))).toBeNull()
   await page.evaluate(() => localStorage.clear()) // the app's own logout idiom, after the fact
   await page.reload()
   await page.waitForSelector('html[data-hydrated="1"]')

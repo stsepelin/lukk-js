@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ACCESS_KEY, READY_KEY, USER_KEY } from '../src/runtime/keys'
-import { __test, useState } from './mocks/imports'
+import { __test, ssrPayload, useState } from './mocks/imports'
 
 const fetchUser = vi.fn()
 const loggedIn = { value: false }
@@ -93,9 +93,12 @@ describe('session.server (BFF SSR hydration)', () => {
 
     expect(fetchUser).toHaveBeenCalledOnce()
     expect(setResponseHeader).toHaveBeenCalledWith(expect.anything(), 'cache-control', 'no-store')
-    // Invariant: the plugin seeds identity via `fetchUser` only — the access token is never
-    // written into the SSR-serialized state.
+    // Invariant: the plugin seeds identity via `fetchUser` only — the access token is never written into
+    // the SSR-serialized state. Swept, not spot-checked: naming one key passes for a token written under
+    // any OTHER key, and `useState('lukk:ssrToken').value = access` was green before this.
     expect(useState(ACCESS_KEY, () => null).value).toBeNull()
+    const serialized = JSON.stringify(ssrPayload())
+    expect(serialized).not.toContain(fresh().split('.')[1])
   })
 
   it('marks the render no-store even when the user endpoint yields no user (a rotated cookie may be queued)', async () => {

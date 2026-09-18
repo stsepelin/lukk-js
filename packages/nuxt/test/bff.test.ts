@@ -3,7 +3,7 @@ import { __test } from './mocks/imports'
 
 // Track read-write session opens so a test can assert the read-only path never mints a cookie,
 // plus the cookie name the writer opens the session under (to verify the per-app namespace).
-const h3state = vi.hoisted(() => ({ useSessionCalls: 0, lastSessionName: undefined as string | undefined }))
+const h3state = vi.hoisted(() => ({ useSessionCalls: 0, lastSessionName: undefined as string | undefined, lastSessionConfig: undefined as { name?: string, cookie?: Record<string, unknown>, sessionHeader?: boolean } | undefined }))
 vi.mock('h3', () => ({
   defineEventHandler: (fn: unknown) => fn,
   getRequestHeader: (event: { headers: Record<string, string> }, name: string) => event.headers[name],
@@ -21,7 +21,7 @@ vi.mock('h3', () => ({
   setResponseHeader: (event: { headers: Record<string, string>, __res?: Record<string, string> }, name: string, value: string) => {
     (event.__res ??= {})[name] = value
   },
-  useSession: async (event: { __session: unknown }, config: { name?: string }) => { h3state.useSessionCalls++; h3state.lastSessionName = config?.name; return event.__session },
+  useSession: async (event: { __session: unknown }, config: { name?: string, cookie?: Record<string, unknown>, sessionHeader?: boolean }) => { h3state.useSessionCalls++; h3state.lastSessionName = config?.name; h3state.lastSessionConfig = config; return event.__session },
   deleteCookie: (event: { __deleted?: { name: string, options: unknown }[] }, name: string, options: unknown) => { (event.__deleted ??= []).push({ name, options }) },
 }))
 
@@ -66,6 +66,7 @@ beforeEach(() => {
   ;(__test.runtimeConfig as Record<string, unknown>).public = { lukk: {} }
   h3state.useSessionCalls = 0
   h3state.lastSessionName = undefined
+  h3state.lastSessionConfig = undefined
   forgetEndedSessions()
 })
 afterEach(() => { __test.reset(); vi.restoreAllMocks() })
@@ -142,6 +143,22 @@ describe('BFF proxy', () => {
     mockFetch().fetch = vi.fn().mockResolvedValue(jsonRes({ access_token: 'a', expires_in: 900 }))
     await run(makeEvent({ path: '/api/_lukk/login', method: 'POST', headers: sameOrigin, session }))
     expect(session.update).toHaveBeenCalledWith({ access: 'a', refresh: undefined, confirmation: undefined, sid: expect.any(String) })
+  })
+
+  it('seals the session into a __Host-, Secure, HttpOnly, SameSite=Strict cookie — and no header channel', async () => {
+    // The NAME's `__Host-` prefix was pinned; its attributes were not, because the mock kept only the
+    // name. Dropping `httpOnly`, relaxing `sameSite` to `lax`, forcing `secure: false`, or letting
+    // `sessionHeader` default back on — an auth channel outside every one of these — all stayed green.
+    const session = makeSession()
+    mockFetch().fetch = vi.fn().mockResolvedValue(jsonRes({ access_token: 'a', refresh_token: 'r', expires_in: 900 }))
+
+    await run(makeEvent({ path: '/api/_lukk/login', method: 'POST', headers: sameOrigin, session }))
+
+    expect(h3state.lastSessionConfig).toMatchObject({
+      name: '__Host-lukk-session',
+      sessionHeader: false,
+      cookie: { sameSite: 'strict', secure: true, httpOnly: true, path: '/' },
+    })
   })
 
   it('writes the sealed session under the per-app namespaced cookie name', async () => {
