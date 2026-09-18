@@ -138,6 +138,11 @@ export function isForeignOrigin(event: H3Event, secure = true): boolean {
   // Browsers send this on every request and non-browsers send it never, so when it IS present and
   // says cross-site, that is decisive — including for a request whose `Origin` we'd otherwise have
   // to reason about.
+  //
+  // Stryker disable next-line StringLiteral: the `?? ''` fallback is unkillable — it is only reached
+  // when the header is absent, and NO string is in that two-element array, so every replacement for
+  // it yields the same `false`. (Line-granular, so the two array literals are ignored with it; they
+  // stay pinned by the cross-site/same-site cases in proxy-utils.test.ts.)
   if (['cross-site', 'same-site'].includes(getRequestHeader(event, 'sec-fetch-site') ?? '')) return true
 
   const origin = getRequestHeader(event, 'origin')
@@ -189,6 +194,12 @@ const IPV4 = /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1
  */
 function normalizeIp(value: string): string {
   if (IPV4.test(value)) return value
+  // Stryker disable next-line ConditionalExpression: dropping the length test cannot change the
+  // ANSWER, only the cost of reaching it — no IPv6 literal can exceed 45 characters (eight 4-digit
+  // groups + seven colons = 39; six groups + six colons + a 15-char IPv4 tail = 45), and the WHATWG
+  // parser rejects a longer one anyway. It bounds the work done for a huge header, nothing else.
+  // (Line-granular, so the whole-condition mutants go with it; the charset half is pinned by the
+  // `::1]/foo` cases, which fail outright without it.)
   if (value.length > 45 || /[^0-9a-f:.]/i.test(value)) return '' // longer than any IPv6 literal
   try { return new URL(`http://[${value}]`).hostname.slice(1, -1) }
   catch { return '' }
@@ -225,7 +236,10 @@ export function visitorIp(event: H3Event, clientIpHeader?: string): string {
 }
 
 /**
- * Headers a browser can set that name a client address, blanked before the app-API proxy forwards.
+ * Headers a browser can set that an upstream may read as coming from its edge proxy, blanked before
+ * the app-API proxy forwards.
+ *
+ * Two families, both spoofable and both consequential:
  *
  * The upstream decides which of these to trust (Laravel's `TrustProxies` honours a configured mask
  * and CDNs read their own), so any one arriving from the BROWSER is an attempt to choose the
@@ -240,6 +254,17 @@ export const SPOOFABLE_FORWARDING: Record<string, string> = {
   'x-forwarded-proto': '',
   'x-forwarded-port': '',
   'x-forwarded-server': '',
+  // The path/scheme family. `x-forwarded-prefix` is the one with teeth: Symfony honours
+  // `HEADER_X_FORWARDED_PREFIX` from a trusted proxy and applies it to the base path every generated
+  // URL is built on, so a browser-set value rewrites the links the app emails and renders. The others
+  // are the same idea through different front ends, and `x-original-url`/`x-rewrite-url` are the
+  // IIS/ARR spelling that has repeatedly been used to reach paths a front-end ACL believed it blocked.
+  'x-forwarded-prefix': '',
+  'x-forwarded-scheme': '',
+  'x-forwarded-ssl': '',
+  'x-forwarded-uri': '',
+  'x-original-url': '',
+  'x-rewrite-url': '',
   'x-forwarded': '',
   'x-original-forwarded-for': '',
   'x-http-forwarded-for': '',
@@ -307,6 +332,10 @@ const UNSETTABLE: ReadonlySet<string> = new Set(['connection', 'keep-alive', 'up
  * Names the proxy sets deliberately are never blanked by this: a client cannot use `Connection` to
  * strip its own `authorization`, the injected step-up header, or the asserted `x-forwarded-for`.
  */
+// Stryker disable next-line ArrayDeclaration: seeding the default `keep` is only observable for a
+// caller that omits the argument AND a client whose `Connection` names the seeded literal — and the
+// one production call site always passes a list. Killing it would mean writing Stryker's own
+// placeholder string into a test, which pins nothing about this function.
 export function hopByHopHeaders(event: H3Event, keep: readonly string[] = []): Record<string, string> {
   const named = (getRequestHeader(event, 'connection') ?? '')
     .split(',')
