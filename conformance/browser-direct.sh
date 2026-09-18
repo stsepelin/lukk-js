@@ -111,7 +111,14 @@ run_mode() {
   # mode's 2FA test can reuse a still-valid TOTP code the first mode already burned in the
   # single-use replay cache (a correct rejection, but a cross-mode false failure here).
   ( cd "$APP_DIR" && php artisan migrate:fresh --force >/dev/null && php artisan db:seed --force >/dev/null && php artisan optimize:clear >/dev/null )
-  if [ "$mode" = "ssg" ]; then pnpm -C "$APP_UNDER_TEST" generate; else pnpm -C "$APP_UNDER_TEST" build; fi
+  # A failed build is a failed mode, not a run against the PREVIOUS build's output — which is what an
+  # unchecked exit code gave: stale `.output`, specs passing, the change under test never exercised.
+  # One mode per base SHAPE (see the app's nuxt.config): `spa` builds against an absolute lukk base,
+  # `ssg` against the relative one. Same origin either way; different paths through the credential rule.
+  if [ "$mode" = "ssg" ]; then unset E2E_LUKK_BASE_URL; else export E2E_LUKK_BASE_URL="https://localhost:8443/auth"; fi
+  if ! { if [ "$mode" = "ssg" ]; then pnpm -C "$APP_UNDER_TEST" generate; else pnpm -C "$APP_UNDER_TEST" build; fi }; then
+    SUMMARY="$SUMMARY\n  ✗ $mode / $label (build failed)"; RC=1; return
+  fi
   if E2E_APP_MODE="$mode" pnpm -C "$APP_UNDER_TEST" exec playwright test
   then SUMMARY="$SUMMARY\n  ✓ $mode / $label"
   else SUMMARY="$SUMMARY\n  ✗ $mode / $label"; RC=1

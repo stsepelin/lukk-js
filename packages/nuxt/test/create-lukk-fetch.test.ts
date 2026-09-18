@@ -133,6 +133,62 @@ describe('createLukkFetch — onRequest headers', () => {
     expect(elsewhere.options.credentials).toBe('same-origin')
   })
 
+  it('does NOT stand this app\'s origin in for the API\'s when the API base is absolute', async () => {
+    // The fallback exists because `isSameOrigin` refuses every absolute URL against the relative proxy
+    // mount. With an absolute API base there is no such problem and the app's origin is simply a
+    // different host — one the bearer was never scoped to, and which on the server is read from the
+    // `Host` header. Attaching there would hand the API credential to the app's own endpoints.
+    const { opts } = build({ baseURL: 'https://api.example.com', origin: 'https://app.test', isServer: true, getCookieHeader: () => 'lukk=sealed', getBearer: () => 'SECRET' })
+
+    const ctx = { request: 'https://app.test/track', options: { headers: new Headers() } as { headers: Headers, credentials?: string } }
+    await opts.onRequest(ctx)
+
+    expect(ctx.options.headers.get('authorization')).toBeNull()
+    expect(ctx.options.headers.get('cookie')).toBeNull()
+    expect(ctx.options.credentials).toBe('same-origin')
+  })
+
+  it('treats an EMPTY per-call baseURL as absent — it means "this path, as given"', async () => {
+    // `loadUser` passes `{ baseURL: '' }` so a configured absolute `user.endpoint` is left alone. Read as
+    // a relative base it was refused against an absolute API base, so every ordinary direct-mode app
+    // signed in and then never loaded its user: no bearer, 401, a refresh rotation burnt per retry.
+    const { opts } = build({ baseURL: 'https://api.example.com', getBearer: () => 'SECRET' })
+    const ctx = { request: 'https://api.example.com/api/me', options: { headers: new Headers(), baseURL: '' } as { headers: Headers, credentials?: string, baseURL?: string } }
+
+    await opts.onRequest(ctx)
+
+    expect(ctx.options.headers.get('authorization')).toBe('Bearer SECRET')
+    expect(ctx.options.credentials).toBe('include')
+  })
+
+  it('canonicalises a per-call baseURL the way the URL parser will, before judging it', async () => {
+    // The same shapes `isSameOrigin` defends against on the request, now on the base: a naive
+    // `^https?://` test reads each of these as relative — and a relative base is accepted outright
+    // under the BFF mount, which would send the sealed cookie and bearer to a foreign host.
+    for (const hostile of ['//evil.example', ' https://evil.example', 'https:/\\evil.example', '\thttps://evil.example']) {
+      const { opts } = build({ baseURL: '/api', origin: 'https://app.test', isServer: true, getCookieHeader: () => 'lukk=sealed', getBearer: () => 'SECRET' })
+      const ctx = { request: '/me', options: { headers: new Headers(), baseURL: hostile } as { headers: Headers, credentials?: string, baseURL?: string } }
+
+      await opts.onRequest(ctx)
+
+      expect(ctx.options.headers.get('authorization'), hostile).toBeNull()
+      expect(ctx.options.headers.get('cookie'), hostile).toBeNull()
+      expect(ctx.options.credentials, hostile).toBe('same-origin')
+    }
+  })
+
+  it('withholds the SSR cookie from a cross-origin per-call baseURL, not just the bearer', async () => {
+    // The per-call cases all ran as the client, so `getCookieHeader` was never consulted and a rule that
+    // dropped only the bearer looked correct — while the sealed session cookie still rode to the target.
+    const { opts } = build({ baseURL: 'https://api.example.com', isServer: true, getCookieHeader: () => 'lukk=sealed', getBearer: () => 'SECRET' })
+    const ctx = { request: '/me', options: { headers: new Headers(), baseURL: 'https://collector.example' } as { headers: Headers, credentials?: string, baseURL?: string } }
+
+    await opts.onRequest(ctx)
+
+    expect(ctx.options.headers.get('cookie')).toBeNull()
+    expect(ctx.options.headers.get('authorization')).toBeNull()
+  })
+
   it('REFUSES a relative per-call baseURL when the API is cross-origin — it resolves against the document, not the API', async () => {
     const { opts } = build({ baseURL: 'https://api.example.com', getBearer: () => 'SECRET' })
     const ctx = { request: '/thing', options: { headers: new Headers(), baseURL: '/local' } as { headers: Headers, credentials?: string, baseURL?: string } }

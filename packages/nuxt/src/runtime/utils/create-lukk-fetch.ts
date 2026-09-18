@@ -62,22 +62,30 @@ export function lukkFetchOptions(deps: LukkFetchDeps): FetchOptions {
       const url = typeof ctx.request === 'string' ? ctx.request : ctx.request.url
       // The per-call `baseURL` counts too: ofetch applies it AFTER this hook, so checking the request alone
       // would clear a relative path as same-origin and then send the bearer to the caller's own origin.
-      // In BFF mode the base is the relative proxy mount, and `isSameOrigin` refuses every absolute URL
-      // against a relative base — so fall back to this app's own origin, which is what "same-origin" means
-      // there. Unknown origin (SSR without a request URL) stays refused.
-      const perCall = typeof options.baseURL === 'string' ? options.baseURL : undefined
+      //
+      // An EMPTY base is not a relative one. It is ofetch's idiom for "take this path exactly as given",
+      // which `loadUser` passes so a configured absolute `user.endpoint` survives. Reading it as relative
+      // refused the bearer on every direct-mode app whose API base is absolute — which is every ordinary
+      // one — so login succeeded and the user then never loaded, burning a rotation per retry.
+      const declared = typeof options.baseURL === 'string' ? options.baseURL : undefined
+      const perCall = declared === '' ? undefined : declared
       const known = (base: string | undefined, target: string) => base !== undefined && isSameOrigin(base, target)
       const apiIsRelative = !/^https?:\/\//i.test(deps.baseURL)
+      // This app's own origin stands in for the API's ONLY where the API base is the relative proxy mount:
+      // there `isSameOrigin` refuses every absolute URL, and same-origin is exactly what the mount means.
+      // With an ABSOLUTE API base the app's origin is a different host that the bearer was never scoped
+      // to — and on the server this origin comes from the `Host` header, so it is not ours to trust.
+      const appOrigin = apiIsRelative ? deps.origin : undefined
       const perCallOk = perCall === undefined
-        // Absolute: must be the API's own origin — or this app's, when the API base is the relative proxy
-        // mount and `isSameOrigin` would refuse every absolute URL against it.
         ? true
         : carriesOrigin(perCall)
-          ? isSameOrigin(deps.baseURL, perCall) || known(deps.origin, perCall)
+          // Absolute: the API's own origin, or this app's under the proxy mount. Unknown origin (SSR
+          // without a request URL) stays refused.
+          ? isSameOrigin(deps.baseURL, perCall) || known(appOrigin, perCall)
           // Relative: it resolves against the DOCUMENT, so it only stays on the API when the API is this
           // app (a relative base). With an absolute API base it points somewhere else entirely.
           : apiIsRelative
-      const sameOrigin = (isSameOrigin(deps.baseURL, url) || known(deps.origin, url)) && perCallOk
+      const sameOrigin = (isSameOrigin(deps.baseURL, url) || known(appOrigin, url)) && perCallOk
       options.credentials = sameOrigin ? 'include' : 'same-origin'
       if (sameOrigin) {
         if (deps.isServer) {
