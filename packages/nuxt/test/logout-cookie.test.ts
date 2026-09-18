@@ -46,6 +46,8 @@ describe('BFF logout note cookie (browser side)', () => {
 
     expect(hasLogoutCookie('lukk-logout')).toBe(false)
     expect(hasLogoutCookie('__Host-lukk-logout')).toBe(false)
+    jar.set('decoy', 'lukk-logout=1') // the name inside another cookie's value must not count
+    expect(hasLogoutCookie('lukk-logout')).toBe(false)
     jar.set('lukk-logout', '1')
     expect(hasLogoutCookie('lukk-logout')).toBe(true)
     jar.set('lukk-signed-out', '1') // the server's answer, read the same way

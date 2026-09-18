@@ -92,6 +92,16 @@ describe('createLukkFetch — onRequest headers', () => {
     expect(ctx.options.credentials).toBe('include')
   })
 
+  it('REFUSES them for a cross-origin per-call baseURL too — ofetch applies it after this hook', async () => {
+    const { opts } = build({ baseURL: 'https://api.example.com', getBearer: () => 'SECRET' })
+    const ctx = { request: '/me', options: { headers: new Headers(), baseURL: 'https://collector.example' } as { headers: Headers, credentials?: string, baseURL?: string } }
+
+    await opts.onRequest(ctx)
+
+    expect(ctx.options.headers.get('authorization')).toBeNull()
+    expect(ctx.options.credentials).toBe('same-origin')
+  })
+
   it('REFUSES cookie + bearer + credentials for a cross-origin absolute URL', async () => {
     const { opts } = build({ isServer: true, getCookieHeader: () => 'lukk=sealed', getBearer: () => 'tok' })
     const ctx = reqCtx('https://evil.example/steal')

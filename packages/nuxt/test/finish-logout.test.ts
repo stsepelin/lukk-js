@@ -20,6 +20,8 @@ vi.mock('h3', () => ({
 
 // eslint-disable-next-line import/first
 import handler, { FAILURE_LIMIT, FINISH_LOGOUT_TIMEOUT_MS, forgetLogoutFailures, logoutFailureCount, RETRY_AFTER_FAILURE_MS } from '../src/runtime/server/finish-logout'
+// eslint-disable-next-line import/first
+import { endSession, forgetEndedSessions } from '../src/runtime/server/ended-sessions'
 
 type LocalFetch = (input: string, init: RequestInit) => Promise<Response>
 
@@ -60,6 +62,7 @@ const perUser = { 'cache-control': 'no-store', 'vary': 'cookie' }
 beforeEach(() => {
   __test.runtimeConfig.lukk = { sessionPassword: 'p'.repeat(32) } as unknown as Record<string, unknown>
   forgetLogoutFailures()
+  forgetEndedSessions()
 })
 afterEach(() => { __test.reset(); vi.useRealTimers() })
 
@@ -114,7 +117,7 @@ describe('finish-logout middleware (BFF)', () => {
     // In a cookie, for this browser — not in a payload a cached page could carry to everyone.
     expect(event.cookiesSet).toEqual([signedOut])
     // What the last check before the headers go out needs.
-    expect(event.context.lukkEndedSession).toEqual({ key: 'S1', marker: '__Host-lukk-signed-out' })
+    expect(event.context.lukkEndedSession).toEqual({ key: 'S1', marker: '__Host-lukk-signed-out', session: '__Host-lukk-session' })
   })
 
   it('drops a note that arrives with no session cookie at all', async () => {
@@ -164,7 +167,8 @@ describe('finish-logout middleware (BFF)', () => {
     expect(event.appended).toEqual([])
     expect(event.cookiesSet).toEqual([])
     expect(event.deleted).toEqual([])
-    expect(event.context.lukkEndedSession).toBeUndefined()
+    // Recorded regardless: whatever this response carries is checked again before its headers go out.
+    expect(event.context.lukkEndedSession).toEqual({ key: 'S1', marker: '__Host-lukk-signed-out', session: '__Host-lukk-session' })
   })
 
   it('does not call it over on a renewal the proxy re-sealed before its logout failed — only the note\'s clearing says that', async () => {
@@ -176,6 +180,20 @@ describe('finish-logout middleware (BFF)', () => {
     }) })
     await run(event)
     expect(event.appended).toEqual([['set-cookie', resealed]]) // the browser must get the rotated seal
+    expect(event.cookiesSet).toEqual([])
+    expect(event.deleted).toEqual([])
+  })
+
+  it('sends nothing out for a session a sign-in replaced while the logout was running', async () => {
+    // The response is finalised long after this ran: its cookies would land over the newer session's.
+    const event = makeEvent({ fetch: vi.fn<LocalFetch>(async () => {
+      await endSession('S1', { replaced: true }) // another tab signed in mid-flight
+      return cleared(204)
+    }) })
+
+    await run(event)
+
+    expect(event.appended).toEqual([])
     expect(event.cookiesSet).toEqual([])
     expect(event.deleted).toEqual([])
   })

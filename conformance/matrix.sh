@@ -97,10 +97,10 @@ run_combo() {
   fi
 
   wait_port_free "$PORT" || { echo "✗ [$name] port $PORT still held after killing the previous combo's server"; RESULTS+=("✗ $name (port stuck)"); FAILED=1; return; }
-  ( cd "$APP_DIR" && php artisan serve --host=127.0.0.1 --port="$PORT" >/tmp/lukk-serve.log 2>&1 ) &
+  ( cd "$APP_DIR" && php artisan serve --host=127.0.0.1 --port="$PORT" >"$RUN_DIR/serve.log" 2>&1 ) &
   SERVE_PID=$!
   if ! wait_for_up; then
-    echo "✗ [$name] server did not come up — see /tmp/lukk-serve.log"
+    echo "✗ [$name] server did not come up — see "$RUN_DIR/serve.log""
     RESULTS+=("✗ $name (boot failed)"); FAILED=1
     kill_tree "$SERVE_PID"; SERVE_PID=""; return
   fi

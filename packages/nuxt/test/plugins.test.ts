@@ -269,6 +269,20 @@ describe('session.client plugin — a logout the previous page never finished', 
       expect(restoreState(__test.nuxtApp).finishingLogout).toBeUndefined() // a plain logout: that session, confirmed
     })
 
+    it('finishes the logout for an app with no user endpoint, where nothing ever reads as logged in', async () => {
+      vi.stubGlobal('sessionStorage', fakeStorage)
+      store.set('lukk:logging-out:/', JSON.stringify({ at: Date.now(), fid: 'F1' }))
+      // `loadUser` skips without an endpoint, so `loggedIn` stays false even though the restore rotated
+      // and produced a token for exactly the session the note names.
+      initSession.mockImplementationOnce(async () => {
+        useState<string | null>(ACCESS_KEY, () => null).value = `h.${Buffer.from(JSON.stringify({ sub: 1, fid: 'F1' })).toString('base64url')}.s`
+      })
+
+      await run()
+
+      expect(logout).toHaveBeenCalledOnce()
+    })
+
     it('keeps a newer session the cookie holds by now — from another tab, an SSO callback, anywhere — and drops the note', async () => {
       vi.stubGlobal('sessionStorage', fakeStorage)
       store.set('lukk:logging-out:/', JSON.stringify({ at: Date.now(), fid: 'F1' }))

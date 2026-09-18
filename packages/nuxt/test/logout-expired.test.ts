@@ -392,12 +392,14 @@ describe('logout() with an access token lukk rejects', () => {
     await expect(useLukkAuth().logout()).rejects.toMatchObject({ status: 429 })
     expect(jar.has('__Host-lukk-logout')).toBe(true) // may still be live: the next page load finishes it
 
+    // A 401 the renewal could not follow up (the refresh 401s too here) keeps the note: the session may
+    // well be live, and the note is the only thing that would finish the logout later.
     status = 401
     await expect(useLukkAuth().logout()).rejects.toMatchObject({ status: 401 })
-    expect(jar.has('__Host-lukk-logout')).toBe(false)
+    expect(jar.has('__Host-lukk-logout')).toBe(true)
   })
 
-  it('in BFF mode, finishing an earlier page\'s logout doesn\'t note it again, and stands down once the note stops saying pending — leaving it be', async () => {
+  it('in BFF mode, finishing an earlier page\'s logout doesn\'t note it again, and stands down for a sign-in sent since', async () => {
     const jar = new Map<string, string>([['__Host-lukk-logout', '1']])
     const writes: string[] = []
     vi.stubGlobal('document', {
@@ -416,19 +418,26 @@ describe('logout() with an access token lukk rejects', () => {
     ;(__test.runtimeConfig.public.lukk as Record<string, unknown>).logoutCookie = '__Host-lukk-logout'
     const state = restoreState(__test.nuxtApp)
 
-    state.finishingLogout = Date.now()
+    const shared = new Map<string, string>()
+    vi.stubGlobal('localStorage', { getItem: (k: string) => shared.get(k) ?? null, setItem: (k: string, v: string) => { shared.set(k, v) } })
+
+    const asked = Date.now()
+    state.finishingLogout = asked
     const finishing = useLukkAuth().logout()
     expect(writes).toEqual([]) // not written again
-    jar.delete('__Host-lukk-logout') // another tab's sign-in answered while this waited for its lock
+    shared.set('lukk:signed-in-at:/', String(asked)) // another tab's sign-in, SENT after this was asked for
+    jar.delete('__Host-lukk-logout') // …and its response cleared the note
     grant()
     await finishing
     expect(calls).toEqual([]) // sending would have ended that sign-in
     expect(state.logoutStoodDown).toBe(true) // for the restore plugin, which restores the newer session
     expect(writes).toEqual([])
 
-    // Still pending: it sends, and clears the note once done.
+    // No sign-in since: it sends, and clears the note once done — an aged-out or already-cleared note is
+    // not evidence that someone else dealt with this logout.
     state.logoutStoodDown = false
-    jar.set('__Host-lukk-logout', '1')
+    shared.clear()
+    jar.delete('__Host-lukk-logout')
     granted = Promise.resolve()
     state.finishingLogout = Date.now()
     await useLukkAuth().logout()
@@ -445,12 +454,18 @@ describe('logout() with an access token lukk rejects', () => {
     await expect(useLukkAuth().logout()).rejects.toMatchObject({ status: 429 })
     expect(store.has('lukk:logging-out:/')).toBe(true)
 
+    // A 401 whose renewal DID land says the session is gone — that note goes.
     __test.reset()
-    boot('bff', () => json({ message: 'Unauthenticated.' }, 401))
+    let renewed = false
+    boot('direct', (path) => {
+      if (path === '/refresh') { renewed = true; return json({ access_token: 'fresh', expires_in: 900 }) }
+      return json({ message: 'Unauthenticated.' }, 401)
+    })
     restoreState(__test.nuxtApp).scope = '/admin/'
     await expect(useLukkAuth().logout()).rejects.toMatchObject({ status: 401 })
-    expect(store.size).toBe(1) // the /admin/ app's note was written and cleared; only the earlier one stays
-    expect(store.has('lukk:logging-out:/')).toBe(true)
+    expect(renewed).toBe(true)
+    expect(store.has('lukk:logging-out:/admin/')).toBe(false)
+    expect(store.has('lukk:logging-out:/')).toBe(true) // the earlier app's note is untouched
   })
 
   it('fails fast when there is no session left to renew (an erased account, a revoked session)', async () => {

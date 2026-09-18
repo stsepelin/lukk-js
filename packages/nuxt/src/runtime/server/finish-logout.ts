@@ -42,7 +42,7 @@ export default defineEventHandler(async (event) => {
   if (!getCookie(event, note)) return
   // The proxy's own calls: the browser finishing the logout, or signing in — which replaces the session
   // and clears the note itself.
-  if (event.path.startsWith(`${LUKK_BFF_PREFIX}/`)) return
+  if (event.path === LUKK_BFF_PREFIX || event.path.startsWith(`${LUKK_BFF_PREFIX}/`)) return
 
   // Per-user whatever the outcome: it clears this visitor's cookies, or renders them signed out. Before the
   // early returns below, which also answer with a `Set-Cookie` a shared cache must not store.
@@ -64,7 +64,9 @@ export default defineEventHandler(async (event) => {
   if ((failedUntil.get(key) ?? 0) > Date.now()) return
 
   const res = await finishOnce(event, key)
-  const forwarded = res?.headers.getSetCookie() ?? []
+  // `?.()` as well: a runtime whose `Headers` predates `getSetCookie` would throw here, in middleware,
+  // and 500 every page load rather than degrade to the browser finishing its own logout.
+  const forwarded = res?.headers.getSetCookie?.() ?? []
   // The proxy clears the note exactly when the session is over — not for a 401 it could still renew past,
   // nor when a renewal re-sealed it and the logout then failed.
   const ended = forwarded.some(cookie => nameOf(cookie) === note)
@@ -83,16 +85,17 @@ export default defineEventHandler(async (event) => {
       appendResponseHeader(event, 'set-cookie', cookie)
     }
   }
+  // Checked again before the headers go out, whatever happened here: a sign-in elsewhere meanwhile must not
+  // have its new cookie replaced by anything this response carries (see `withholdSignedOutCookie`).
+  const marker = signedOutCookieName(secure, cookieNamespace)
+  ;(event.context as { lukkEndedSession?: EndedHere }).lukkEndedSession = { key, marker, session }
+
   if (!ended || !keepCookies) return
 
   // Done: the note goes, and a short-lived cookie says so, which the page's restore reads — it then knows it
   // is signed out without asking, and tells the visitor's other tabs.
   deleteCookie(event, note, { path: '/', secure, sameSite: 'strict' })
-  const marker = signedOutCookieName(secure, cookieNamespace)
   setCookie(event, marker, '1', { path: '/', secure, sameSite: 'strict', maxAge: 10 })
-  // Checked again before the headers go out: a sign-in elsewhere meanwhile must not have its new cookie
-  // cleared by this response (see `logoutReplacedMeanwhile`).
-  ;(event.context as { lukkEndedSession?: EndedHere }).lukkEndedSession = { key, marker }
 })
 
 const nameOf = (cookie: string) => cookie.slice(0, cookie.indexOf('='))

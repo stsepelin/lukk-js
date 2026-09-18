@@ -58,7 +58,10 @@ export function lukkFetchOptions(deps: LukkFetchDeps): FetchOptions {
       // Never attach the sealed session cookie / bearer to a cross-origin target a
       // caller may have passed — and drop `credentials` there too.
       const url = typeof ctx.request === 'string' ? ctx.request : ctx.request.url
-      const sameOrigin = isSameOrigin(deps.baseURL, url)
+      // The per-call `baseURL` counts too: ofetch applies it AFTER this hook, so checking the request alone
+      // would clear a relative path as same-origin and then send the bearer to the caller's own origin.
+      const perCall = typeof options.baseURL === 'string' ? options.baseURL : undefined
+      const sameOrigin = isSameOrigin(deps.baseURL, url) && (perCall === undefined || isSameOrigin(deps.baseURL, perCall))
       options.credentials = sameOrigin ? 'include' : 'same-origin'
       if (sameOrigin) {
         if (deps.isServer) {

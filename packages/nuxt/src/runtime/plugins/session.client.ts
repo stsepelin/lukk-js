@@ -64,7 +64,9 @@ export default defineNuxtPlugin({
       else if (note?.fid !== undefined) {
         await auth.initSession()
         const access = useState<string | null>(ACCESS_KEY, () => null)
-        if (auth.loggedIn.value && tokenFamily(access.value) === note.fid) await auth.logout().catch(() => {})
+        // On the restored session's FAMILY, not on `loggedIn`: an app with no `user.endpoint` never reads as
+        // logged in, and this branch would then drop the note of a session the restore had just renewed.
+        if (tokenFamily(access.value) === note.fid) await auth.logout().catch(() => {})
         // Couldn't tell (lukk unreachable): the note stands, for the next load within its minute.
         else if (!auth.restoreFailed.value) {
           clearPendingLogout(state.scope)

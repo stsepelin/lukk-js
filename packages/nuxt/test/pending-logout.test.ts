@@ -49,6 +49,18 @@ describe('pending logout note (direct mode)', () => {
     expect(readPendingLogout(undefined, 2_000)).toEqual({ at: 1_000, fid: 'fam-1' })
   })
 
+  it('never moves the sign-in record backwards — a slow sign-in answering last would revive a moot note', () => {
+    vi.stubGlobal('sessionStorage', memoryStorage())
+    vi.stubGlobal('localStorage', memoryStorage())
+
+    noteSignIn(undefined, 2_000) // the later sign-in answers first
+    noteSignIn(undefined, 1_000) // the slow one lands after it, having been SENT earlier
+    expect(signedInSince(undefined, 2_000)).toBe(true)
+
+    notePendingLogout(undefined, undefined, 1_500) // a logout asked for between the two
+    expect(readPendingLogout(undefined, 3_000)).toBeUndefined() // still moot, as it was
+  })
+
   it('keeps a family-less note when the sign-in record is missing, garbage or unreadable', () => {
     vi.stubGlobal('sessionStorage', memoryStorage())
     notePendingLogout(undefined, undefined, 1_000)

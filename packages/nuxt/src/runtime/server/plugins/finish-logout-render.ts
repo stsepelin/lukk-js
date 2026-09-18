@@ -1,4 +1,5 @@
 import type { H3Event } from 'h3'
+import { setResponseHeader } from 'h3'
 import { withholdSignedOutCookie } from '../logout-note'
 import { defineNitroPlugin } from '#imports'
 
@@ -22,6 +23,23 @@ type Hook = (first: unknown, second: unknown) => Promise<void>
 export default defineNitroPlugin((nitroApp) => {
   const hooks = nitroApp.hooks as unknown as { hook: (name: string, fn: Hook) => void }
 
-  hooks.hook('beforeResponse', async event => withholdSignedOutCookie(event as H3Event))
+  hooks.hook('beforeResponse', async (event) => {
+    perVisitor(event as H3Event)
+    await withholdSignedOutCookie(event as H3Event)
+  })
   hooks.hook('render:html', async (_html, meta) => withholdSignedOutCookie((meta as { event: H3Event }).event))
 })
+
+/**
+ * Restate what `finish-logout` set on the way in.
+ *
+ * A route rule's cached handler re-applies its stored headers onto this same response on its way out,
+ * overwriting the `no-store` the middleware set — on exactly the routes where a shared cache that ignores
+ * `Vary` would then replay this browser's signed-out answer to the next visitor. This runs after that, for
+ * a cache hit and a miss alike.
+ */
+function perVisitor(event: H3Event): void {
+  if (!(event.context as { lukkEndedSession?: unknown }).lukkEndedSession || event.node.res.headersSent) return
+  setResponseHeader(event, 'cache-control', 'no-store')
+  setResponseHeader(event, 'vary', 'cookie')
+}

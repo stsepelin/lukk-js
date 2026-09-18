@@ -15,8 +15,8 @@ export function logoutNoted(event: H3Event, secure: boolean, namespace?: string)
   return Boolean(getCookie(event, logoutCookieName(secure, namespace)) ?? getCookie(event, signedOutCookieName(secure, namespace)))
 }
 
-/** What `finish-logout` ended for this request: the session's key, and the cookie it answered with. */
-export interface EndedHere { key: string | undefined, marker: string }
+/** What `finish-logout` queued for this request: the session it acted on, and the cookies it may have set. */
+export interface EndedHere { key: string | undefined, marker: string, session: string }
 
 /**
  * Must the signed-out cookie be held back from this response?
@@ -29,9 +29,17 @@ export async function withholdSignedOut(event: H3Event): Promise<boolean> {
   return ended ? await sessionReplaced(ended.key) : false
 }
 
-/** The last check before a response's headers go out — see `withholdSignedOut`. Safe to run more than once. */
+/**
+ * The last check before a response's headers go out — see `withholdSignedOut`. Safe to run more than once.
+ *
+ * Both cookies go, not just the answer. A logout whose renewal re-sealed the session queues that seal here
+ * (the browser holds a refresh token this server has already spent), and this response is finalised long
+ * before it lands: if a sign-in replaced the session meanwhile, the seal would arrive last and put the
+ * browser back on the account it just left, with the newer session orphaned upstream.
+ */
 export async function withholdSignedOutCookie(event: H3Event): Promise<void> {
   const ended = (event.context as { lukkEndedSession?: EndedHere } | undefined)?.lukkEndedSession
   if (!ended || event.node.res.headersSent || !(await withholdSignedOut(event))) return
   withholdSessionCookie(event.node.res, ended.marker)
+  withholdSessionCookie(event.node.res, ended.session)
 }

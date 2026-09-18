@@ -72,8 +72,6 @@ export default defineEventHandler(async (event) => {
   // the seal is valid, so its id is restored (no re-mint).
   // Not while a logout the browser noted is being finished (see `finish-logout`): the visitor asked to be
   // signed out, and a page rendering right now must not show that account's data.
-  // Not while a logout the browser noted is being finished (see `finish-logout`): the visitor asked to be
-  // signed out, and a page rendering right now must not show that account's data.
   const sealed = logoutNoted(event, secure, cookieNamespace) ? {} : await readSealedSession(event, sessionPassword, sessionName)
   let access = sealed.access
   // Set when this request re-seals the session, so the response can check it again at the last moment.
