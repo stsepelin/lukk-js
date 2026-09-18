@@ -686,7 +686,7 @@ describe('a sign-in or logout in another tab', () => {
   })
 
   it('keeps a logout this tab never finished — the other tab may have only failed to log out; a sign-in there is told apart by its record', async () => {
-    const store = new Map<string, string>([['lukk:logging-out:/admin/', String(Date.now())]])
+    const store = new Map<string, string>([['lukk:logging-out:/admin/', JSON.stringify({ at: Date.now() })]])
     vi.stubGlobal('sessionStorage', { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => { store.set(k, v) }, removeItem: (k: string) => { store.delete(k) } })
     api.mockResolvedValue({ id: 'B' })
     boot('bff')
@@ -896,7 +896,7 @@ describe('claiming the session a sign-in issued', () => {
 
 describe('a pending logout note and a later sign-in', () => {
   it('drops the note when someone signs in again in this tab — the old logout is moot', async () => {
-    const store = new Map<string, string>([['lukk:logging-out:/admin/', String(Date.now())]])
+    const store = new Map<string, string>([['lukk:logging-out:/admin/', JSON.stringify({ at: Date.now() })]])
     vi.stubGlobal('sessionStorage', { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => { store.set(k, v) }, removeItem: (k: string) => { store.delete(k) } })
     userEndpoint()
     boot()
@@ -919,7 +919,7 @@ describe('a pending logout note and a later sign-in', () => {
 
     const signingIn = useLukkAuth().login({ email: 'b', password: 'p' })
     await new Promise(resolve => setTimeout(resolve, 5))
-    store.set('lukk:logging-out:/', String(Date.now()))
+    store.set('lukk:logging-out:/', JSON.stringify({ at: Date.now() }))
     answer.resolve()
     await signingIn
 

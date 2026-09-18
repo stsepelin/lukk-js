@@ -174,6 +174,29 @@ describe('logout() with an access token lukk rejects', () => {
     expect(calls.map(c => c.path)).toEqual(['/logout', '/logout', '/logout'])
   })
 
+  it('does not resend when the send on the way out found no session (401) — the next page\'s server may have ended it', async () => {
+    // Resending carried whatever cookie the browser held by then: a page restored from the back/forward
+    // cache after the visitor signed in again ended that new session.
+    const listeners = new Map<string, () => void>()
+    vi.stubGlobal('window', {
+      addEventListener: (name: string, fn: () => void) => { listeners.set(name, fn) },
+      removeEventListener: (name: string) => { listeners.delete(name) },
+    })
+    let grant!: () => void
+    const granted = new Promise<void>((resolve) => { grant = resolve })
+    vi.stubGlobal('navigator', { locks: { request: async (_n: string, _o: unknown, callback: () => Promise<void>) => { await granted; return callback() } } })
+    const calls = boot('bff', () => json({ message: 'Unauthenticated.' }, 401))
+
+    const loggingOut = useLukkAuth().logout()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    listeners.get('pagehide')!()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    grant()
+    await loggingOut
+
+    expect(calls.map(c => c.path)).toEqual(['/logout'])
+  })
+
   it('does not resend a failed early send once a sign-in made the logout it finishes moot', async () => {
     const listeners = new Map<string, () => void>()
     vi.stubGlobal('window', {
@@ -254,7 +277,7 @@ describe('logout() with an access token lukk rejects', () => {
 
     const loggingOut = useLukkAuth().logout()
     await new Promise(resolve => setTimeout(resolve, 0))
-    expect(Number(store.get('lukk:logging-out:/admin/'))).toBeGreaterThan(0) // the page could be gone before this finishes
+    expect(JSON.parse(store.get('lukk:logging-out:/admin/')!).at).toBeGreaterThan(0) // the page could be gone before this finishes
 
     answer(json(undefined, 204))
     await loggingOut
@@ -263,7 +286,7 @@ describe('logout() with an access token lukk rejects', () => {
 
   it('finishing an earlier page\'s logout, stands down if a sign-in was sent after it — sending would end that newer session', async () => {
     const noted = Date.now() - 10
-    const store = new Map<string, string>([['lukk:logging-out:/', String(noted)]])
+    const store = new Map<string, string>([['lukk:logging-out:/', JSON.stringify({ at: noted })]])
     const shared = new Map<string, string>()
     vi.stubGlobal('sessionStorage', { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => { store.set(k, v) }, removeItem: (k: string) => { store.delete(k) } })
     vi.stubGlobal('localStorage', { getItem: (k: string) => shared.get(k) ?? null, setItem: (k: string, v: string) => { shared.set(k, v) } })
@@ -279,14 +302,14 @@ describe('logout() with an access token lukk rejects', () => {
 
   it('finishing an earlier page\'s logout, keeps the note\'s time — and sends even once that note is gone', async () => {
     const noted = Date.now() - 10
-    const store = new Map<string, string>([['lukk:logging-out:/', String(noted)]])
+    const store = new Map<string, string>([['lukk:logging-out:/', JSON.stringify({ at: noted })]])
     const seen: (string | undefined)[] = []
     vi.stubGlobal('sessionStorage', { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => { store.set(k, v) }, removeItem: (k: string) => { store.delete(k) } })
 
     const calls = boot('bff', () => { seen.push(store.get('lukk:logging-out:/')); return json(undefined, 204) })
     restoreState(__test.nuxtApp).finishingLogout = noted
     await useLukkAuth().logout()
-    expect(seen).toEqual([String(noted)])
+    expect(seen).toEqual([JSON.stringify({ at: noted })])
 
     // Aged out while it waited, or cleared by another logout: the session may still be live.
     restoreState(__test.nuxtApp).finishingLogout = Date.now() - 70_000
@@ -296,13 +319,13 @@ describe('logout() with an access token lukk rejects', () => {
   })
 
   it('a new logout re-stamps a failed one\'s note, and a sign-in sent between the two doesn\'t stop it', async () => {
-    const store = new Map<string, string>([['lukk:logging-out:/', String(Date.now() - 1_000)]])
+    const store = new Map<string, string>([['lukk:logging-out:/', JSON.stringify({ at: Date.now() - 1_000 })]])
     const shared = new Map<string, string>([['lukk:signed-in-at:/', String(Date.now() - 500)]])
     vi.stubGlobal('sessionStorage', { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => { store.set(k, v) }, removeItem: (k: string) => { store.delete(k) } })
     vi.stubGlobal('localStorage', { getItem: (k: string) => shared.get(k) ?? null, setItem: (k: string, v: string) => { shared.set(k, v) } })
     const seen: number[] = []
 
-    const calls = boot('bff', () => { seen.push(Number(store.get('lukk:logging-out:/'))); return json(undefined, 204) })
+    const calls = boot('bff', () => { seen.push(JSON.parse(store.get('lukk:logging-out:/')!).at); return json(undefined, 204) })
     await useLukkAuth().logout()
 
     expect(calls.map(c => c.path)).toEqual(['/logout'])
@@ -329,6 +352,89 @@ describe('logout() with an access token lukk rejects', () => {
     await new Promise(resolve => setTimeout(resolve, 0))
 
     expect(calls).toEqual([])
+  })
+
+  it('in direct mode, names the session in its note — the in-memory token\'s family', async () => {
+    const store = new Map<string, string>()
+    vi.stubGlobal('sessionStorage', { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => { store.set(k, v) }, removeItem: (k: string) => { store.delete(k) } })
+    const seen: unknown[] = []
+    boot('direct', () => { seen.push(JSON.parse(store.get('lukk:logging-out:/')!)); return json(undefined, 204) })
+    useState<string | null>(ACCESS_KEY, () => null).value = `h.${Buffer.from(JSON.stringify({ sub: 1, fid: 'fam-7' })).toString('base64url')}.s`
+
+    await useLukkAuth().logout()
+
+    expect(seen).toEqual([{ at: expect.any(Number), fid: 'fam-7' }])
+  })
+
+  it('in BFF mode, notes it in the cookie the next page load carries to the server — not in sessionStorage', async () => {
+    const jar = new Map<string, string>()
+    vi.stubGlobal('document', {
+      get cookie() { return [...jar].map(([k, v]) => `${k}=${v}`).join('; ') },
+      set cookie(line: string) {
+        const [name, value] = line.split(';')[0]!.split('=') as [string, string]
+        if (line.includes('Max-Age=0')) jar.delete(name)
+        else jar.set(name, value)
+      },
+    })
+    const store = new Map<string, string>()
+    vi.stubGlobal('sessionStorage', { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => { store.set(k, v) }, removeItem: (k: string) => { store.delete(k) } })
+    const noted: boolean[] = []
+    let status = 204
+    boot('bff', () => { noted.push(jar.has('__Host-lukk-logout')); return json(status === 204 ? undefined : { message: 'x' }, status) })
+    ;(__test.runtimeConfig.public.lukk as Record<string, unknown>).logoutCookie = '__Host-lukk-logout'
+
+    await useLukkAuth().logout()
+    expect(noted).toEqual([true]) // there before the request went out
+    expect(jar.has('__Host-lukk-logout')).toBe(false) // and gone once it succeeded
+    expect(store.size).toBe(0)
+
+    status = 429
+    await expect(useLukkAuth().logout()).rejects.toMatchObject({ status: 429 })
+    expect(jar.has('__Host-lukk-logout')).toBe(true) // may still be live: the next page load finishes it
+
+    status = 401
+    await expect(useLukkAuth().logout()).rejects.toMatchObject({ status: 401 })
+    expect(jar.has('__Host-lukk-logout')).toBe(false)
+  })
+
+  it('in BFF mode, finishing an earlier page\'s logout doesn\'t note it again, and stands down once the note stops saying pending — leaving it be', async () => {
+    const jar = new Map<string, string>([['__Host-lukk-logout', '1']])
+    const writes: string[] = []
+    vi.stubGlobal('document', {
+      get cookie() { return [...jar].map(([k, v]) => `${k}=${v}`).join('; ') },
+      set cookie(line: string) {
+        writes.push(line)
+        const [name, value] = line.split(';')[0]!.split('=') as [string, string]
+        if (line.includes('Max-Age=0')) jar.delete(name)
+        else jar.set(name, value)
+      },
+    })
+    let grant!: () => void
+    let granted = new Promise<void>((resolve) => { grant = resolve })
+    vi.stubGlobal('navigator', { locks: { request: async (_n: string, _o: unknown, callback: () => Promise<void>) => { await granted; return callback() } } })
+    const calls = boot('bff', () => json(undefined, 204))
+    ;(__test.runtimeConfig.public.lukk as Record<string, unknown>).logoutCookie = '__Host-lukk-logout'
+    const state = restoreState(__test.nuxtApp)
+
+    state.finishingLogout = Date.now()
+    const finishing = useLukkAuth().logout()
+    expect(writes).toEqual([]) // not written again
+    jar.delete('__Host-lukk-logout') // another tab's sign-in answered while this waited for its lock
+    grant()
+    await finishing
+    expect(calls).toEqual([]) // sending would have ended that sign-in
+    expect(state.logoutStoodDown).toBe(true) // for the restore plugin, which restores the newer session
+    expect(writes).toEqual([])
+
+    // Still pending: it sends, and clears the note once done.
+    state.logoutStoodDown = false
+    jar.set('__Host-lukk-logout', '1')
+    granted = Promise.resolve()
+    state.finishingLogout = Date.now()
+    await useLukkAuth().logout()
+    expect(calls.map(c => c.path)).toEqual(['/logout'])
+    expect(state.logoutStoodDown).toBe(false)
+    expect(jar.has('__Host-lukk-logout')).toBe(false)
   })
 
   it('keeps the note when the logout may have left the session live, and drops it when there was none', async () => {

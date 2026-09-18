@@ -1,33 +1,41 @@
 /**
- * A per-tab note that a logout was started and hasn't finished.
+ * DIRECT mode's per-tab note that a logout was started and hasn't finished. (BFF mode notes it in a
+ * cookie the server reads — see `logout-cookie`.)
  *
  * A page that navigates away right after calling `logout()` sends it on `pagehide` — but a browser fires
- * that only once the NEXT page's response has arrived, and that request still carried the live session:
- * in BFF mode the next page rendered signed in. The note survives the navigation (`sessionStorage` is per
- * tab), so the next page finishes the logout before restoring anything.
+ * that only once the NEXT page's response has arrived, and may not deliver it at all. The note survives
+ * the navigation (`sessionStorage` is per tab), so the next page finishes the logout before restoring
+ * anything.
  *
- * It holds when it was written, and is honoured only briefly: it exists for the page load right after
- * the logout. An old note — a logout that failed and was left, a tab duplicated later — would otherwise
- * end whatever session the tab holds by then, possibly one signed in since.
+ * It names the session it was for — the access token's `fid` (its refresh-token family) — and the next
+ * page ends only THAT one: it restores first, and logs out if the session it got is the same. The
+ * cookie is shared by every tab, so by then it may hold a newer sign-in — from another tab, an SSO
+ * callback, anything — and a note that couldn't tell them apart ended it.
  *
- * Nor is it honoured past a sign-in in ANY tab. The note outlives the page, so a tab that logged out,
- * left for another site and came back finished the logout on its return — with the shared cookie, by
- * then another tab's newer sign-in, which it ended. A sign-in isn't announced to a page that no longer
- * exists, so it leaves its time in `localStorage` (shared by every tab), and a note older than that is moot.
- * The time the sign-in was SENT: one sent before the logout was asked for ends up behind it in the lock
- * queue on a page that stays, and the page that left and came back must agree. An app that clears
- * `localStorage` loses the record, and a note written before that sign-in is honoured again.
+ * Honoured only briefly: it exists for the page load right after the logout.
+ *
+ * Without a family — `logout()` called before any token was known, or a custom `TokenIssuer` that leaves
+ * `fid` out — the note falls back to time: it is moot once a sign-in is sent after it, in any tab. A
+ * sign-in leaves the time it was SENT in `localStorage` for that. An app that clears `localStorage`, or a
+ * sign-in that doesn't go through lukk-js, isn't seen by that fallback.
  *
  * Both keys are scoped to the app's base, like its lock and channel: two apps sharing an origin keep
- * separate session cookies, and one's sign-in must neither cancel nor be ended by the other's logout.
+ * separate sessions, and one's sign-in must neither cancel nor be ended by the other's logout.
  *
- * `sessionStorage` can throw (storage disabled, some private modes); then there's simply no note.
+ * Storage can throw (disabled, some private modes); then there's simply no note.
  */
 const noteKey = (scope = '/') => `lukk:logging-out:${scope}`
 const signedInKey = (scope = '/') => `lukk:signed-in-at:${scope}`
 
 /** Long enough for the navigation that follows a logout; short enough not to outlive its purpose. */
 export const PENDING_LOGOUT_TTL_MS = 60_000
+
+export interface PendingLogout {
+  /** When the logout was asked for. */
+  at: number
+  /** The session it was for, when known. */
+  fid?: string
+}
 
 function storage(): Storage | undefined {
   try { return typeof sessionStorage === 'undefined' ? undefined : sessionStorage }
@@ -39,9 +47,9 @@ function shared(): Storage | undefined {
   catch { return undefined }
 }
 
-/** Note a logout asked for at `now`. The next page's `logout()` that finishes it doesn't note again — see useLukkAuth. */
-export function notePendingLogout(scope?: string, now = Date.now()): void {
-  try { storage()?.setItem(noteKey(scope), String(now)) }
+/** Note a logout asked for at `now`, for the session `fid` if known. */
+export function notePendingLogout(scope?: string, fid?: string, now = Date.now()): void {
+  try { storage()?.setItem(noteKey(scope), JSON.stringify(fid === undefined ? { at: now } : { at: now, fid })) }
   catch { /* no note */ }
 }
 
@@ -49,34 +57,43 @@ export function notePendingLogout(scope?: string, now = Date.now()): void {
 export function clearPendingLogout(scope?: string, upTo?: number): void {
   try {
     const store = storage()
-    if (upTo !== undefined && Number(store?.getItem(noteKey(scope))) > upTo) return
+    if (upTo !== undefined && (readNote(store?.getItem(noteKey(scope)))?.at ?? 0) > upTo) return
     store?.removeItem(noteKey(scope))
   }
   catch { /* nothing to clear */ }
 }
 
-/** A sign-in in any tab, sent at `sentAt`: every note written after that is moot. */
+/** A sign-in in any tab, sent at `sentAt`: every family-less note written after that is moot. */
 export function noteSignIn(scope: string | undefined, sentAt: number): void {
   try { shared()?.setItem(signedInKey(scope), String(sentAt)) }
   catch { /* no record */ }
 }
 
-/** When the logout still standing was asked for — or `undefined`: none, too old, or moot since a sign-in. */
-export function pendingLogoutAt(scope?: string, now = Date.now()): number | undefined {
+/**
+ * The logout still standing, or `undefined`: none, too old — or, for one without a family, moot since a
+ * sign-in. One WITH a family is never judged by time: the session it names settles it.
+ */
+export function readPendingLogout(scope?: string, now = Date.now()): PendingLogout | undefined {
   try {
-    const noted = Number(storage()?.getItem(noteKey(scope)))
-    return Number.isFinite(noted) && noted > 0 && now - noted < PENDING_LOGOUT_TTL_MS && !signedInSince(scope, noted) ? noted : undefined
+    const note = readNote(storage()?.getItem(noteKey(scope)))
+    if (!note || now - note.at >= PENDING_LOGOUT_TTL_MS) return undefined
+    return note.fid !== undefined || !signedInSince(scope, note.at) ? note : undefined
   }
   catch { return undefined }
-}
-
-export function hasPendingLogout(scope?: string, now = Date.now()): boolean {
-  return pendingLogoutAt(scope, now) !== undefined
 }
 
 /** Was a sign-in sent, in any tab, at or after `at`? */
 export function signedInSince(scope: string | undefined, at: number): boolean {
   return lastSignIn(scope) >= at
+}
+
+function readNote(raw: string | null | undefined): PendingLogout | undefined {
+  try {
+    const note = JSON.parse(raw ?? '') as Partial<PendingLogout> | null
+    if (typeof note?.at !== 'number' || !(note.at > 0)) return undefined
+    return typeof note.fid === 'string' ? { at: note.at, fid: note.fid } : { at: note.at }
+  }
+  catch { return undefined }
 }
 
 // A record that can't be read says nothing about a later sign-in, so the note stands.

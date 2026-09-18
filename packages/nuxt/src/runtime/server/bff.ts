@@ -1,8 +1,8 @@
 import type { H3Event } from 'h3'
 import { isTokenPair } from 'lukk-core'
-import { defineEventHandler, getCookie, getRequestHeader, readRawBody, setResponseHeader, setResponseStatus, useSession } from 'h3'
+import { defineEventHandler, deleteCookie, getCookie, getRequestHeader, readRawBody, setResponseHeader, setResponseStatus, useSession } from 'h3'
 import { useRuntimeConfig } from '#imports'
-import { LUKK_BFF_PREFIX, confirmationHeaderName, sessionCookieName } from '../shared'
+import { LUKK_BFF_PREFIX, confirmationHeaderName, logoutCookieName, sessionCookieName } from '../shared'
 import { isForeignOrigin, rejectUnresolvedTarget, reportProxyFailure, resolveTarget, viaHeader, visitorIp } from './proxy-utils'
 import { endSession, newSessionId, sessionEnded, sessionKey, sessionReplaced, withholdSessionCookie } from './ended-sessions'
 import { revokeDroppedSession } from './revoke-dropped'
@@ -37,6 +37,8 @@ export default defineEventHandler(async (event) => {
   const secure = cookieSecure !== false
   const sessionName = sessionCookieName(secure, cookieNamespace)
   const cookieOptions: SessionCookieOptions = { sameSite: 'strict', secure, httpOnly: true, path: '/' }
+  // The browser's logout note (see `logoutCookieName`): cleared once the logout is done, and by any new session.
+  const clearLogoutNote = () => deleteCookie(event, logoutCookieName(secure, cookieNamespace), { path: '/', secure, sameSite: 'strict' })
 
   // CSRF: reject a state-changing request riding the session cookie from a foreign origin.
   if (isForeignOrigin(event, secure)) {
@@ -249,6 +251,9 @@ export default defineEventHandler(async (event) => {
     // reported as theft. Without one, the new session simply ends when its access token does.
     await s.update({ access: data.access_token, refresh: data.refresh_token, confirmation: undefined, sid: newSessionId() })
     warnIfSessionTooLarge(s)
+    // A logout noted before this sign-in was for the session it replaced — which is ended above. Left
+    // standing, the next page load would end THIS one.
+    clearLogoutNote()
     return { ok: true, expires_in: data.expires_in }
   }
 
@@ -285,6 +290,8 @@ export default defineEventHandler(async (event) => {
       // those let anyone flood the record past its bound and evict the entries that matter.
       if (unsealed) await endSession(sessionKey(s))
       await s.clear()
+      // Only with the session it was for: a note beside a newer session's cookie belongs to that one.
+      clearLogoutNote()
     }
   }
 

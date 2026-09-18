@@ -1,8 +1,10 @@
 import { useLukkAuth } from '../composables/useLukkAuth'
-import { READY_KEY } from '../keys'
-import { pendingLogoutAt, signedInSince } from '../utils/pending-logout'
+import { ACCESS_KEY, READY_KEY } from '../keys'
+import { clearLogoutCookie, hasLogoutCookie, setLogoutCookie } from '../utils/logout-cookie'
+import { clearPendingLogout, readPendingLogout, signedInSince } from '../utils/pending-logout'
 import { restoreState } from '../utils/restore-state'
-import { defineNuxtPlugin, useNuxtApp, useState } from '#imports'
+import { tokenFamily } from '../utils/token-subject'
+import { defineNuxtPlugin, useNuxtApp, useRuntimeConfig, useState } from '#imports'
 
 /**
  * On app load in the browser, silently restore the session: if a valid refresh
@@ -27,16 +29,55 @@ export default defineNuxtPlugin({
     state.started = true
 
     try {
-      // The previous page in this tab started a logout it may not have finished — it navigated away
-      // first, and this page's request (and a server render) could still carry the session. Finish it
-      // before restoring anything; its errors surface nowhere else, so they are swallowed.
-      const noted = pendingLogoutAt(state.scope)
-      if (noted !== undefined) {
-        state.finishingLogout = noted
+      // A previous page started a logout it may not have finished — it navigated away first, and this
+      // page's request could still carry the session. Its errors surface nowhere else, so they are swallowed.
+      const cfg = useRuntimeConfig().public.lukk as { mode: 'bff' | 'direct', logoutCookie?: string, signedOutCookie?: string }
+      const noteCookie = cfg.mode === 'bff' ? cfg.logoutCookie : undefined
+      const signedOutCookie = cfg.mode === 'bff' ? cfg.signedOutCookie : undefined
+      const note = noteCookie ? undefined : readPendingLogout(state.scope)
+
+      // BFF: the server finishes it before rendering this page, and clears the cookie. Still here, it
+      // couldn't (lukk unreachable, a page served without the server). The server rendered this page
+      // signed out all the same, so there is nothing to restore — and nothing to hold startup for: lukk
+      // may be hanging. It stands down if the note goes meanwhile (a sign-in elsewhere cleared it).
+      if (noteCookie && hasLogoutCookie(noteCookie)) {
+        // A fresh minute: the replay may wait seconds for the lock, and a note that aged out meanwhile would
+        // read as cleared by a sign-in. Only renewed while it still says pending — never re-written after.
+        setLogoutCookie(noteCookie)
+        state.finishingLogout = Date.now()
+        void auth.logout().then(() => {
+          // It stood down: a sign-in elsewhere replaced that session, and this tab should show it.
+          if (!state.logoutStoodDown) return
+          state.logoutStoodDown = false
+          return auth.initSession()
+        }).catch(() => {})
+      }
+      // BFF: the server ended the session before this page, and said so in a cookie — per browser, so no
+      // cached page can carry it. Signed out, and known: no restore to wait on (another tab's lock held it
+      // for seconds). Other tabs still show the account: tell them.
+      else if (signedOutCookie && hasLogoutCookie(signedOutCookie)) {
+        clearLogoutCookie(signedOutCookie)
+        state.announce?.()
+      }
+      // Direct, for a known session: restore, and end what was restored only if it is that session. The
+      // cookie may hold a newer sign-in by now, from anywhere.
+      else if (note?.fid !== undefined) {
+        await auth.initSession()
+        const access = useState<string | null>(ACCESS_KEY, () => null)
+        if (auth.loggedIn.value && tokenFamily(access.value) === note.fid) await auth.logout().catch(() => {})
+        // Couldn't tell (lukk unreachable): the note stands, for the next load within its minute.
+        else if (!auth.restoreFailed.value) {
+          clearPendingLogout(state.scope)
+          // Gone already — the page's send on the way out ended it. Other tabs still show the account.
+          if (!auth.loggedIn.value) state.announce?.()
+        }
+      }
+      // Direct, session unknown: by time — the logout stands down if a sign-in was sent after it.
+      else if (note) {
+        state.finishingLogout = note.at
         await auth.logout().catch(() => {})
-        // Unless a sign-in sent meanwhile in another tab made it moot: then the logout stood down, and the
-        // cookie holds that newer session — restore it.
-        if (signedInSince(state.scope, noted)) await auth.initSession()
+        state.logoutStoodDown = false // read by time here, not by the flag
+        if (signedInSince(state.scope, note.at)) await auth.initSession()
       }
       // If SSR already hydrated the user (BFF `ssrHydrate`), skip the client restore — no
       // redundant refresh on every page load. Anonymous / expired-at-SSR renders leave `user`

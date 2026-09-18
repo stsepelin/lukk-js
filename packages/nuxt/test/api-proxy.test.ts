@@ -34,11 +34,13 @@ const useSession = vi.fn(async (event: { node: { res: { setHeader: (k: string, v
   }),
 }))
 
+const h3note = vi.hoisted(() => ({ value: undefined as string | undefined }))
+
 vi.mock('h3', () => ({
   defineEventHandler: (fn: unknown) => fn,
   getRequestHeader: (event: { headers?: Record<string, string> }, name: string) => event.headers?.[name],
   getRequestIP: (event: { ip?: string }) => event.ip,
-  getCookie: () => (cookiePresent ? 'sealed' : undefined),
+  getCookie: (_event: unknown, name: string) => (/-logout$|-signed-out$/.test(name) ? h3note.value : (cookiePresent ? 'sealed' : undefined)),
   unsealSession: async () => {
     if (!sealValid) throw new Error('bad seal')
     return sealHasData ? { data: sessionData } : {}
@@ -56,7 +58,7 @@ vi.mock('../src/runtime/server/revoke-dropped', () => ({ revokeDroppedSession: (
 // eslint-disable-next-line import/first
 import handler from '../src/runtime/server/api-proxy'
 // eslint-disable-next-line import/first
-import { forgetEndedSessions, markSessionEnded } from '../src/runtime/server/ended-sessions'
+import { endSession, forgetEndedSessions, markSessionEnded } from '../src/runtime/server/ended-sessions'
 
 /** A minimal JWT (header.payload.sig) carrying just the given claims — not signed. */
 function jwt(claims: Record<string, unknown>): string {
@@ -96,7 +98,7 @@ beforeEach(() => {
   upstreamResponse = { status: 200, type: 'default', headers: new Headers() }
   refreshOnce.mockReset()
 })
-afterEach(() => { __test.reset(); vi.clearAllMocks() })
+afterEach(() => { __test.reset(); vi.clearAllMocks(); h3note.value = undefined })
 
 describe('app-API proxy', () => {
   it('injects the bearer, strips the cookie/authorization + spoofable forwarding headers, sets a trusted XFF', async () => {
@@ -117,6 +119,14 @@ describe('app-API proxy', () => {
         }),
       }),
     )
+  })
+
+  it('attaches no session while the browser\'s logout note is on the request — a render right now must not show that account', async () => {
+    h3note.value = '1'
+    await run(ev({ path: '/api/users', headers: { cookie: '__Host-lukk-session=sealed; __Host-lukk-logout=1' } }))
+    const headers = (proxyRequest.mock.calls[0]![2] as { headers: Record<string, string> }).headers
+    expect(headers.authorization).toBe('')
+    expect(useSession).not.toHaveBeenCalled()
   })
 
   it('blanks the step-up confirmation header a client tried to smuggle through', async () => {
@@ -346,6 +356,25 @@ describe('app-API proxy', () => {
       expect(refreshOnce).not.toHaveBeenCalled()
       expect(proxyRequest).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ headers: expect.objectContaining({ authorization: `Bearer ${stale}` }) }))
       expect(e.node.res.setHeader).not.toHaveBeenCalledWith('set-cookie', expect.anything())
+    })
+
+    it('withholds the signed-out cookie a logout this request finished queued, when a sign-in replaced that session meanwhile', async () => {
+      h3note.value = '1' // the request carried the browser's logout note; finish-logout ended its session
+      const queued = ['__Host-lukk-signed-out=1; Max-Age=10; Path=/', 'theme=dark; Path=/']
+      const answer = async (replacedMeanwhile: boolean) => {
+        const e = { ...ev({ path: '/api/me' }), context: { lukkEndedSession: { key: 'session-X', marker: '__Host-lukk-signed-out' } } }
+        e.node.res.setHeader('set-cookie', [...queued])
+        const original = proxyRequest.getMockImplementation()!
+        proxyRequest.mockImplementationOnce(async (...args) => {
+          if (replacedMeanwhile) await endSession('session-X', { replaced: true }) // a sign-in in another tab lands mid-request
+          return original(...args)
+        })
+        await run(e)
+        return e.node.res.getHeader('set-cookie')
+      }
+
+      expect(await answer(false)).toEqual(queued)
+      expect(await answer(true)).toEqual(['theme=dark; Path=/'])
     })
 
     it('withholds the re-sealed cookie when the session ended while the upstream was answering', async () => {

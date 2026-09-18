@@ -5,7 +5,8 @@ import { ACCESS_KEY, CHALLENGE_KEY, CONFIRMATION_KEY, CONFIRMED_KEY, READY_KEY, 
 import { isAuthRejection } from '../shared'
 import { clearPendingLogout, notePendingLogout, signedInSince } from '../utils/pending-logout'
 import { acrossTabs, restoreState, settleRefresh, signIn } from '../utils/restore-state'
-import { tokenSubject } from '../utils/token-subject'
+import { clearLogoutCookie, hasLogoutCookie, setLogoutCookie } from '../utils/logout-cookie'
+import { tokenFamily, tokenSubject } from '../utils/token-subject'
 import { isPrematureWait, whenReady as settled } from '../utils/when-ready'
 import type { RestoreOutcome } from '../plugins/client'
 import { useLukkFetch } from './useLukkFetch'
@@ -16,6 +17,8 @@ interface PublicLukk {
   confirmationHeader: string
   userEndpoint: string
   userKey: string
+  /** BFF: the logout note cookie's name (see `logoutCookieName`). */
+  logoutCookie?: string
 }
 
 /**
@@ -204,24 +207,35 @@ export function useLukkAuth(): LukkAuth {
     // `pagehide` for a backgrounded tab it later kills, and the user has already asked to log out.
     // Sending early skips the cross-tab lock — in direct mode a sign-in in another tab at that very moment
     // can lose its cookie — which is the smaller loss than a logout that never happened.
-    // And a note the next page finishes it from, should this page be gone before it completes.
+    // And a note the next request finishes it from, should this page be gone before it completes. In BFF
+    // mode a cookie, which the next page load carries to the server, and which any new session's response
+    // clears (see `logout-cookie`); in direct mode a per-tab note naming this session's family.
     //
-    //
-    // Unless this call FINISHES a logout an earlier page noted (the restore plugin says so). That one
-    // keeps its note as it was — re-stamping moved it past sign-ins sent since, and renewed its minute on
-    // every reload while it kept failing — and stands down if a sign-in was sent after it, in any tab:
-    // sending would end that newer session. Only a recorded sign-in, never a note that's gone: one that
-    // aged out or another logout cleared still has a session to end. Any other call is a new logout.
+    // The restore plugin calls this to FINISH a note an earlier page left. That call doesn't note again —
+    // re-writing it after a sign-in had cleared it ended that sign-in; re-stamping a direct-mode note moved
+    // it past sign-ins sent since — and stands down, right before sending, once the note is moot, since
+    // sending would end a newer session:
+    //  - BFF: the note cookie is gone. Only a new session's response, or the end of the session it was for,
+    //    clears it (the restore plugin renews its minute before calling this).
+    //  - Direct, a note without a family: a sign-in was sent after it, in any tab. Only a recorded sign-in,
+    //    never a note that's gone: one that aged out or another logout cleared still has a session to end.
+    const noteCookie = cfg.mode === 'bff' ? cfg.logoutCookie : undefined
     const finishing = state.finishingLogout
     state.finishingLogout = undefined
-    const moot = () => finishing !== undefined && signedInSince(state.scope, finishing)
-    if (import.meta.client && finishing === undefined) notePendingLogout(state.scope)
+    const moot = () => finishing !== undefined && (noteCookie ? !hasLogoutCookie(noteCookie) : signedInSince(state.scope, finishing))
+    if (import.meta.client && finishing === undefined) {
+      if (noteCookie) setLogoutCookie(noteCookie)
+      else notePendingLogout(state.scope, tokenFamily(access.value))
+    }
+    const clearNote = () => noteCookie ? clearLogoutCookie(noteCookie) : clearPendingLogout(state.scope)
 
     let early: Promise<boolean> | null = null
     let sentInOrder = false
+    let stoodDown = false
     const leaving = () => {
       if (early || sentInOrder || moot()) return
-      early = $lukk.logout({ retry: false }).then(() => true, () => false)
+      // A 401 is done too: no session left — the next page's server may well have ended it already.
+      early = $lukk.logout({ retry: false }).then(() => true, (error: { status?: number } | null) => error?.status === 401)
     }
     const hidden = () => {
       if (document.visibilityState === 'hidden') leaving()
@@ -236,7 +250,10 @@ export function useLukkAuth(): LukkAuth {
       // back/forward cache resumes here, and a lost early send would otherwise leave the session live.
       // A sign-in sent after the logout this finishes comes first, even over a failed early send: resending
       // would end that newer session.
-      if (moot()) return false
+      if (moot()) {
+        stoodDown = true
+        return false
+      }
       if (early) return !(await early)
       sentInOrder = true
       return true
@@ -244,12 +261,15 @@ export function useLukkAuth(): LukkAuth {
     state.ending = ending
     try {
       await ending
-      clearPendingLogout(state.scope)
+      // Standing down, the note isn't this logout's to clear: a newer `logout()` may have just written it.
+      // The restore plugin restores instead — what it stood down for is a newer session.
+      if (stoodDown) state.logoutStoodDown = true
+      else clearNote()
     }
     catch (error) {
       // No session left to end: done. Anything else may have left it live — keep the note, so the next
       // page load in this tab tries again.
-      if ((error as { status?: number } | null)?.status === 401) clearPendingLogout(state.scope)
+      if ((error as { status?: number } | null)?.status === 401) clearNote()
       throw error
     }
     finally {

@@ -56,6 +56,8 @@ export interface RestoreState {
    * page noted at this time, rather than being a new one. Consumed by that call.
    */
   finishingLogout?: number
+  /** That call stood down without sending: the session it was for had been replaced. Read by the restore plugin. */
+  logoutStoodDown?: boolean
   /** How many of this tab's operations are using the tab lock — the lock is released when it reaches 0. */
   lockUsers: number
   /** Settles once this tab holds the lock (or gave up waiting for it). */

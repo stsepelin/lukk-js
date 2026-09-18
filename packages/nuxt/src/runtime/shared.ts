@@ -64,6 +64,28 @@ export function sessionCookieName(secure: boolean, name?: string): string {
 }
 
 /**
+ * The BFF's logout note: a short-lived cookie the BROWSER sets when `logout()` is called, so the next
+ * request — the page load a navigation makes before the logout request has even gone out — tells the
+ * server to finish that logout before rendering. Named like the session cookie it belongs to (and
+ * `__Host-` where that one is, so a sibling subdomain cannot plant it).
+ */
+export function logoutCookieName(secure: boolean, name?: string): string {
+  const ns = name ? `-${name}` : ''
+  return secure ? `__Host-lukk${ns}-logout` : `lukk${ns}-logout`
+}
+
+/**
+ * The server's answer to that note: this browser's logout is done, so the page it rides knows it is signed
+ * out without asking. Its own cookie, not a value on the note — the browser's own logout response clears
+ * the note whenever it lands, which would take this with it — and not the page payload, which a cached
+ * page would carry to every visitor.
+ */
+export function signedOutCookieName(secure: boolean, name?: string): string {
+  const ns = name ? `-${name}` : ''
+  return secure ? `__Host-lukk${ns}-signed-out` : `lukk${ns}-signed-out`
+}
+
+/**
  * Whether a cookie name is a lukk BFF session cookie for ANY app — the default or any namespace,
  * Secure or dev-http. The app-API proxy uses this so it never forwards a lukk sealed session cookie
  * to the browser, even a co-hosted sibling app's, whatever the `api.forwardSetCookie` allow-list says.

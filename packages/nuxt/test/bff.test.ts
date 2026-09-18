@@ -22,6 +22,7 @@ vi.mock('h3', () => ({
     (event.__res ??= {})[name] = value
   },
   useSession: async (event: { __session: unknown }, config: { name?: string }) => { h3state.useSessionCalls++; h3state.lastSessionName = config?.name; return event.__session },
+  deleteCookie: (event: { __deleted?: { name: string, options: unknown }[] }, name: string, options: unknown) => { (event.__deleted ??= []).push({ name, options }) },
 }))
 
 // eslint-disable-next-line import/first
@@ -74,10 +75,13 @@ describe('BFF proxy', () => {
     const session = makeSession()
     mockFetch().fetch = vi.fn().mockResolvedValue(jsonRes({ access_token: 'a', refresh_token: 'r', expires_in: 900 }))
 
-    const result = await run(makeEvent({ path: '/api/_lukk/login', method: 'POST', body: '{"email":"e"}', headers: { ...sameOrigin, 'content-type': 'application/json' }, session }))
+    const event = makeEvent({ path: '/api/_lukk/login', method: 'POST', body: '{"email":"e"}', headers: { ...sameOrigin, 'content-type': 'application/json' }, session })
+    const result = await run(event)
 
     expect(session.update).toHaveBeenCalledWith({ access: 'a', refresh: 'r', confirmation: undefined, sid: expect.any(String) })
     expect(result).toEqual({ ok: true, expires_in: 900 })
+    // A logout noted before this sign-in was for the session it replaced — left, the next page would end this one.
+    expect((event as { __deleted?: { name: string }[] }).__deleted?.map(d => d.name)).toEqual(['__Host-lukk-logout'])
     const init = mockFetch().fetch.mock.calls[0]![1]!
     expect(init.headers['Content-Type']).toBe('application/json')
     expect(init.headers.Authorization).toBeUndefined()
@@ -332,11 +336,19 @@ describe('BFF proxy', () => {
     expect(JSON.parse((mockFetch().fetch.mock.calls[0]![1] as { body: string }).body)).toEqual({})
   })
 
-  it('clears the session on logout', async () => {
+  it('clears the session on logout — and the browser\'s logout note with it', async () => {
     const session = makeSession({ access: 'tok' })
     mockFetch().fetch = vi.fn().mockResolvedValue(jsonRes(null, 204))
-    await run(makeEvent({ path: '/api/_lukk/logout', method: 'POST', headers: sameOrigin, session }))
+    const event = makeEvent({ path: '/api/_lukk/logout', method: 'POST', headers: sameOrigin, session })
+    await run(event)
     expect(session.clear).toHaveBeenCalledOnce()
+    expect((event as { __deleted?: unknown[] }).__deleted).toEqual([{ name: '__Host-lukk-logout', options: { path: '/', secure: true, sameSite: 'strict' } }])
+
+    // Named like the session cookie: relaxed and namespaced with it.
+    Object.assign(__test.runtimeConfig.lukk, { cookieSecure: false, cookieNamespace: 'admin' })
+    const dev = makeEvent({ path: '/api/_lukk/logout', method: 'POST', headers: { origin: 'http://app.example.com', host: 'app.example.com' }, session: makeSession({ access: 'tok' }) })
+    await run(dev)
+    expect((dev as { __deleted?: unknown[] }).__deleted).toEqual([{ name: 'lukk-admin-logout', options: { path: '/', secure: false, sameSite: 'strict' } }])
   })
 
   it.each([
@@ -353,6 +365,8 @@ describe('BFF proxy', () => {
 
     expect(event.status).toBe(answer().status)
     expect(session.clear).not.toHaveBeenCalled()
+    // The browser's note stays too: the logout isn't done.
+    expect((event as { __deleted?: unknown[] }).__deleted).toBeUndefined()
     // Nor recorded as ended: its refreshes must keep working until the retry succeeds.
     mockFetch().fetch = vi.fn(async () => jsonRes({ access_token: 'A2', refresh_token: 'rA2', expires_in: 900 }))
     const refresh = makeEvent({ path: '/api/_lukk/refresh', method: 'POST', body: '{}', headers: sameOrigin, session: makeSession({ access: 'A', refresh: 'rA', sid: 'session-A' } as TokenSession) })
@@ -775,6 +789,8 @@ describe('a session replaced or ended while a refresh for it was out', () => {
     await pending
 
     expect(loggingOut.clear).not.toHaveBeenCalled()
+    // Nor a logout note beside that newer session's cookie: it would be that session's.
+    expect((event as { __deleted?: unknown[] }).__deleted).toBeUndefined()
   })
 
   it('ends the session a sign-in replaces on lukk too, not only in the browser', async () => {

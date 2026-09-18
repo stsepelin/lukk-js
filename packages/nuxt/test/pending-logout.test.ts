@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { clearPendingLogout, hasPendingLogout, notePendingLogout, noteSignIn, PENDING_LOGOUT_TTL_MS, pendingLogoutAt, signedInSince } from '../src/runtime/utils/pending-logout'
+import { clearPendingLogout, noteSignIn, notePendingLogout, PENDING_LOGOUT_TTL_MS, readPendingLogout, signedInSince } from '../src/runtime/utils/pending-logout'
 
 afterEach(() => vi.unstubAllGlobals())
 
@@ -12,124 +12,122 @@ function memoryStorage() {
   }
 }
 
-describe('pending logout note', () => {
-  it('notes, reads and clears it in sessionStorage', () => {
+describe('pending logout note (direct mode)', () => {
+  it('notes the time and the session\'s family, reads it back, and clears it', () => {
     vi.stubGlobal('sessionStorage', memoryStorage())
 
-    expect(hasPendingLogout()).toBe(false)
-    notePendingLogout()
-    expect(hasPendingLogout()).toBe(true)
+    expect(readPendingLogout(undefined, 2_000)).toBeUndefined()
+    notePendingLogout(undefined, 'fam-1', 1_000)
+    expect(readPendingLogout(undefined, 2_000)).toEqual({ at: 1_000, fid: 'fam-1' })
+    notePendingLogout(undefined, undefined, 1_500) // a new logout, session unknown
+    expect(readPendingLogout(undefined, 2_000)).toEqual({ at: 1_500 })
     clearPendingLogout()
-    expect(hasPendingLogout()).toBe(false)
+    expect(readPendingLogout(undefined, 2_000)).toBeUndefined()
   })
 
   it('is honoured only briefly — an old note would end whatever session the tab holds by then', () => {
     vi.stubGlobal('sessionStorage', memoryStorage())
-    notePendingLogout(undefined, 1_000)
+    notePendingLogout(undefined, 'fam-1', 1_000)
 
-    expect(hasPendingLogout(undefined, 1_000 + PENDING_LOGOUT_TTL_MS - 1)).toBe(true)
-    expect(hasPendingLogout(undefined, 1_000 + PENDING_LOGOUT_TTL_MS)).toBe(false)
+    expect(readPendingLogout(undefined, 1_000 + PENDING_LOGOUT_TTL_MS - 1)).toBeDefined()
+    expect(readPendingLogout(undefined, 1_000 + PENDING_LOGOUT_TTL_MS)).toBeUndefined()
   })
 
-  it('is moot once anyone signs in after it — the cookie it would end is that newer session', () => {
+  it('without a family, is moot once anyone sends a sign-in after it; with one, the session decides instead', () => {
     vi.stubGlobal('sessionStorage', memoryStorage())
     vi.stubGlobal('localStorage', memoryStorage())
-    notePendingLogout(undefined, 1_000)
+    notePendingLogout(undefined, undefined, 1_000)
 
     noteSignIn(undefined, 999)
-    expect(hasPendingLogout(undefined, 2_000)).toBe(true)
+    expect(readPendingLogout(undefined, 2_000)).toEqual({ at: 1_000 })
     noteSignIn(undefined, 1_000)
-    expect(hasPendingLogout(undefined, 2_000)).toBe(false)
-    noteSignIn(undefined, 1_500)
-    expect(hasPendingLogout(undefined, 2_000)).toBe(false)
+    expect(readPendingLogout(undefined, 2_000)).toBeUndefined()
+    expect(signedInSince(undefined, 1_000)).toBe(true)
+    expect(signedInSince(undefined, 1_001)).toBe(false)
+
+    notePendingLogout(undefined, 'fam-1', 1_000)
+    expect(readPendingLogout(undefined, 2_000)).toEqual({ at: 1_000, fid: 'fam-1' })
   })
 
-  it('keeps the note when the sign-in record is missing, garbage or unreadable', () => {
+  it('keeps a family-less note when the sign-in record is missing, garbage or unreadable', () => {
     vi.stubGlobal('sessionStorage', memoryStorage())
-    notePendingLogout(undefined, 1_000)
+    notePendingLogout(undefined, undefined, 1_000)
 
     vi.stubGlobal('localStorage', undefined)
     expect(() => noteSignIn(undefined, 1_500)).not.toThrow()
-    expect(hasPendingLogout(undefined, 2_000)).toBe(true)
+    expect(readPendingLogout(undefined, 2_000)).toEqual({ at: 1_000 })
 
     const garbage = memoryStorage()
     garbage.setItem('lukk:signed-in-at:/', 'soon')
     vi.stubGlobal('localStorage', garbage)
-    expect(hasPendingLogout(undefined, 2_000)).toBe(true)
+    expect(readPendingLogout(undefined, 2_000)).toEqual({ at: 1_000 })
 
     const refusing = { getItem: () => { throw new Error('denied') }, setItem: () => { throw new Error('denied') } }
     vi.stubGlobal('localStorage', refusing)
     expect(() => noteSignIn(undefined, 1_500)).not.toThrow()
-    expect(hasPendingLogout(undefined, 2_000)).toBe(true)
+    expect(readPendingLogout(undefined, 2_000)).toEqual({ at: 1_000 })
 
     vi.unstubAllGlobals()
     vi.stubGlobal('sessionStorage', memoryStorage())
-    notePendingLogout(undefined, 1_000)
+    notePendingLogout(undefined, undefined, 1_000)
     Object.defineProperty(globalThis, 'localStorage', { configurable: true, get: () => { throw new Error('SecurityError') } })
-    expect(hasPendingLogout(undefined, 2_000)).toBe(true)
+    expect(readPendingLogout(undefined, 2_000)).toEqual({ at: 1_000 })
     delete (globalThis as { localStorage?: unknown }).localStorage
-  })
-
-  it('reads when the logout still standing was asked for, and whether a sign-in was sent since', () => {
-    vi.stubGlobal('sessionStorage', memoryStorage())
-    vi.stubGlobal('localStorage', memoryStorage())
-
-    notePendingLogout(undefined, 1_000)
-    notePendingLogout(undefined, 1_500) // a new logout: re-stamped
-    expect(pendingLogoutAt(undefined, 2_000)).toBe(1_500)
-
-    noteSignIn(undefined, 1_500)
-    expect(pendingLogoutAt(undefined, 2_000)).toBeUndefined()
-    expect(signedInSince(undefined, 1_500)).toBe(true)
-    expect(signedInSince(undefined, 1_501)).toBe(false)
   })
 
   it('clears up to a time only a note written no later than it', () => {
     vi.stubGlobal('sessionStorage', memoryStorage())
-    notePendingLogout(undefined, 1_000)
+    notePendingLogout(undefined, 'fam-1', 1_000)
 
     clearPendingLogout(undefined, 999)
-    expect(hasPendingLogout(undefined, 2_000)).toBe(true)
+    expect(readPendingLogout(undefined, 2_000)).toBeDefined()
     clearPendingLogout(undefined, 1_000)
-    expect(hasPendingLogout(undefined, 2_000)).toBe(false)
+    expect(readPendingLogout(undefined, 2_000)).toBeUndefined()
   })
 
   it('keeps each app on an origin to its own note and sign-in record', () => {
     vi.stubGlobal('sessionStorage', memoryStorage())
     vi.stubGlobal('localStorage', memoryStorage())
-    notePendingLogout('/admin/', 1_000)
-    notePendingLogout('/shop/', 1_000)
+    notePendingLogout('/admin/', undefined, 1_000)
+    notePendingLogout('/shop/', undefined, 1_000)
 
-    expect(hasPendingLogout(undefined, 2_000)).toBe(false)
+    expect(readPendingLogout(undefined, 2_000)).toBeUndefined()
     noteSignIn('/shop/', 1_500)
-    expect(hasPendingLogout('/shop/', 2_000)).toBe(false)
-    expect(hasPendingLogout('/admin/', 2_000)).toBe(true)
+    expect(readPendingLogout('/shop/', 2_000)).toBeUndefined()
+    expect(readPendingLogout('/admin/', 2_000)).toEqual({ at: 1_000 })
     clearPendingLogout('/admin/')
-    expect(hasPendingLogout('/admin/', 2_000)).toBe(false)
+    expect(readPendingLogout('/admin/', 2_000)).toBeUndefined()
   })
 
-  it('ignores a note that isn\'t a timestamp', () => {
+  it('ignores a note that isn\'t one', () => {
     const storage = memoryStorage()
     vi.stubGlobal('sessionStorage', storage)
-    for (const value of ['1', 'yes', '']) {
+    // '1' and a bare number were earlier forms; a family that isn't a string is dropped, not trusted.
+    for (const value of ['1', '1000', 'yes', '', 'null', '{"at":"1000"}', '{"at":0}', '{"at":-5}']) {
       storage.setItem('lukk:logging-out:/', value)
-      expect(hasPendingLogout()).toBe(false) // '1' was the old, undated form — it must not count either
+      expect(readPendingLogout(undefined, 2_000)).toBeUndefined()
     }
+    storage.setItem('lukk:logging-out:/', '{"at":1000,"fid":7}')
+    expect(readPendingLogout(undefined, 2_000)).toEqual({ at: 1_000 })
+
+    storage.setItem('lukk:logging-out:/', 'yes')
+    clearPendingLogout(undefined, 5) // unreadable counts as written no later
+    expect(storage.getItem('lukk:logging-out:/')).toBeNull()
   })
 
   it('does nothing — and never throws — where storage is missing or refuses', () => {
     vi.stubGlobal('sessionStorage', undefined)
     expect(() => notePendingLogout()).not.toThrow()
-    expect(hasPendingLogout()).toBe(false)
+    expect(readPendingLogout()).toBeUndefined()
 
     const refusing = { getItem: () => { throw new Error('denied') }, setItem: () => { throw new Error('denied') }, removeItem: () => { throw new Error('denied') } }
     vi.stubGlobal('sessionStorage', refusing)
     expect(() => notePendingLogout()).not.toThrow()
     expect(() => clearPendingLogout()).not.toThrow()
-    expect(hasPendingLogout()).toBe(false)
+    expect(readPendingLogout()).toBeUndefined()
 
     Object.defineProperty(globalThis, 'sessionStorage', { configurable: true, get: () => { throw new Error('SecurityError') } })
-    expect(hasPendingLogout()).toBe(false)
+    expect(readPendingLogout()).toBeUndefined()
     delete (globalThis as { sessionStorage?: unknown }).sessionStorage
   })
 })

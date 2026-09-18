@@ -6,12 +6,24 @@
  * a string or numeric subject (the BFF's tokenless refresh shape included).
  */
 export function tokenSubject(jwt: unknown): string | undefined {
+  return claim(jwt, 'sub')
+}
+
+/**
+ * The `fid` claim — the session (refresh-token family) a lukk access token belongs to. Same caveats: a
+ * hint, and undefined where a custom `TokenIssuer` leaves it out.
+ */
+export function tokenFamily(jwt: unknown): string | undefined {
+  return claim(jwt, 'fid')
+}
+
+function claim(jwt: unknown, name: 'sub' | 'fid'): string | undefined {
   const payload = typeof jwt === 'string' ? jwt.split('.')[1] : undefined
   if (!payload) return undefined
 
   try {
-    const claims = JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/'))) as { sub?: unknown }
-    return typeof claims.sub === 'string' || typeof claims.sub === 'number' ? String(claims.sub) : undefined
+    const value = (JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/'))) as Record<string, unknown>)[name]
+    return typeof value === 'string' || typeof value === 'number' ? String(value) : undefined
   }
   catch {
     return undefined

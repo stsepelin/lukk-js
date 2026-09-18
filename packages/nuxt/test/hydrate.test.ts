@@ -10,7 +10,8 @@ let unsealThrows: boolean
 const sessionUpdate = vi.fn()
 let sessionObj: { id?: string, data: TokenSession, update: typeof sessionUpdate }
 
-const getCookie = vi.fn(() => cookieValue)
+let noteValue: string | undefined // the browser's logout note, when a test sets one
+const getCookie = vi.fn((_event: unknown, name: string) => (/-logout$|-signed-out$/.test(name) ? noteValue : cookieValue))
 const unsealSession = vi.fn(async () => { if (unsealThrows) throw new Error('bad seal'); return unsealResult })
 const useSession = vi.fn(async () => sessionObj)
 const sealSession = vi.fn(async () => 'FRESH_SEAL')
@@ -65,6 +66,7 @@ function configure(over: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   cookieValue = 'sealed'
+  noteValue = undefined
   unsealResult = { data: {} }
   unsealThrows = false
   sessionObj = { id: 'sid', data: {}, update: sessionUpdate }
@@ -99,6 +101,15 @@ describe('resolveHydrationAccess', () => {
   it('returns null when the lukk server config is absent (defensive)', async () => {
     ;(__test.runtimeConfig as { lukk?: unknown }).lukk = undefined
     expect(await resolveHydrationAccess(ev())).toBeNull()
+  })
+
+  it('renders signed out — but per-user — while the browser\'s logout note is on the request, even if lukk couldn\'t be told yet', async () => {
+    unsealResult = { data: { access: freshJwt(), refresh: 'r' } }
+    noteValue = '1'
+    expect(await resolveHydrationAccess(ev())).toBeNull()
+    expect(useSession).not.toHaveBeenCalled()
+    expect(setResponseHeader).toHaveBeenCalledWith(expect.anything(), 'cache-control', 'no-store')
+    expect(getCookie).toHaveBeenCalledWith(expect.anything(), '__Host-lukk-logout')
   })
 
   it('treats a tampered/expired seal as no session', async () => {
