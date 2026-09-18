@@ -3,9 +3,10 @@
  *
  * Written the moment `logout()` is called, so it rides the very next request — a navigation's page load
  * included, which reaches the server before a `pagehide` send could. The server then ends the session
- * before rendering. Every response that seals a NEW session clears it, which is what keeps a note from
- * ending a sign-in that came after it: from another tab, a server-side flow, anywhere. No clock, no
- * `localStorage`.
+ * before rendering. Every response that seals a NEW session clears it, which is the FIRST thing keeping
+ * a note from ending a sign-in that came after it: from another tab, a server-side flow, anywhere. It is
+ * not the only thing — the logout also stands down on a sign-in recorded since it was asked for, which
+ * does read a clock and `localStorage` (see `signedInSince`).
  *
  * `SameSite=Strict`, one minute, and `Secure` exactly when the name carries `__Host-`. Not `HttpOnly` —
  * the browser writes it. Its PRESENCE is the message the server acts on; the value carries the moment the

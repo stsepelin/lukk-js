@@ -88,6 +88,10 @@ test('a tab that was away when the server finished the logout still hears about 
   await visit(page, `/dashboard?away=${encodeURIComponent(AWAY)}`)
   await page.getByTestId('logout-leave').click()
   await page.waitForURL(AWAY)
+  // The fault really took: a note is standing and the session is still live. Without this the test
+  // passes just as well when `fail-logout` does nothing, and then it proves only the ordinary path.
+  expect((await context.cookies()).some(c => c.name === '__Host-lukk-logout')).toBe(true)
+  expect(await liveSessions(page, user.email)).toBe(1)
   lukk('ok')
 
   // …so the next page load is what ends it, and that page is what the other tab hears from.
@@ -266,6 +270,10 @@ test('a forged logout note cannot be stored on a cached page and replayed to oth
 })
 
 test('a hanging lukk neither holds up the page nor loses the logout', async ({ page }) => {
+  // Its own budget: a 25 s wait followed by a 30 s poll cannot fit the suite's 30 s default, so this
+  // passed only because the first wait normally resolves in seconds — a genuine hang would have been
+  // reported as a timeout on the test rather than on the thing it is watching.
+  test.setTimeout(90_000)
   const user = await freshUser(page)
   await login(page, user.email, user.password)
 
@@ -275,6 +283,9 @@ test('a hanging lukk neither holds up the page nor loses the logout', async ({ p
   await expect(page.getByTestId('auth-state')).toHaveText('guest', { timeout: 25_000 })
   // Comfortably past the server's own 5 s give-up, and low enough to fail if that grows.
   expect(Date.now() - started).toBeLessThan(12_000)
+  // The hang really took: the page reads as signed out while lukk has NOT ended the session. Without
+  // this, a `hang` that quietly passed through would satisfy everything below.
+  expect(await liveSessions(page, user.email)).toBe(1)
 
   lukk('ok')
   await page.reload()

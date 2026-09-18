@@ -10,7 +10,7 @@
   },
   "scripts": {
     "build": "pnpm -r --filter \"./packages/*\" build",
-    "test": "pnpm -r --filter \"./packages/*\" test",
+    "test": "pnpm --filter lukk-core build && pnpm -r --filter \"./packages/*\" test",
     "test:conformance": "pnpm -r --filter \"./packages/*\" test:conformance",
     "typecheck": "pnpm -r --filter \"./packages/*\" typecheck",
     "lint": "eslint .",

@@ -158,4 +158,35 @@ describe('the shared replaced-session store', () => {
     expect(error).toHaveBeenCalledOnce()
     expect(String(error.mock.calls[0]![0])).toContain('session.sharedStore')
   })
+
+  it('reports a LATER outage too, once the store has answered in between', async () => {
+    // "Reported once" is per outage, not per process. The flag was cleared only by the test seam, so a
+    // store that failed, recovered, and failed again weeks later said nothing at all — and this is the
+    // one message telling an operator that replaced sessions are guarded per process again.
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    let healthy = false
+    useSharedEndedSessions({
+      mark: async () => { if (!healthy) throw new Error('down') },
+      has: async () => { if (!healthy) throw new Error('down'); return false },
+    })
+
+    await endSession('a')
+    expect(error).toHaveBeenCalledOnce()
+
+    // Fake timers for the rest: `useRealTimers` would put `Date.now()` back where it started and undo
+    // the backoff this needs to step over.
+    vi.useFakeTimers()
+
+    // Recovered: the backoff elapses, the store answers, and the report is armed again.
+    healthy = true
+    await vi.advanceTimersByTimeAsync(SHARED_STORE_BACKOFF_MS + 1)
+    await endSession('b')
+    expect(error).toHaveBeenCalledOnce() // nothing new to say while it works
+
+    healthy = false
+    await vi.advanceTimersByTimeAsync(SHARED_STORE_BACKOFF_MS + 1)
+    await endSession('c')
+
+    expect(error).toHaveBeenCalledTimes(2)
+  })
 })

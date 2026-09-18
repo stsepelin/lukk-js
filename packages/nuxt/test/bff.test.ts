@@ -943,6 +943,22 @@ describe('cache directives', () => {
   })
 })
 
+describe('an anonymous logout', () => {
+  it('opens no session and clears no cookie — it has none to clear', async () => {
+    // `hasCookie` guards this: without it an unauthenticated `POST /logout` calls `useSession`, which
+    // MINTS a sealed cookie so it can immediately expire one — handing a brand-new empty session to a
+    // browser that had none, on an unauthenticated route. Nothing entered that branch before.
+    h3state.useSessionCalls = 0
+    mockFetch().fetch = vi.fn().mockResolvedValue(jsonRes({}))
+
+    const event = makeEvent({ path: '/api/_lukk/logout', method: 'POST', headers: { ...sameOrigin } })
+    await run(event)
+
+    expect(h3state.useSessionCalls).toBe(0)
+    expect((event as { __deleted?: { name: string }[] }).__deleted?.map(d => d.name) ?? []).toEqual([])
+  })
+})
+
 describe('credential redaction fails closed', () => {
   it('strips refresh/confirmation tokens from a body that misses the capture gate', async () => {
     // The captures are allow-list gated (`isTokenPair` needs a STRING access_token), so a body that
@@ -967,6 +983,24 @@ describe('credential redaction fails closed', () => {
     const second = await run(makeEvent({ path: '/api/_lukk/y', method: 'POST', headers: { ...sameOrigin }, session }))
 
     expect(second).toEqual({ keep: 'me' })
+  })
+
+  it('reaches into arrays and nested objects, which the docblock promised and the code did not', async () => {
+    // "A removal must not depend on the shape being what we expected" — but an array returned early and
+    // a nested object was never looked at. A rebound response wrapping its payload (`{ data: {...} }`,
+    // the Laravel API-Resource envelope lukk-core already unwraps for `user`), or any list of sessions,
+    // carried a rotating refresh token straight through to the browser.
+    const session = makeSession({ access: 'a' })
+    mockFetch().fetch = vi.fn().mockResolvedValue(jsonRes({
+      data: { keep: 'me', refresh_token: 'rt-nested' },
+      sessions: [{ id: 1, access_token: 'at-in-array' }],
+    }))
+
+    const body = await run(makeEvent({ path: '/api/_lukk/x', method: 'POST', headers: { ...sameOrigin }, session }))
+
+    expect(JSON.stringify(body)).not.toContain('rt-nested')
+    expect(JSON.stringify(body)).not.toContain('at-in-array')
+    expect(body).toEqual({ data: { keep: 'me' }, sessions: [{ id: 1 }] })
   })
 
   it('passes a credential-free body through untouched, including arrays and scalars', async () => {

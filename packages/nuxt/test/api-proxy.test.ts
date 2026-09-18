@@ -38,7 +38,10 @@ const h3note = vi.hoisted(() => ({ value: undefined as string | undefined }))
 
 vi.mock('h3', () => ({
   defineEventHandler: (fn: unknown) => fn,
-  getRequestHeader: (event: { headers?: Record<string, string> }, name: string) => event.headers?.[name],
+  // Case-insensitive, like h3 and like the wire: a case-sensitive mock makes a correct read look
+  // unpinned, and hides a real one for any header the proxy reads by a CONFIGURED name.
+  getRequestHeader: (event: { headers?: Record<string, string> }, name: string) =>
+    Object.entries(event.headers ?? {}).find(([key]) => key.toLowerCase() === name.toLowerCase())?.[1],
   getRequestIP: (event: { ip?: string }) => event.ip,
   getCookie: (_event: unknown, name: string) => (/-logout$|-signed-out$/.test(name) ? h3note.value : (cookiePresent ? 'sealed' : undefined)),
   unsealSession: async () => {

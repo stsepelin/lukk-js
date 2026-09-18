@@ -334,13 +334,16 @@ function safeParse(text: string): unknown {
  * Deliberately a deny-list, unlike the capture gates above: a capture must be sure of the shape
  * before it stores something, but a REMOVAL must not depend on the shape being what we expected.
  */
-function redactCredentials(data: unknown): unknown {
-  if (typeof data !== 'object' || data === null || Array.isArray(data)) return data
+function redactCredentials(data: unknown, depth = 0): unknown {
+  // Arrays and nested objects too, to the docblock's promise rather than the shape lukk happens to
+  // send today: a list of sessions, or a `{ data: { ... } }` envelope from a rebound response, carried
+  // a token straight through. Depth-capped so a deep or cyclic body cannot spend the request here.
+  if (depth > 4 || typeof data !== 'object' || data === null) return data
+  if (Array.isArray(data)) return data.map(item => redactCredentials(item, depth + 1))
 
   const body = data as Record<string, unknown>
-  if (!('refresh_token' in body) && !('confirmation_token' in body) && !('access_token' in body)) return data
-
   const { access_token: _a, refresh_token: _r, confirmation_token: _c, ...rest } = body
+  const cleaned = Object.fromEntries(Object.entries(rest).map(([key, value]) => [key, redactCredentials(value, depth + 1)]))
 
-  return rest
+  return cleaned
 }

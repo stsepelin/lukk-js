@@ -164,6 +164,9 @@ async function viaStore<T>(operation: (store: SharedEndedSessions) => Promise<T>
 
     Promise.resolve().then(() => operation(store)).then((answer) => {
       clearTimeout(timer)
+      // Answered: arm the report again, so a LATER outage is not silent for the life of the process.
+      // Only the flag resets, never the backoff — this only runs once the backoff has already elapsed.
+      flags.storeFailureReported = false
       resolve(answer)
     }, fail)
   })
