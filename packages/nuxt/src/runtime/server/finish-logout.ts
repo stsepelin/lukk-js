@@ -42,10 +42,14 @@ export default defineEventHandler(async (event) => {
   if (!getCookie(event, note)) return
   // The proxy's own calls: the browser finishing the logout, or signing in — which replaces the session
   // and clears the note itself.
-  if (event.path === LUKK_BFF_PREFIX || event.path.startsWith(`${LUKK_BFF_PREFIX}/`)) return
+  const path = event.path.split('?')[0]
+  if (path === LUKK_BFF_PREFIX || path.startsWith(`${LUKK_BFF_PREFIX}/`)) return
 
   // Per-user whatever the outcome: it clears this visitor's cookies, or renders them signed out. Before the
-  // early returns below, which also answer with a `Set-Cookie` a shared cache must not store.
+  // early returns below, which also answer with a `Set-Cookie` a shared cache must not store — and marked
+  // so `plugins/finish-logout-render` can restate it after a cached route rule overwrites it, on those
+  // paths too.
+  ;(event.context as { lukkPerVisitor?: boolean }).lukkPerVisitor = true
   setResponseHeader(event, 'cache-control', 'no-store')
   setResponseHeader(event, 'vary', 'cookie')
 

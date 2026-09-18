@@ -39,7 +39,7 @@ export default defineNitroPlugin((nitroApp) => {
  * a cache hit and a miss alike.
  */
 function perVisitor(event: H3Event): void {
-  if (!(event.context as { lukkEndedSession?: unknown }).lukkEndedSession || event.node.res.headersSent) return
+  if (!(event.context as { lukkPerVisitor?: boolean }).lukkPerVisitor || event.node.res.headersSent) return
   setResponseHeader(event, 'cache-control', 'no-store')
   setResponseHeader(event, 'vary', 'cookie')
 }

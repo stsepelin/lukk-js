@@ -92,6 +92,57 @@ describe('createLukkFetch — onRequest headers', () => {
     expect(ctx.options.credentials).toBe('include')
   })
 
+  it('still attaches them for a same-origin per-call baseURL', async () => {
+    const { opts } = build({ baseURL: 'https://api.example.com', getBearer: () => 'SECRET' })
+    const ctx = { request: '/me', options: { headers: new Headers(), baseURL: 'https://api.example.com/v2' } as { headers: Headers, credentials?: string, baseURL?: string } }
+
+    await opts.onRequest(ctx)
+
+    expect(ctx.options.headers.get('authorization')).toBe('Bearer SECRET')
+    expect(ctx.options.credentials).toBe('include')
+  })
+
+  it('accepts a relative per-call baseURL when the API is same-origin with the app (the BFF mount)', async () => {
+    const { opts } = build({ baseURL: '/api', getBearer: () => 'SECRET' })
+    const ctx = { request: '/me', options: { headers: new Headers(), baseURL: '/api/v2' } as { headers: Headers, credentials?: string, baseURL?: string } }
+
+    await opts.onRequest(ctx)
+
+    expect(ctx.options.credentials).toBe('include')
+  })
+
+  it('accepts an ABSOLUTE per-call baseURL (or URL) on this app\'s own origin — the BFF mount spelled out', async () => {
+    // `isSameOrigin` refuses every absolute URL against the relative `/api` mount, so without the app's
+    // own origin to compare against, `useLukkFetch('https://app.test/api/me')` would silently lose its
+    // bearer. Both the request and the per-call base are judged this way.
+    const { opts } = build({ baseURL: '/api', origin: 'https://app.test', getBearer: () => 'SECRET' })
+
+    const absolute = { request: 'https://app.test/api/me', options: { headers: new Headers() } as { headers: Headers, credentials?: string } }
+    await opts.onRequest(absolute)
+    expect(absolute.options.headers.get('authorization')).toBe('Bearer SECRET')
+    expect(absolute.options.credentials).toBe('include')
+
+    const base = { request: '/me', options: { headers: new Headers(), baseURL: 'https://app.test/api' } as { headers: Headers, credentials?: string, baseURL?: string } }
+    await opts.onRequest(base)
+    expect(base.options.credentials).toBe('include')
+
+    // Another origin is still refused, however this app names itself.
+    const elsewhere = { request: '/me', options: { headers: new Headers(), baseURL: 'https://collector.example' } as { headers: Headers, credentials?: string, baseURL?: string } }
+    await opts.onRequest(elsewhere)
+    expect(elsewhere.options.headers.get('authorization')).toBeNull()
+    expect(elsewhere.options.credentials).toBe('same-origin')
+  })
+
+  it('REFUSES a relative per-call baseURL when the API is cross-origin — it resolves against the document, not the API', async () => {
+    const { opts } = build({ baseURL: 'https://api.example.com', getBearer: () => 'SECRET' })
+    const ctx = { request: '/thing', options: { headers: new Headers(), baseURL: '/local' } as { headers: Headers, credentials?: string, baseURL?: string } }
+
+    await opts.onRequest(ctx)
+
+    expect(ctx.options.headers.get('authorization')).toBeNull()
+    expect(ctx.options.credentials).toBe('same-origin')
+  })
+
   it('REFUSES them for a cross-origin per-call baseURL too — ofetch applies it after this hook', async () => {
     const { opts } = build({ baseURL: 'https://api.example.com', getBearer: () => 'SECRET' })
     const ctx = { request: '/me', options: { headers: new Headers(), baseURL: 'https://collector.example' } as { headers: Headers, credentials?: string, baseURL?: string } }

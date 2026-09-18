@@ -61,6 +61,21 @@ describe('pending logout note (direct mode)', () => {
     expect(readPendingLogout(undefined, 3_000)).toBeUndefined() // still moot, as it was
   })
 
+  it('disbelieves a record from the future, and never writes one — it would veto every logout that follows', () => {
+    vi.stubGlobal('sessionStorage', memoryStorage())
+    const shared = memoryStorage()
+    vi.stubGlobal('localStorage', shared)
+
+    // A clock that ran ahead (an RTC correction, a restored snapshot), or a same-origin script.
+    shared.setItem('lukk:signed-in-at:/', String(Date.now() + 60 * 60_000))
+    expect(signedInSince(undefined, Date.now())).toBe(false)
+
+    // Nor is one written: a send time cannot be in the future, and a value that got in must not be
+    // preserved by the next write either.
+    noteSignIn(undefined, Date.now() + 60 * 60_000)
+    expect(Number(shared.getItem('lukk:signed-in-at:/'))).toBeLessThanOrEqual(Date.now())
+  })
+
   it('keeps a family-less note when the sign-in record is missing, garbage or unreadable', () => {
     vi.stubGlobal('sessionStorage', memoryStorage())
     notePendingLogout(undefined, undefined, 1_000)

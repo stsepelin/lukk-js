@@ -360,7 +360,13 @@ describe('app-API proxy', () => {
 
     it('withholds the signed-out cookie a logout this request finished queued, when a sign-in replaced that session meanwhile', async () => {
       h3note.value = '1' // the request carried the browser's logout note; finish-logout ended its session
-      const queued = ['__Host-lukk-signed-out=1; Max-Age=10; Path=/', 'theme=dark; Path=/']
+      // Including a session the logout's renewal re-sealed: this response is finalised after the upstream
+      // answered, so landing it over a newer sign-in would put the browser back on the previous account.
+      const queued = [
+        '__Host-lukk-signed-out=1; Max-Age=10; Path=/',
+        '__Host-lukk-session=RESEALED; Path=/; HttpOnly',
+        'theme=dark; Path=/',
+      ]
       const answer = async (replacedMeanwhile: boolean) => {
         const e = { ...ev({ path: '/api/me' }), context: { lukkEndedSession: { key: 'session-X', marker: '__Host-lukk-signed-out' } } }
         e.node.res.setHeader('set-cookie', [...queued])

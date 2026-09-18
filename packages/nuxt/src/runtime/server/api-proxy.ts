@@ -178,11 +178,14 @@ export default defineEventHandler(async (event) => {
       if (replaced) revokeDroppedSession(event, { access, refresh: rotatedRefresh }, baseURL, clientIp)
       // Nor the signed-out cookie a logout this request finished queued (see `finish-logout`), if a sign-in
       // replaced that session while the upstream was answering.
-      const signedOut = signedOutCookieName(secure, cookieNamespace)
-      const dropSignedOut = await withholdSignedOut(event)
+      // Both cookies, not just the marker: the queue may also hold a session the logout's renewal
+      // re-sealed, and this response is finalised after the upstream answered — late enough to land over
+      // the sign-in that replaced it and put the browser back on the previous account.
+      const ours = [signedOutCookieName(secure, cookieNamespace), sessionName]
+      const dropLogoutCookies = await withholdSignedOut(event)
       const keep = replaced
         ? []
-        : toCookieArray(sessionCookie).filter(cookie => !dropSignedOut || cookieName(cookie) !== signedOut)
+        : toCookieArray(sessionCookie).filter(cookie => !dropLogoutCookies || !ours.includes(cookieName(cookie)))
       // Opt-in passthrough: forward only allow-listed names — and NEVER a lukk sealed session
       // cookie (this app's OR a co-hosted app's, whatever the list says); an upstream must not be
       // able to set/overwrite any lukk session.

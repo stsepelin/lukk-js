@@ -67,7 +67,9 @@ export function clearPendingLogout(scope?: string, upTo?: number): void {
 export function noteSignIn(scope: string | undefined, sentAt: number): void {
   // Never backwards: a slow sign-in answering after a later one would otherwise move the record behind a
   // note written between them, and the next page load would honour that note and end the newer session.
-  try { shared()?.setItem(signedInKey(scope), String(Math.max(sentAt, lastSignIn(scope)))) }
+  // Never forwards past now either — see `signedInSince`.
+  const now = Date.now()
+  try { shared()?.setItem(signedInKey(scope), String(Math.min(Math.max(sentAt, lastSignIn(scope)), now))) }
   catch { /* no record */ }
 }
 
@@ -84,9 +86,17 @@ export function readPendingLogout(scope?: string, now = Date.now()): PendingLogo
   catch { return undefined }
 }
 
+/** How far ahead of now a record may sit and still be believed — scheduling jitter, not a wrong clock. */
+const FUTURE_SKEW_MS = 5_000
+
 /** Was a sign-in sent, in any tab, at or after `at`? */
-export function signedInSince(scope: string | undefined, at: number): boolean {
-  return lastSignIn(scope) >= at
+export function signedInSince(scope: string | undefined, at: number, now = Date.now()): boolean {
+  const last = lastSignIn(scope)
+  // A record in the future is not evidence of anything: the clock moved (an RTC correction, a restored
+  // snapshot) or someone wrote it. Believing it would veto every logout from here on — the request is
+  // never sent, while local state is cleared and the next page load restores the session it names.
+  if (last > now + FUTURE_SKEW_MS) return false
+  return last >= at
 }
 
 function readNote(raw: string | null | undefined): PendingLogout | undefined {

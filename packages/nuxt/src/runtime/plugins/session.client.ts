@@ -39,10 +39,10 @@ export default defineNuxtPlugin({
       // BFF: the server finishes it before rendering this page, and clears the cookie. Still here, it
       // couldn't (lukk unreachable, a page served without the server). The server rendered this page
       // signed out all the same, so there is nothing to restore — and nothing to hold startup for: lukk
-      // may be hanging. It stands down if the note goes meanwhile (a sign-in elsewhere cleared it).
+      // may be hanging. It stands down if a sign-in is recorded while it waits (see `logout`).
       if (noteCookie && hasLogoutCookie(noteCookie)) {
-        // A fresh minute: the replay may wait seconds for the lock, and a note that aged out meanwhile would
-        // read as cleared by a sign-in. Only renewed while it still says pending — never re-written after.
+        // A fresh minute: the replay may wait seconds for the lock, and the next page load needs the note
+        // to still be there. Only renewed while one is already standing — never written from nothing.
         setLogoutCookie(noteCookie)
         state.finishingLogout = Date.now()
         void auth.logout().then(() => {

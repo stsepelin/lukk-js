@@ -425,8 +425,9 @@ describe('logout() with an access token lukk rejects', () => {
     state.finishingLogout = asked
     const finishing = useLukkAuth().logout()
     expect(writes).toEqual([]) // not written again
-    shared.set('lukk:signed-in-at:/', String(asked)) // another tab's sign-in, SENT after this was asked for
-    jar.delete('__Host-lukk-logout') // …and its response cleared the note
+    // ONLY the recorded sign-in: the note cookie is deliberately left in place, so nothing but that
+    // record can explain the stand-down.
+    shared.set('lukk:signed-in-at:/', String(asked))
     grant()
     await finishing
     expect(calls).toEqual([]) // sending would have ended that sign-in

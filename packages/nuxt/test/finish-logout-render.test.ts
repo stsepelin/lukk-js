@@ -56,6 +56,19 @@ describe('finish-logout late check (BFF)', () => {
     expect(page.headers.get('set-cookie')).toEqual(['theme=dark; Path=/'])
   })
 
+  it('beforeResponse restates the per-user headers for a request that never got as far as ending anything', async () => {
+    // The unsealable-cookie and back-off branches return before `lukkEndedSession` is set, and a cached
+    // route rule overwrites the `cache-control` the middleware set on the way in.
+    const hooks = install()
+    const page = pageEvent(undefined)
+    ;(page.event.context as { lukkPerVisitor?: boolean }).lukkPerVisitor = true
+
+    await call(hooks, 'beforeResponse', page.event)
+
+    expect(page.headers.get('cache-control')).toBe('no-store')
+    expect(page.headers.get('vary')).toBe('cookie')
+  })
+
   it.each(['beforeResponse', 'render:html'])('%s lets them go when nothing replaced it, for a response that finished no logout, and once the headers are out', async (name) => {
     const hooks = install()
     for (const page of [pageEvent(ended('S1')), pageEvent(ended(undefined)), pageEvent(undefined), pageEvent(ended('REPLACED'), true)]) {

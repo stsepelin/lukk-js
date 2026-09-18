@@ -186,9 +186,14 @@ describe('finish-logout middleware (BFF)', () => {
 
   it('sends nothing out for a session a sign-in replaced while the logout was running', async () => {
     // The response is finalised long after this ran: its cookies would land over the newer session's.
+    // The proxy's answer carries a RE-SEALED session here, not just clearing cookies — otherwise the
+    // forwarding loop would drop it regardless and this would prove nothing.
+    const resealed = '__Host-lukk-session=RESEALED; Path=/; HttpOnly; Secure; SameSite=Strict'
     const event = makeEvent({ fetch: vi.fn<LocalFetch>(async () => {
       await endSession('S1', { replaced: true }) // another tab signed in mid-flight
-      return cleared(204)
+      const res = cleared(204)
+      res.headers.append('set-cookie', resealed)
+      return res
     }) })
 
     await run(event)
