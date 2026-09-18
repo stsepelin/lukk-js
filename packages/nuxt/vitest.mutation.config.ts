@@ -19,6 +19,12 @@ export default defineConfig({
     alias: { '#imports': fileURLToPath(new URL('./test/mocks/imports.ts', import.meta.url)) },
   },
   test: {
-    exclude: [...configDefaults.exclude, 'test/integration/**', 'test/server-env/**'],
+    exclude: [
+      ...configDefaults.exclude,
+      // Never the Stryker sandbox: it holds an instrumented COPY of these very files, so a stale
+      // one makes the suite run a mutated duplicate of itself.
+      '**/.stryker-tmp/**',
+      'test/integration/**', 'test/server-env/**',
+    ],
   },
 })
