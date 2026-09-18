@@ -28,6 +28,12 @@ while [ $# -gt 0 ]; do
   esac
 done
 API_PID=""
+# Per-run private directory (mode 700). On a shared build host a predictable /tmp path lets another
+# user pre-plant the TLS keypair the runner serves with, drive the fault proxy, or symlink the API log
+# over one of your files — none of which anything here would notice.
+RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/lukk-e2e.XXXXXX")"
+echo "▶ run directory (TLS, fault control, API log): $RUN_DIR"
+
 
 # Kill a server WE started — the pid + its descendants (artisan serve spawns a php -S
 # child). Only ever touches our own tree; never a foreign process on the port.
@@ -76,19 +82,19 @@ set_env LUKK_VERIFY_URL https://localhost:8443/verified
 ( cd "$APP_DIR" && php artisan optimize:clear >/dev/null && php artisan migrate:fresh --force >/dev/null && php artisan db:seed --force >/dev/null )
 
 echo "▶ booting the lukk API on 127.0.0.1:8000 ..."
-( cd "$APP_DIR" && php artisan serve --host=127.0.0.1 --port=8000 >/tmp/lukk-direct-api.log 2>&1 ) &
+( cd "$APP_DIR" && php artisan serve --host=127.0.0.1 --port=8000 >"$RUN_DIR/api.log" 2>&1 ) &
 API_PID=$!
 up=""; for _ in $(seq 1 40); do curl -fsS http://127.0.0.1:8000/up >/dev/null 2>&1 && { up=1; break; }; sleep 0.25; done
-[ -n "$up" ] || { echo "✗ API did not come up — see /tmp/lukk-direct-api.log"; exit 1; }
+[ -n "$up" ] || { echo "✗ API did not come up — see $RUN_DIR/api.log"; exit 1; }
 
 echo "▶ installing + building lukk-core / lukk-nuxt ..."
 pnpm -C "$REPO_ROOT" install
 pnpm -C "$REPO_ROOT" --filter "./packages/*" build
 pnpm -C "$NUXT_APP" exec playwright install chromium
 
-CERT_DIR="${TMPDIR:-/tmp}/lukk-e2e-tls"
+CERT_DIR="$RUN_DIR/tls"
 mkdir -p "$CERT_DIR"
-[ -f "$CERT_DIR/cert.pem" ] || openssl req -x509 -newkey rsa:2048 -nodes -keyout "$CERT_DIR/key.pem" -out "$CERT_DIR/cert.pem" -days 3 -subj "/CN=localhost" >/dev/null 2>&1
+openssl req -x509 -newkey rsa:2048 -nodes -keyout "$CERT_DIR/key.pem" -out "$CERT_DIR/cert.pem" -days 3 -subj "/CN=localhost" >/dev/null 2>&1
 export E2E_SSL_KEY="$CERT_DIR/key.pem" E2E_SSL_CERT="$CERT_DIR/cert.pem" E2E_PORT=8443 E2E_API_PORT=8000 E2E_SPA_PORT=3101
 # The API shares the app's origin here (the unifying proxy routes /auth /conformance /up to it).
 export LUKK_API_ROOT="https://localhost:8443"

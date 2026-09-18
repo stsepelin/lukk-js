@@ -720,6 +720,18 @@ describe('a sign-in or logout in another tab', () => {
 
     expect(FakeChannel.instances[0]!.name).toBe('lukk:session:/admin/')
     expect(restoreState(__test.nuxtApp).scope).toBe('/admin/')
+
+    // …and by `session.name` too: co-hosted apps share a router base more often than they share a name.
+    __test.reset()
+    ;(__test.runtimeConfig as Record<string, unknown>).app = { baseURL: '/' }
+    boot()
+    ;(__test.runtimeConfig.public.lukk as Record<string, unknown>).scope = 'admin'
+    __test.reset()
+    ;(__test.runtimeConfig as Record<string, unknown>).app = { baseURL: '/' }
+    ;(__test.runtimeConfig.public.lukk as Record<string, unknown>) = { mode: 'bff', baseURL: '', confirmationHeader: 'X', scope: 'admin' }
+    ;(clientPlugin as unknown as () => unknown)()
+    expect(FakeChannel.instances.at(-1)!.name).toBe('lukk:session:/#admin')
+    expect(restoreState(__test.nuxtApp).scope).toBe('/#admin')
   })
 
   it('does not listen where the browser has no BroadcastChannel', () => {

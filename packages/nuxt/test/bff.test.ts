@@ -81,7 +81,7 @@ describe('BFF proxy', () => {
     expect(session.update).toHaveBeenCalledWith({ access: 'a', refresh: 'r', confirmation: undefined, sid: expect.any(String) })
     expect(result).toEqual({ ok: true, expires_in: 900 })
     // A logout noted before this sign-in was for the session it replaced — left, the next page would end this one.
-    expect((event as { __deleted?: { name: string }[] }).__deleted?.map(d => d.name)).toEqual(['__Host-lukk-logout'])
+    expect((event as { __deleted?: { name: string }[] }).__deleted?.map(d => d.name)).toEqual(['__Host-lukk-logout', '__Host-lukk-signed-out'])
     const init = mockFetch().fetch.mock.calls[0]![1]!
     expect(init.headers['Content-Type']).toBe('application/json')
     expect(init.headers.Authorization).toBeUndefined()
@@ -342,13 +342,16 @@ describe('BFF proxy', () => {
     const event = makeEvent({ path: '/api/_lukk/logout', method: 'POST', headers: sameOrigin, session })
     await run(event)
     expect(session.clear).toHaveBeenCalledOnce()
-    expect((event as { __deleted?: unknown[] }).__deleted).toEqual([{ name: '__Host-lukk-logout', options: { path: '/', secure: true, sameSite: 'strict' } }])
+    expect((event as { __deleted?: { name: string }[] }).__deleted?.map(d => d.name)).toEqual(['__Host-lukk-logout', '__Host-lukk-signed-out'])
 
     // Named like the session cookie: relaxed and namespaced with it.
     Object.assign(__test.runtimeConfig.lukk, { cookieSecure: false, cookieNamespace: 'admin' })
     const dev = makeEvent({ path: '/api/_lukk/logout', method: 'POST', headers: { origin: 'http://app.example.com', host: 'app.example.com' }, session: makeSession({ access: 'tok' }) })
     await run(dev)
-    expect((dev as { __deleted?: unknown[] }).__deleted).toEqual([{ name: 'lukk-admin-logout', options: { path: '/', secure: false, sameSite: 'strict' } }])
+    expect((dev as { __deleted?: { name: string, options: unknown }[] }).__deleted).toEqual([
+      { name: 'lukk-admin-logout', options: { path: '/', secure: false, sameSite: 'strict' } },
+      { name: 'lukk-admin-signed-out', options: { path: '/', secure: false, sameSite: 'strict' } },
+    ])
   })
 
   it.each([
@@ -938,7 +941,9 @@ describe('credential redaction fails closed', () => {
     const body = await run(makeEvent({ path: '/api/_lukk/x', method: 'POST', headers: { ...sameOrigin }, session }))
 
     expect(JSON.stringify(body)).not.toContain('rt-leak')
-    expect(body).toEqual({ access_token: null, keep: 'me' })
+    // `access_token` goes too, whatever its shape: the removal must not depend on the body being what the
+    // capture gate expected — that is the whole point of a deny-list here.
+    expect(body).toEqual({ keep: 'me' })
 
     // A non-string confirmation_token misses its capture gate the same way, and is still removed.
     mockFetch().fetch = vi.fn().mockResolvedValue(jsonRes({ confirmation_token: 12345, keep: 'me' }))

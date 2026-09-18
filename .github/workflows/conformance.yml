@@ -19,6 +19,13 @@ env:
   LUKK_REPO: stsepelin/lukk
   LUKK_REF: main
 
+# These jobs run code from the PR head (the runner scripts themselves) and install a large third-party
+# supply chain — composer, pnpm, apt, and Nuxt versions resolved outside the lockfile. So: a read-only
+# token, no `secrets.*` anywhere in this file, and `pull_request`, never `pull_request_target`. A fork PR
+# may point `LUKK_REPO`/`LUKK_REF` at its own repo; that is harmless only while those three hold.
+permissions:
+  contents: read
+
 jobs:
   conformance:
     runs-on: ubuntu-latest
@@ -29,6 +36,8 @@ jobs:
     name: lukk-core vs real lukk (cookie_mode=${{ matrix.cookie_mode }})
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # The PHP package, so the fixture is built from source rather than from the last release.
       # A fork PR gets this too (the repo is public); a contributor testing their own lukk fork
@@ -38,6 +47,7 @@ jobs:
           repository: ${{ env.LUKK_REPO }}
           ref: ${{ env.LUKK_REF }}
           path: lukk-php
+          persist-credentials: false
 
       - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
         with:
@@ -84,12 +94,15 @@ jobs:
     name: browser E2E, BFF + SSR (nuxt ${{ matrix.nuxt }})
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ env.LUKK_REPO }}
           ref: ${{ env.LUKK_REF }}
           path: lukk-php
+          persist-credentials: false
 
       - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
         with:
@@ -114,6 +127,8 @@ jobs:
           LUKK_PATH: ${{ github.workspace }}/lukk-php
         run: bash conformance/browser.sh --nuxt ${{ matrix.nuxt }}
 
+      # Playwright traces carry full request bodies and `Set-Cookie` — fixture credentials only. Never
+      # point this runner at a real lukk instance or seed a real account.
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         if: failure()
         with:
@@ -135,12 +150,15 @@ jobs:
     name: browser E2E, direct SPA (nuxt ${{ matrix.nuxt }})
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ env.LUKK_REPO }}
           ref: ${{ env.LUKK_REF }}
           path: lukk-php
+          persist-credentials: false
 
       - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
         with:
@@ -162,6 +180,8 @@ jobs:
           LUKK_PATH: ${{ github.workspace }}/lukk-php
         run: bash conformance/browser-direct.sh spa --nuxt ${{ matrix.nuxt }}
 
+      # Playwright traces carry full request bodies and `Set-Cookie` — fixture credentials only. Never
+      # point this runner at a real lukk instance or seed a real account.
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         if: failure()
         with:

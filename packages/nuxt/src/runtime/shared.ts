@@ -86,12 +86,14 @@ export function signedOutCookieName(secure: boolean, name?: string): string {
 }
 
 /**
- * Whether a cookie name is a lukk BFF session cookie for ANY app — the default or any namespace,
+ * Whether a cookie name is one of lukk's own BFF cookies for ANY app — the sealed session, and the two
+ * that drive a logout (an upstream that could set those would sign a visitor out, or keep them in) — the
+ * default or any namespace,
  * Secure or dev-http. The app-API proxy uses this so it never forwards a lukk sealed session cookie
  * to the browser, even a co-hosted sibling app's, whatever the `api.forwardSetCookie` allow-list says.
  */
 export function isSessionCookieName(name: string): boolean {
-  return /^(__Host-)?lukk-([\w.-]+-)?session$/.test(name)
+  return /^(__Host-)?lukk-([\w.-]+-)?(session|logout|signed-out)$/.test(name)
 }
 
 /** The default step-up header, and the fallback when a configured one is unusable. */

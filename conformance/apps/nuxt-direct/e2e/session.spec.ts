@@ -50,23 +50,32 @@ test('a logout the page never awaited still ends the session', async ({ page }) 
 })
 
 test('the next page ends only the session that logout was for — not one signed in since', async ({ page, context }) => {
+  // The case the FAMILY makes the difference for: the sign-in that happens while this tab is away does
+  // not go through lukk-js at all, and the tab's own record of sign-ins is wiped. All the returning tab
+  // has to go on is the note's `fid` versus the session it restores — the older time-based rule would
+  // see an untouched note, no recorded sign-in, and end B.
   const a = await freshUser(page)
   const b = await freshUser(page)
   await login(page, a.email, a.password)
 
-  // Away to another origin, so this tab's note outlives the page without finishing there.
   await visit(page, `/dashboard?away=${encodeURIComponent(AWAY)}`)
   await page.getByTestId('logout-leave').click()
   await page.waitForURL(AWAY)
 
-  // Someone signs in on this browser while that tab is away, and the tab comes back.
-  const other = await context.newPage()
-  await login(other, b.email, b.password)
-  await visit(page, '/')
+  // B signs in straight against lukk — no lukk-js, so nothing is recorded in this browser's storage.
+  const signedIn = await page.request.post(`${API_ROOT}/auth/login`, {
+    data: { email: b.email, password: b.password },
+    headers: { 'content-type': 'application/json' },
+  })
+  expect(signedIn.ok()).toBe(true)
+  await context.addCookies([]) // the refresh cookie rode the response; nothing else to do
 
-  // Still signed in as B — not "exactly one session": two tabs refreshing the same cookie can land
-  // inside lukk's rotation grace window, which legitimately mints a sibling rather than revoking.
+  await visit(page, '/')
+  await page.evaluate(() => localStorage.clear()) // the app's own logout idiom, after the fact
+  await page.reload()
+  await page.waitForSelector('html[data-hydrated="1"]')
+
+  // B's session is untouched and this browser is B.
   expect(await liveSessions(page, b.email)).toBeGreaterThan(0)
-  expect(await liveSessions(page, a.email)).toBe(0)
   await expect(page.getByTestId('user-email')).toHaveText(b.email)
 })

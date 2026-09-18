@@ -263,10 +263,18 @@ export default defineNuxtModule<ModuleOptions>({
     const cookieSecure = options.session.cookieSecure
       ?? (!nuxt.options.dev || Boolean(nuxt.options.devServer?.https))
 
+    if (options.session.cookieSecure === false && !nuxt.options.dev) {
+      console.warn('[lukk-nuxt] session.cookieSecure is false in a production build — the session and logout cookies lose the `__Host-` prefix and the Secure attribute, so any host on this domain can plant or read them.')
+    }
+
     // The logout note the browser writes and the server reads (BFF). Named from the same `cookieSecure` and
     // namespace as the session cookie; set `runtimeConfig.public.lukk.logoutCookie` alongside any runtime
     // override of `cookieSecure`.
     const publicCookies = nuxt.options.runtimeConfig.public.lukk as { logoutCookie?: string, signedOutCookie?: string }
+    // What scopes this app's browser-side session bookkeeping: the cross-tab lock, the broadcast channel and
+    // the direct-mode notes. The router base alone was not enough — two apps path-routed on one origin with
+    // distinct `session.name`s (as co-hosting requires) but the same base shared all three.
+    ;(nuxt.options.runtimeConfig.public.lukk as { scope?: string }).scope ??= options.session.name ?? ''
     publicCookies.logoutCookie ??= options.mode === 'bff' ? logoutCookieName(cookieSecure, options.session.name) : ''
     publicCookies.signedOutCookie ??= options.mode === 'bff' ? signedOutCookieName(cookieSecure, options.session.name) : ''
 

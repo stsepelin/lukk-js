@@ -43,6 +43,23 @@ describe('lukk-nuxt module', () => {
     expect((nuxt.options.runtimeConfig.lukk as { baseURL: string }).baseURL).toBe('https://api/auth')
   })
 
+  it('warns when a production build turns the Secure flag off — the cookies lose `__Host-` with it', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    setup({ baseURL: 'https://api/auth', mode: 'bff', session: { password: 'x'.repeat(32), cookieSecure: false } })
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('cookieSecure is false in a production build'))
+
+    warn.mockClear()
+    setup({ baseURL: 'https://api/auth', mode: 'bff', session: { password: 'x'.repeat(32), cookieSecure: false } }, { dev: true })
+    setup({ baseURL: 'https://api/auth', mode: 'bff' })
+    expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('cookieSecure is false'))
+  })
+
+  it('scopes the browser-side session bookkeeping by `session.name`, which co-hosted apps differ on', () => {
+    const scopeOf = (nuxt: ReturnType<typeof setup>) => (nuxt.options.runtimeConfig.public.lukk as { scope: string }).scope
+    expect(scopeOf(setup({ baseURL: 'https://api/auth', mode: 'bff' }))).toBe('')
+    expect(scopeOf(setup({ baseURL: 'https://api/auth', mode: 'bff', session: { password: 'x'.repeat(32), name: 'admin' } }))).toBe('admin')
+  })
+
   it('names the logout cookies for the browser from the same Secure flag and namespace as the session', () => {
     const pub = (nuxt: ReturnType<typeof setup>) => nuxt.options.runtimeConfig.public.lukk as { logoutCookie: string, signedOutCookie: string }
     expect(pub(setup({ baseURL: 'https://api/auth', mode: 'bff' }))).toMatchObject({ logoutCookie: '__Host-lukk-logout', signedOutCookie: '__Host-lukk-signed-out' })

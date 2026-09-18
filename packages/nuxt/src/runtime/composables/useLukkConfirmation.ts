@@ -81,8 +81,12 @@ export function useLukkConfirmation(): LukkConfirmation {
    * flip `confirmed`. Shared with the passkey step-up path.
    */
   function record(result: { confirmation_token?: string }): void {
-    if (import.meta.client && result.confirmation_token) token.value = result.confirmation_token
-    confirmedFlag.value = true
+    // Client-only, both halves: a step-up is earned by a request the browser made, and a `true` serialised
+    // into `__NUXT_DATA__` would claim one for whoever the render is later handed to.
+    if (import.meta.client) {
+      if (result.confirmation_token) token.value = result.confirmation_token
+      confirmedFlag.value = true
+    }
   }
 
   /** Drop the confirmation (e.g. after the sensitive action completes). */

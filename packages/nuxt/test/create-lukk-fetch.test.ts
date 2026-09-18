@@ -37,10 +37,13 @@ function build(overrides: Partial<LukkFetchDeps> = {}) {
 const reqCtx = (request = '/me') => ({ request, options: { headers: new Headers() } as { headers: Headers, credentials?: string } })
 
 describe('createLukkFetch — instance options', () => {
-  it('sets baseURL, credentials, manual redirect', () => {
+  it('sets baseURL, a fail-closed credentials default, manual redirect', () => {
     const { opts } = build({ baseURL: 'https://api.example.com' })
     expect(opts.baseURL).toBe('https://api.example.com')
-    expect(opts.credentials).toBe('include')
+    // `same-origin` at the instance level, upgraded per request by the hook below: a caller's own
+    // `onRequest` REPLACES ours (ofetch merges options by spreading), and `include` as the default would
+    // then ride a cross-origin URL with that origin's cookies.
+    expect(opts.credentials).toBe('same-origin')
     expect(opts.redirect).toBe('manual')
     expect(opts.retryStatusCodes).toEqual([401])
   })
@@ -207,7 +210,7 @@ describe('createRequestFetch (server-BFF)', () => {
     const [req, opts] = requestFetch.mock.calls[0] as [string, FetchOptions]
     expect(req).toBe('/me')
     expect(opts.baseURL).toBe('/api') // shared
-    expect(opts.credentials).toBe('include') // shared
+    expect(opts.credentials).toBe('same-origin') // shared default; the hook upgrades a same-origin target
     expect(opts.redirect).toBe('manual') // shared
     expect(opts.method).toBe('POST') // per-call
     expect(typeof opts.onRequest).toBe('function') // interceptors carried through

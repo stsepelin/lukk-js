@@ -21,14 +21,12 @@ export interface EndedHere { key: string | undefined, marker: string }
 /**
  * Must the signed-out cookie be held back from this response?
  *
- * Yes if a sign-in replaced that session while the response was being produced — the answer belongs to the
- * session that ended, and this browser now holds a newer one, whose page would read as signed out. And yes
- * if the response may be CACHED (a `swr`/`isr`/`cache` route rule), where it would reach other visitors.
+ * Yes if a sign-in replaced that session while the response was being produced: the answer belongs to the
+ * session that ended, and this browser now holds a newer one, whose page would then read as signed out.
  */
 export async function withholdSignedOut(event: H3Event): Promise<boolean> {
   const ended = (event.context as { lukkEndedSession?: EndedHere } | undefined)?.lukkEndedSession
-  if (!ended) return false
-  return (event.context as { cache?: unknown }).cache !== undefined || await sessionReplaced(ended.key)
+  return ended ? await sessionReplaced(ended.key) : false
 }
 
 /** The last check before a response's headers go out — see `withholdSignedOut`. Safe to run more than once. */

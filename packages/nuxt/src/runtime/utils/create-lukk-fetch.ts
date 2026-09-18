@@ -40,7 +40,11 @@ function redirectLocation(response: Response): string | null {
 export function lukkFetchOptions(deps: LukkFetchDeps): FetchOptions {
   return {
     baseURL: deps.baseURL,
-    credentials: 'include',
+    // `same-origin`, upgraded to `include` by the hook below once the target is known to be same-origin as
+    // the API base. The other way round fails OPEN: ofetch merges per-call options by spreading, so a
+    // caller's own `onRequest` replaces ours — and a cross-origin URL would then keep `include` and carry
+    // that origin's cookies.
+    credentials: 'same-origin',
     redirect: 'manual',
     // Direct mode: let ofetch retry a 401 once — the refresh runs in onResponseError
     // first, so the retry's onRequest reads the fresh token. BFF refreshes in the proxy.

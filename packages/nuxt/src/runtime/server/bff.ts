@@ -2,7 +2,7 @@ import type { H3Event } from 'h3'
 import { isTokenPair } from 'lukk-core'
 import { defineEventHandler, deleteCookie, getCookie, getRequestHeader, readRawBody, setResponseHeader, setResponseStatus, useSession } from 'h3'
 import { useRuntimeConfig } from '#imports'
-import { LUKK_BFF_PREFIX, confirmationHeaderName, logoutCookieName, sessionCookieName } from '../shared'
+import { LUKK_BFF_PREFIX, confirmationHeaderName, logoutCookieName, sessionCookieName, signedOutCookieName } from '../shared'
 import { isForeignOrigin, rejectUnresolvedTarget, reportProxyFailure, resolveTarget, viaHeader, visitorIp } from './proxy-utils'
 import { endSession, newSessionId, sessionEnded, sessionKey, sessionReplaced, withholdSessionCookie } from './ended-sessions'
 import { revokeDroppedSession } from './revoke-dropped'
@@ -38,7 +38,12 @@ export default defineEventHandler(async (event) => {
   const sessionName = sessionCookieName(secure, cookieNamespace)
   const cookieOptions: SessionCookieOptions = { sameSite: 'strict', secure, httpOnly: true, path: '/' }
   // The browser's logout note (see `logoutCookieName`): cleared once the logout is done, and by any new session.
-  const clearLogoutNote = () => deleteCookie(event, logoutCookieName(secure, cookieNamespace), { path: '/', secure, sameSite: 'strict' })
+  const clearLogoutNote = () => {
+    const options = { path: '/', secure, sameSite: 'strict' as const }
+    deleteCookie(event, logoutCookieName(secure, cookieNamespace), options)
+    // And the server's answer to it: left standing, the next page load reads this browser as signed out.
+    deleteCookie(event, signedOutCookieName(secure, cookieNamespace), options)
+  }
 
   // CSRF: reject a state-changing request riding the session cookie from a foreign origin.
   if (isForeignOrigin(event, secure)) {
@@ -333,9 +338,9 @@ function redactCredentials(data: unknown): unknown {
   if (typeof data !== 'object' || data === null || Array.isArray(data)) return data
 
   const body = data as Record<string, unknown>
-  if (!('refresh_token' in body) && !('confirmation_token' in body)) return data
+  if (!('refresh_token' in body) && !('confirmation_token' in body) && !('access_token' in body)) return data
 
-  const { refresh_token: _r, confirmation_token: _c, ...rest } = body
+  const { access_token: _a, refresh_token: _r, confirmation_token: _c, ...rest } = body
 
   return rest
 }

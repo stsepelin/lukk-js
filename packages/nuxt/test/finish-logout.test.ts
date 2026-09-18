@@ -12,7 +12,9 @@ vi.mock('h3', () => ({
   // A seal named `sid:<x>` unseals to that sid; anything else doesn't unseal.
   unsealSession: async (_event: unknown, _config: unknown, sealed: string) => {
     if (!sealed.startsWith('sid:')) throw new Error('bad seal')
-    return { id: 'h3-id', data: { sid: sealed.slice(4) } }
+    const sid = sealed.slice(4)
+    // `refresh:`-prefixed ids model a session whose access token has already gone.
+    return { id: 'h3-id', data: sid.startsWith('refresh:') ? { sid, refresh: 'r' } : { sid, access: 'tok', refresh: 'r' } }
   },
 }))
 
@@ -115,11 +117,27 @@ describe('finish-logout middleware (BFF)', () => {
     expect(event.context.lukkEndedSession).toEqual({ key: 'S1', marker: '__Host-lukk-signed-out' })
   })
 
-  it('still answers for a session that wouldn\'t unseal, with no key to re-check', async () => {
+  it('drops a note that arrives with no session cookie at all', async () => {
+    const event = makeEvent({ cookies: { '__Host-lukk-logout': '1' } })
+    await run(event)
+    expect(event.fetch).not.toHaveBeenCalled()
+    expect(event.deleted).toEqual([noteGone])
+  })
+
+  it('ends a session that has only a refresh token left', async () => {
+    const event = makeEvent({ cookies: { '__Host-lukk-logout': '1', '__Host-lukk-session': 'sid:refresh:S9' } })
+    await run(event)
+    expect(event.fetch).toHaveBeenCalledOnce()
+    expect(event.cookiesSet).toEqual([signedOut])
+  })
+
+  it('does no work for a cookie that does not unseal — any string would otherwise buy a held page load', async () => {
     const event = makeEvent({ cookies: { '__Host-lukk-logout': '1', '__Host-lukk-session': 'TAMPERED' } })
     await run(event)
-    expect(event.cookiesSet).toEqual([signedOut])
-    expect(event.context.lukkEndedSession).toEqual({ key: undefined, marker: '__Host-lukk-signed-out' })
+    expect(event.fetch).not.toHaveBeenCalled()
+    expect(event.cookiesSet).toEqual([])
+    expect(event.deleted).toEqual([noteGone]) // nothing to end: the note goes
+    expect(event.context.lukkEndedSession).toBeUndefined()
   })
 
   it('carries a session the proxy RE-SEALED — it holds a refresh token this server already spent — and nothing else it picked up', async () => {
@@ -264,11 +282,11 @@ describe('finish-logout middleware (BFF)', () => {
     await failFor('sid:B0')
     expect(fetch).toHaveBeenCalledOnce()
 
-    // Keyed by the seal's tail, not the whole client-chosen value.
+    // Keyed by the session's own id: a re-sealed cookie for the same session does not start over.
     forgetLogoutFailures()
-    await failFor(`sid:${'x'.repeat(4_000)}A${'y'.repeat(64)}`)
+    await failFor('sid:SAME')
     fetch.mockClear()
-    await failFor(`sid:${'z'.repeat(10)}${'y'.repeat(64)}`)
+    await run(makeEvent({ fetch, cookies: { '__Host-lukk-logout': '1', '__Host-lukk-session': 'sid:SAME' } }))
     expect(fetch).not.toHaveBeenCalled()
   })
 

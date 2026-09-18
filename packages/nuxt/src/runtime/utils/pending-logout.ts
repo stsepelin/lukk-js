@@ -65,7 +65,9 @@ export function clearPendingLogout(scope?: string, upTo?: number): void {
 
 /** A sign-in in any tab, sent at `sentAt`: every family-less note written after that is moot. */
 export function noteSignIn(scope: string | undefined, sentAt: number): void {
-  try { shared()?.setItem(signedInKey(scope), String(sentAt)) }
+  // Never backwards: a slow sign-in answering after a later one would otherwise move the record behind a
+  // note written between them, and the next page load would honour that note and end the newer session.
+  try { shared()?.setItem(signedInKey(scope), String(Math.max(sentAt, lastSignIn(scope)))) }
   catch { /* no record */ }
 }
 

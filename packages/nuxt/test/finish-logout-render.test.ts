@@ -24,7 +24,7 @@ function call(hooks: Record<string, Hook>, name: string, event: unknown) {
   return name === 'beforeResponse' ? hooks[name]!(event, { body: '' }) : hooks[name]!('<html>', { event })
 }
 
-function pageEvent(ended: unknown, headersSent = false, cache?: unknown) {
+function pageEvent(ended: unknown, headersSent = false) {
   const headers = new Map<string, unknown>([['set-cookie', [
     '__Host-lukk-signed-out=1; Max-Age=10; Path=/; Secure; SameSite=Strict',
     'theme=dark; Path=/',
@@ -32,7 +32,7 @@ function pageEvent(ended: unknown, headersSent = false, cache?: unknown) {
   return {
     headers,
     event: {
-      context: { ...(ended === undefined ? {} : { lukkEndedSession: ended }), ...(cache === undefined ? {} : { cache }) },
+      context: ended === undefined ? {} : { lukkEndedSession: ended },
       node: { res: {
         headersSent,
         getHeader: (k: string) => headers.get(k),
@@ -52,13 +52,6 @@ describe('finish-logout late check (BFF)', () => {
   it.each(['beforeResponse', 'render:html'])('%s holds back the signed-out cookie when a sign-in replaced that session meanwhile', async (name) => {
     const hooks = install()
     const page = pageEvent(ended('REPLACED'))
-    await call(hooks, name, page.event)
-    expect(page.headers.get('set-cookie')).toEqual(['theme=dark; Path=/'])
-  })
-
-  it.each(['beforeResponse', 'render:html'])('%s holds it back from a response a route rule may CACHE — it would reach other visitors', async (name) => {
-    const hooks = install()
-    const page = pageEvent(ended('S1'), false, { options: {} })
     await call(hooks, name, page.event)
     expect(page.headers.get('set-cookie')).toEqual(['theme=dark; Path=/'])
   })

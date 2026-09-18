@@ -2,7 +2,7 @@ import type { H3Event } from 'h3'
 import { appendResponseHeader, defineEventHandler, deleteCookie, getCookie, getRequestHeader, setCookie, setResponseHeader } from 'h3'
 import { useRuntimeConfig } from '#imports'
 import { LUKK_BFF_PREFIX, logoutCookieName, sessionCookieName, signedOutCookieName } from '../shared'
-import { sessionKey } from './ended-sessions'
+import { sessionKey, sessionReplaced } from './ended-sessions'
 import type { EndedHere } from './logout-note'
 import { readSealedSessionWithId } from './sealed-session'
 
@@ -44,37 +44,46 @@ export default defineEventHandler(async (event) => {
   // and clears the note itself.
   if (event.path.startsWith(`${LUKK_BFF_PREFIX}/`)) return
 
+  // Per-user whatever the outcome: it clears this visitor's cookies, or renders them signed out. Before the
+  // early returns below, which also answer with a `Set-Cookie` a shared cache must not store.
+  setResponseHeader(event, 'cache-control', 'no-store')
+  setResponseHeader(event, 'vary', 'cookie')
+
   const session = sessionCookieName(secure, cookieNamespace)
   const sealed = getCookie(event, session)
-  if (!sealed) {
+  // A cookie that does not UNSEAL is not a session: an unauthenticated caller could otherwise hand us any
+  // string and buy a page load held for the timeout plus an upstream request, once per value they invent.
+  // Its `sid` also keys the work below, so a browser cannot spend another's back-off entry.
+  const { id, data } = sealed ? await readSealedSessionWithId(event, sessionPassword, session) : { id: undefined, data: {} }
+  const key = sessionKey({ id, data })
+  if (!key || !(data.access ?? data.refresh)) {
     deleteCookie(event, note, { path: '/', secure, sameSite: 'strict' })
     return
   }
 
-  // Per-user whatever the outcome: it clears this visitor's cookies, or renders them signed out.
-  setResponseHeader(event, 'cache-control', 'no-store')
-  setResponseHeader(event, 'vary', 'cookie')
+  if ((failedUntil.get(key) ?? 0) > Date.now()) return
 
-  if ((failedUntil.get(failureKey(sealed)) ?? 0) > Date.now()) return
-
-  const res = await finishOnce(event, sealed)
+  const res = await finishOnce(event, key)
   const forwarded = res?.headers.getSetCookie() ?? []
   // The proxy clears the note exactly when the session is over — not for a 401 it could still renew past,
   // nor when a renewal re-sealed it and the logout then failed.
   const ended = forwarded.some(cookie => nameOf(cookie) === note)
-  if (!ended) noteFailure(sealed)
+  if (!ended) noteFailure(key)
 
   // A session RE-SEALED here (a renewal before a logout that then failed) must reach the browser: it holds a
   // refresh token this server has already spent. Never the CLEARED cookie, though — this response is
   // finalised long before it lands, and a sign-in in another tab meanwhile would have its newer cookie wiped
   // by it. The browser's own logout request clears that cookie when its response lands; until then every
   // path here treats the session as ended (the record) and the visitor as signed out (the note).
+  // …and not onto a response a sign-in has replaced meanwhile: it would land after the newer cookie and
+  // strand the session the visitor just signed into.
+  const keepCookies = !(await sessionReplaced(key))
   for (const cookie of forwarded) {
-    if (nameOf(cookie) === session && !cookie.startsWith(`${session}=;`) && cookie !== `${session}=`) {
+    if (keepCookies && nameOf(cookie) === session && !cookie.startsWith(`${session}=;`) && cookie !== `${session}=`) {
       appendResponseHeader(event, 'set-cookie', cookie)
     }
   }
-  if (!ended) return
+  if (!ended || !keepCookies) return
 
   // Done: the note goes, and a short-lived cookie says so, which the page's restore reads — it then knows it
   // is signed out without asking, and tells the visitor's other tabs.
@@ -83,8 +92,7 @@ export default defineEventHandler(async (event) => {
   setCookie(event, marker, '1', { path: '/', secure, sameSite: 'strict', maxAge: 10 })
   // Checked again before the headers go out: a sign-in elsewhere meanwhile must not have its new cookie
   // cleared by this response (see `logoutReplacedMeanwhile`).
-  const { id, data } = await readSealedSessionWithId(event, sessionPassword, session)
-  ;(event.context as { lukkEndedSession?: EndedHere }).lukkEndedSession = { key: sessionKey({ id, data }), marker }
+  ;(event.context as { lukkEndedSession?: EndedHere }).lukkEndedSession = { key, marker }
 })
 
 const nameOf = (cookie: string) => cookie.slice(0, cookie.indexOf('='))
@@ -92,11 +100,7 @@ const nameOf = (cookie: string) => cookie.slice(0, cookie.indexOf('='))
 /** At most this many sessions remembered as failing; the oldest go first. */
 export const FAILURE_LIMIT = 1_000
 
-// The seal's tail — its MAC — tells seals apart without holding kilobytes of a value the client chose.
-const failureKey = (sealed: string) => sealed.slice(-64)
-
-function noteFailure(sealed: string, now = Date.now()): void {
-  const key = failureKey(sealed)
+function noteFailure(key: string, now = Date.now()): void {
   failedUntil.delete(key)
   // Bounded whatever the request rate: expired entries go first, then the oldest.
   if (failedUntil.size >= FAILURE_LIMIT) {
