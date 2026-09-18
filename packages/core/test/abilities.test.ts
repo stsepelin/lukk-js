@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { can, canAll, canAny, cannot, enforcesAbilities, LUKK_ACCOUNT, LUKK_SESSIONS, normalize } from '../src/abilities'
+import { can, canAll, canAny, cannot, enforcesAbilities, LUKK_ACCOUNT, LUKK_ACCOUNT_DELETE, LUKK_SESSIONS, normalize } from '../src/abilities'
 
 describe('can', () => {
   it('matches an ability exactly', () => {
@@ -27,6 +27,14 @@ describe('can', () => {
     expect(can(['orders.read'], '*')).toBe(false)
     // ...but asking for the literal ability that WAS granted still works.
     expect(can(['orders.*'], 'orders.*')).toBe(true)
+  })
+
+  it('only widens from a grant that ends in `.*`', () => {
+    // The prefix rule is the wildcard's alone. If any grant were treated as a prefix, holding
+    // `orders.read` would satisfy `orders.readable` — and, worse, `orders` would satisfy everything
+    // in the namespace the bare ability was deliberately kept out of.
+    expect(can(['orders.read'], 'orders.readable')).toBe(false)
+    expect(can(['orders'], 'orders.read')).toBe(false)
   })
 
   it('compares case-sensitively', () => {
@@ -101,6 +109,9 @@ describe('a malformed abilities value from the network', () => {
     expect(canAny(value, ['orders.read'])).toBe(false)
     expect(canAll(value, ['orders.read'])).toBe(false)
     expect(enforcesAbilities(value)).toBe(true)
+    // And the grant it reports is genuinely EMPTY, not a salvage attempt: `normalize` is exported,
+    // so a caller rendering the list must not be shown an ability nobody was granted.
+    expect(normalize(value)).toEqual([])
   })
 
   it('drops a non-string entry but honours its valid siblings', () => {
@@ -140,6 +151,14 @@ describe('normalize drops what the server would have refused at mint', () => {
     expect(can(['orders,read'], 'orders,read')).toBe(false)
   })
 
+  it('rejects an empty entry, which is not a scope token at all', () => {
+    // RFC 6749 §3.3 scope tokens are non-empty, so `''` only ever arrives as a serialisation
+    // artefact (a stray `explode(' ', '')` upstream). Keeping it would have `normalize` report a
+    // grant of one ability where the server has none.
+    expect(normalize(['', 'orders.read'])).toEqual(['orders.read'])
+    expect(normalize([''])).toEqual([])
+  })
+
   it('rejects whitespace and an oversized ability', () => {
     expect(normalize(['orders read'])).toEqual([])
     expect(normalize(['a'.repeat(129)])).toEqual([])
@@ -151,5 +170,14 @@ describe('lukk\'s own abilities', () => {
   it('are exported so a client never has to hardcode the strings', () => {
     expect(LUKK_SESSIONS).toBe('lukk.sessions')
     expect(LUKK_ACCOUNT).toBe('lukk.account')
+    expect(LUKK_ACCOUNT_DELETE).toBe('lukk.account.delete')
+  })
+
+  it('does not let `lukk.account` imply erasing the account', () => {
+    // Only a `.*` grant widens, so an exact `lukk.account` misses `lukk.account.delete` — mirroring
+    // the server, where folding the destructive ability into the older one would have handed every
+    // token already carrying it the power to destroy the account.
+    expect(can([LUKK_ACCOUNT], LUKK_ACCOUNT_DELETE)).toBe(false)
+    expect(can(['lukk.account.*'], LUKK_ACCOUNT_DELETE)).toBe(true)
   })
 })

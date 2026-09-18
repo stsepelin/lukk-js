@@ -22,6 +22,24 @@ describe('base64url', () => {
     expect(new TextDecoder().decode(base64urlToBuffer('aGVsbG8'))).toBe('hello') // len 7 → needs pad
     expect(new TextDecoder().decode(base64urlToBuffer('YWJj'))).toBe('abc') // len 4 → no pad
   })
+
+  it('substitutes the url-safe alphabet in both directions', () => {
+    // '-' and '_' stand in for base64's '+' and '/', and neither is reachable from friendly
+    // bytes: [0xfb, 0xff] is the shortest input that produces both. A round-trip that never
+    // hits those two characters cannot notice a dropped substitution — which would then
+    // corrupt only the occasional challenge or signature whose bytes happen to land there.
+    expect(bufferToBase64url(new Uint8Array([0xFB, 0xFF]).buffer)).toBe('-_8')
+    expect(new Uint8Array(base64urlToBuffer('-_8'))).toEqual(new Uint8Array([0xFB, 0xFF]))
+  })
+
+  it('tops the padding back up rather than trusting the host decoder', () => {
+    // lukk emits unpadded base64url, so the pad is defensive — but it is not decoration.
+    // `atob` is forgiving about a *wholly* unpadded value and strict about a half-padded one
+    // ('YWJjZA' and 'YWJjZA==' both decode; 'YWJjZA=' throws), so restoring the length to a
+    // multiple of four is what makes a value from a producer that stripped only one '='
+    // decode at all instead of throwing at the caller.
+    expect(new TextDecoder().decode(base64urlToBuffer('YWJjZA='))).toBe('abcd')
+  })
 })
 
 describe('toCreationOptions', () => {
@@ -62,6 +80,10 @@ describe('toCreationOptions', () => {
     expect(opts.attestation).toBeUndefined()
     expect(opts.authenticatorSelection).toBeUndefined()
     expect(opts.excludeCredentials).toEqual([])
+    // Reading `undefined` back proves nothing: a spread of `{ timeout: undefined }` and a
+    // spread of `{}` are indistinguishable that way, and only the second is "absent". The
+    // distinction is the point of the conditional spreads — pin the exact key set.
+    expect(Object.keys(opts).sort()).toEqual(['challenge', 'excludeCredentials', 'pubKeyCredParams', 'rp', 'user'])
   })
 })
 
@@ -82,6 +104,9 @@ describe('toRequestOptions', () => {
     const min = toRequestOptions({ challenge: 'aGVsbG8' })
     expect(min.rpId).toBeUndefined()
     expect(min.allowCredentials).toEqual([])
+    // Same reason as the creation side: an omitted option must be an absent key, not a
+    // present key holding `undefined`.
+    expect(Object.keys(min).sort()).toEqual(['allowCredentials', 'challenge'])
   })
 })
 

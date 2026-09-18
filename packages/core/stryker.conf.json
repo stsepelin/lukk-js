@@ -15,9 +15,9 @@
     "maxTestsToLog": 0
   },
   "thresholds": {
-    "high": 95,
-    "low": 90,
-    "break": 86
+    "high": 100,
+    "low": 100,
+    "break": 100
   },
   "plugins": [
     "@stryker-mutator/vitest-runner"
