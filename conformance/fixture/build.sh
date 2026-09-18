@@ -155,6 +155,21 @@ if (app()->environment() !== 'production') {
         return response()->json(['id' => $user->id, 'email' => $user->email, 'password' => 'password']);
     });
 
+    // How many sessions a user has that are still usable — the browser suites assert on this
+    // rather than on what a page happens to render, so "logged out everywhere" is checked where
+    // it is actually decided.
+    Route::get('/conformance/live-sessions', function (\Illuminate\Http\Request $request) {
+        $user = \App\Models\User::where('email', (string) $request->query('email'))->first();
+
+        return response()->json([
+            'live' => $user === null ? 0 : \Lukk\Models\RefreshToken::query()
+                ->where('user_id', $user->id)
+                ->whereNull('revoked_at')
+                ->where('expires_at', '>', now())
+                ->count(),
+        ]);
+    });
+
     // GET, like the other two helpers: these live in `routes/web.php`, so a POST would be
     // rejected by the web group's CSRF middleware before it ever reached the closure.
     Route::get('/conformance/pinned-token', function (\Illuminate\Http\Request $request) {

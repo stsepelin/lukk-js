@@ -4,6 +4,9 @@ dist/
 .output/
 .data/
 coverage/
+conformance/.matrix/
+test-results/
+playwright-report/
 *.log
 .DS_Store
 .env
