@@ -70,6 +70,12 @@ describe('pending logout note (direct mode)', () => {
     shared.setItem('lukk:signed-in-at:/', String(Date.now() + 60 * 60_000))
     expect(signedInSince(undefined, Date.now())).toBe(false)
 
+    // Not even a little ahead. `noteSignIn` clamps its own writes to now and every tab shares one clock,
+    // so a future record is never ours — a tolerance window admits only a forged one, which is a standing
+    // veto on logging out for any script on the origin.
+    shared.setItem('lukk:signed-in-at:/', String(Date.now() + 4_000))
+    expect(signedInSince(undefined, Date.now())).toBe(false)
+
     // Nor is one written: a send time cannot be in the future, and a value that got in must not be
     // preserved by the next write either.
     noteSignIn(undefined, Date.now() + 60 * 60_000)
@@ -100,6 +106,18 @@ describe('pending logout note (direct mode)', () => {
     Object.defineProperty(globalThis, 'localStorage', { configurable: true, get: () => { throw new Error('SecurityError') } })
     expect(readPendingLogout(undefined, 2_000)).toEqual({ at: 1_000 })
     delete (globalThis as { localStorage?: unknown }).localStorage
+  })
+
+  it('ignores a note dated in the future — it would never age out, and nothing could stand it down', () => {
+    // The clock moved back between writing the note and reading it (a phone waking, an RTC correction, a
+    // restored VM snapshot). Bounded only from above, its age was negative and every page load for the
+    // next hour honoured it — while `signedInSince` disbelieved the equally-future sign-in record.
+    vi.stubGlobal('sessionStorage', memoryStorage())
+    vi.stubGlobal('localStorage', memoryStorage())
+    notePendingLogout(undefined, 'fam-1', 5_000)
+
+    expect(readPendingLogout(undefined, 5_000)).toBeDefined()
+    expect(readPendingLogout(undefined, 4_999)).toBeUndefined()
   })
 
   it('clears up to a time only a note written no later than it', () => {

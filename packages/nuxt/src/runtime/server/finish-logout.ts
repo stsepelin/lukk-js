@@ -2,7 +2,7 @@ import type { H3Event } from 'h3'
 import { appendResponseHeader, defineEventHandler, deleteCookie, getCookie, getRequestHeader, setCookie, setResponseHeader } from 'h3'
 import { useRuntimeConfig } from '#imports'
 import { LUKK_BFF_PREFIX, logoutCookieName, sessionCookieName, signedOutCookieName } from '../shared'
-import { sessionKey, sessionReplaced } from './ended-sessions'
+import { sessionEnded, sessionKey, sessionReplaced } from './ended-sessions'
 import type { EndedHere } from './logout-note'
 import { readSealedSessionWithId } from './sealed-session'
 
@@ -61,6 +61,15 @@ export default defineEventHandler(async (event) => {
   const { id, data } = sealed ? await readSealedSessionWithId(event, sessionPassword, session) : { id: undefined, data: {} }
   const key = sessionKey({ id, data })
   if (!key || !(data.access ?? data.refresh)) {
+    deleteCookie(event, note, { path: '/', secure, sameSite: 'strict' })
+    return
+  }
+
+  // Already over, as far as this server knows: nothing to finish, and the note goes. No `useSession`
+  // call here passes `maxAge`, so an iron seal never expires cryptographically — a sealed value captured
+  // once stays unsealable-forever, and replaying it with a note bought one upstream `/logout` plus one
+  // `/refresh` per request, indefinitely, since the back-off below only arms after a FAILURE.
+  if (await sessionEnded(key)) {
     deleteCookie(event, note, { path: '/', secure, sameSite: 'strict' })
     return
   }

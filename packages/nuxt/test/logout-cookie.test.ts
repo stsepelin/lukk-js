@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { clearLogoutCookie, hasLogoutCookie, setLogoutCookie } from '../src/runtime/utils/logout-cookie'
+import { clearLogoutCookie, hasLogoutCookie, logoutNoteAt, setLogoutCookie } from '../src/runtime/utils/logout-cookie'
 
 afterEach(() => vi.unstubAllGlobals())
 
@@ -25,16 +25,45 @@ describe('BFF logout note cookie (browser side)', () => {
     const { doc, writes } = fakeDocument()
     vi.stubGlobal('document', doc)
 
-    setLogoutCookie('__Host-lukk-logout')
-    expect(writes.pop()).toBe('__Host-lukk-logout=1; Path=/; Max-Age=60; SameSite=Strict; Secure')
+    setLogoutCookie('__Host-lukk-logout', 1_700_000_000_000)
+    expect(writes.pop()).toBe('__Host-lukk-logout=1700000000000; Path=/; Max-Age=60; SameSite=Strict; Secure')
     expect(hasLogoutCookie('__Host-lukk-logout')).toBe(true)
 
     clearLogoutCookie('__Host-lukk-logout')
     expect(writes.pop()).toBe('__Host-lukk-logout=; Path=/; Max-Age=0; SameSite=Strict; Secure')
     expect(hasLogoutCookie('__Host-lukk-logout')).toBe(false)
 
-    setLogoutCookie('lukk-admin-logout') // dev over http: no prefix, no Secure
-    expect(writes.pop()).toBe('lukk-admin-logout=1; Path=/; Max-Age=60; SameSite=Strict')
+    setLogoutCookie('lukk-admin-logout', 1_700_000_000_000) // dev over http: no prefix, no Secure
+    expect(writes.pop()).toBe('lukk-admin-logout=1700000000000; Path=/; Max-Age=60; SameSite=Strict')
+  })
+
+  it('carries the moment the logout was asked for, and reads it back', () => {
+    // The page that FINISHES a note needs this: without it, it used its own load time, and a sign-in
+    // already on the wire — sent before that load, landing after — could never count as "since".
+    const { doc, jar } = fakeDocument()
+    vi.stubGlobal('document', doc)
+
+    setLogoutCookie('__Host-lukk-logout', 1_700_000_000_000)
+    expect(logoutNoteAt('__Host-lukk-logout', 1_700_000_005_000)).toBe(1_700_000_000_000)
+    // The bare `1` a note carried before it held a time: unknown, not 1970 — read as an epoch it would
+    // make every sign-in ever count as "since this logout", and no logout would ever be sent again.
+
+    // Renewing carries the ORIGINAL time forward, never this moment: walking it past a sign-in already
+    // in flight is exactly what the value exists to prevent.
+    setLogoutCookie('__Host-lukk-logout', logoutNoteAt('__Host-lukk-logout')!)
+    expect(logoutNoteAt('__Host-lukk-logout')).toBe(1_700_000_000_000)
+
+    // Not written into the future, whatever it is handed.
+    setLogoutCookie('lukk-logout', Date.now() + 60 * 60_000)
+    expect(logoutNoteAt('lukk-logout')!).toBeLessThanOrEqual(Date.now())
+
+    // A note that predates the timestamp, or one someone rewrote, reads as unknown — the caller then
+    // falls back to its own clock, which is what every note did before.
+    for (const value of ['1', '', 'soon', '0', '-5', '1.5', String(Date.now() + 60 * 60_000), String(Date.now() + 4_000)]) {
+      jar.set('lukk-logout', value)
+      expect(logoutNoteAt('lukk-logout'), value).toBeUndefined()
+      expect(hasLogoutCookie('lukk-logout'), value).toBe(true) // still a note; only its time is unknown
+    }
   })
 
   it('reads only its own name — not a longer one that starts the same, nor another app\'s', () => {
@@ -58,10 +87,12 @@ describe('BFF logout note cookie (browser side)', () => {
     vi.stubGlobal('document', undefined)
     expect(() => setLogoutCookie('lukk-logout')).not.toThrow()
     expect(hasLogoutCookie('lukk-logout')).toBe(false)
+    expect(logoutNoteAt('lukk-logout')).toBeUndefined()
 
     vi.stubGlobal('document', { get cookie(): string { throw new Error('SecurityError') }, set cookie(_: string) { throw new Error('SecurityError') } })
     expect(() => setLogoutCookie('lukk-logout')).not.toThrow()
     expect(() => clearLogoutCookie('lukk-logout')).not.toThrow()
     expect(hasLogoutCookie('lukk-logout')).toBe(false)
+    expect(logoutNoteAt('lukk-logout')).toBeUndefined()
   })
 })

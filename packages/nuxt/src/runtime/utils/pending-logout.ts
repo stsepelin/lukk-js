@@ -80,14 +80,15 @@ export function noteSignIn(scope: string | undefined, sentAt: number): void {
 export function readPendingLogout(scope?: string, now = Date.now()): PendingLogout | undefined {
   try {
     const note = readNote(storage()?.getItem(noteKey(scope)))
-    if (!note || now - note.at >= PENDING_LOGOUT_TTL_MS) return undefined
+    // Bounded from BOTH ends. A note dated in the future — the clock moved back between writing and
+    // reading it — has a negative age, so an upper bound alone honoured it forever, while `signedInSince`
+    // disbelieved the equally-future sign-in record and nothing could stand it down.
+    const age = now - note!.at
+    if (!note || age < 0 || age >= PENDING_LOGOUT_TTL_MS) return undefined
     return note.fid !== undefined || !signedInSince(scope, note.at) ? note : undefined
   }
   catch { return undefined }
 }
-
-/** How far ahead of now a record may sit and still be believed — scheduling jitter, not a wrong clock. */
-const FUTURE_SKEW_MS = 5_000
 
 /** Was a sign-in sent, in any tab, at or after `at`? */
 export function signedInSince(scope: string | undefined, at: number, now = Date.now()): boolean {
@@ -95,7 +96,11 @@ export function signedInSince(scope: string | undefined, at: number, now = Date.
   // A record in the future is not evidence of anything: the clock moved (an RTC correction, a restored
   // snapshot) or someone wrote it. Believing it would veto every logout from here on — the request is
   // never sent, while local state is cleared and the next page load restores the session it names.
-  if (last > now + FUTURE_SKEW_MS) return false
+  //
+  // No tolerance window: `noteSignIn` clamps everything IT writes to now, and every tab shares one clock,
+  // so a future record is never one of ours. A window here only ever admitted a forged one — which is a
+  // standing veto on logging out, handed to any script on the origin.
+  if (last > now) return false
   return last >= at
 }
 

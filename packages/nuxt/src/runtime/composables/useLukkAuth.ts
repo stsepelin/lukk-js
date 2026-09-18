@@ -211,11 +211,9 @@ export function useLukkAuth(): LukkAuth {
     // mode a cookie, which the next page load carries to the server, and which any new session's response
     // clears (see `logout-cookie`); in direct mode a per-tab note naming this session's family.
     //
-    // The restore plugin calls this to FINISH a note an earlier page left. That call doesn't note again —
-    // re-writing it after a sign-in had cleared it ended that sign-in; re-stamping a direct-mode note moved
-    // it past sign-ins sent since — and stands down, right before sending, once the note is moot, since
-    // sending would end a newer session:
-    // It stands down only if a sign-in was sent after the logout was asked for — see `moot` below.
+    // The restore plugin calls this to FINISH a note an earlier page left. That call doesn't note again:
+    // re-writing it after a sign-in had cleared it ended that sign-in, and re-stamping a direct-mode note
+    // moved it past sign-ins sent since. It stands down instead — see `moot` below.
     const noteCookie = cfg.mode === 'bff' ? cfg.logoutCookie : undefined
     const finishing = state.finishingLogout
     state.finishingLogout = undefined
@@ -224,10 +222,13 @@ export function useLukkAuth(): LukkAuth {
     // also what an aged-out note and a logout retried after a failure look like, and both of those still
     // have a session to end. Applies to every logout, not only one the restore plugin is finishing: a page
     // resumed from the back/forward cache can reach this long after the visitor signed in again.
+    // `finishing` is the time the ORIGINAL logout was asked for, carried by the note itself — not the time
+    // the finishing page loaded. A sign-in sent before that page loaded but landing after it is still a
+    // sign-in since the logout, and must survive.
     const askedAt = finishing ?? Date.now()
     const moot = () => signedInSince(state.scope, askedAt)
     if (import.meta.client && finishing === undefined) {
-      if (noteCookie) setLogoutCookie(noteCookie)
+      if (noteCookie) setLogoutCookie(noteCookie, askedAt)
       else notePendingLogout(state.scope, tokenFamily(access.value))
     }
     const clearNote = () => noteCookie ? clearLogoutCookie(noteCookie) : clearPendingLogout(state.scope)

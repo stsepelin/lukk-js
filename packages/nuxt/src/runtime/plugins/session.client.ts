@@ -1,6 +1,6 @@
 import { useLukkAuth } from '../composables/useLukkAuth'
 import { ACCESS_KEY, READY_KEY } from '../keys'
-import { clearLogoutCookie, hasLogoutCookie, setLogoutCookie } from '../utils/logout-cookie'
+import { clearLogoutCookie, hasLogoutCookie, logoutNoteAt, setLogoutCookie } from '../utils/logout-cookie'
 import { clearPendingLogout, readPendingLogout, signedInSince } from '../utils/pending-logout'
 import { restoreState } from '../utils/restore-state'
 import { tokenFamily } from '../utils/token-subject'
@@ -42,9 +42,12 @@ export default defineNuxtPlugin({
       // may be hanging. It stands down if a sign-in is recorded while it waits (see `logout`).
       if (noteCookie && hasLogoutCookie(noteCookie)) {
         // A fresh minute: the replay may wait seconds for the lock, and the next page load needs the note
-        // to still be there. Only renewed while one is already standing — never written from nothing.
-        setLogoutCookie(noteCookie)
-        state.finishingLogout = Date.now()
+        // to still be there. Only renewed while one is already standing — never written from nothing, and
+        // carrying the time the ORIGINAL logout was asked for, so renewing never walks that forward past a
+        // sign-in already in flight. A note that predates the timestamp falls back to this page's clock.
+        const askedAt = logoutNoteAt(noteCookie) ?? Date.now()
+        setLogoutCookie(noteCookie, askedAt)
+        state.finishingLogout = askedAt
         void auth.logout().then(() => {
           // It stood down: a sign-in elsewhere replaced that session, and this tab should show it.
           if (!state.logoutStoodDown) return
@@ -66,7 +69,13 @@ export default defineNuxtPlugin({
         const access = useState<string | null>(ACCESS_KEY, () => null)
         // On the restored session's FAMILY, not on `loggedIn`: an app with no `user.endpoint` never reads as
         // logged in, and this branch would then drop the note of a session the restore had just renewed.
-        if (tokenFamily(access.value) === note.fid) await auth.logout().catch(() => {})
+        if (tokenFamily(access.value) === note.fid) {
+          await auth.logout().catch(() => {})
+          // Stood down (a sign-in since, recorded by another tab): the session is live and this page has
+          // already restored it, so only the flag needs clearing — left set, it renders this page signed
+          // out until the next load.
+          state.logoutStoodDown = false
+        }
         // Couldn't tell (lukk unreachable): the note stands, for the next load within its minute.
         else if (!auth.restoreFailed.value) {
           clearPendingLogout(state.scope)

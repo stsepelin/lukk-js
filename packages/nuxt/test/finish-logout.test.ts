@@ -89,6 +89,20 @@ describe('finish-logout middleware (BFF)', () => {
     expect(event.deleted).toEqual([{ name: '__Host-lukk-logout', options: { path: '/', secure: true, sameSite: 'strict' } }])
   })
 
+  it('does no work for a session this server already ended — a captured seal is replayable forever', async () => {
+    // No `useSession` call in this package passes `maxAge`, so an iron seal never expires
+    // cryptographically: a cookie value captured once stays unsealable long after its tokens are dead.
+    // Replayed with a note it bought one upstream `/logout` plus one `/refresh` per request, unbounded —
+    // the back-off only arms after a FAILURE, and a succeeding logout re-did the work every time.
+    await endSession('S1')
+    const event = makeEvent()
+
+    await run(event)
+
+    expect(event.fetch).not.toHaveBeenCalled()
+    expect(event.deleted).toEqual([{ name: '__Host-lukk-logout', options: { path: '/', secure: true, sameSite: 'strict' } }])
+  })
+
   it('ends the session through the proxy\'s /logout before the page renders, drops the note, and answers that the browser is signed out', async () => {
     const event = makeEvent()
     await run(event)

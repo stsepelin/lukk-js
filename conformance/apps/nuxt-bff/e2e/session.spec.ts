@@ -127,9 +127,12 @@ test('a logout left unfinished while lukk was unreachable does not end a session
   await visit(page, `/dashboard?away=${encodeURIComponent(AWAY)}`)
   await page.getByTestId('logout-leave').click()
   await page.waitForURL(AWAY)
-  // The note really is standing, and A really is still live — otherwise the rest proves nothing.
+  // The note really is standing, and A really is still live — otherwise the rest proves nothing. Its
+  // value is the moment the logout was asked for, which the page that finishes it reads back.
   const noted = (await context.cookies()).find(c => c.name === '__Host-lukk-logout')
-  expect(noted?.value).toBe('1')
+  const askedAt = Number(noted?.value)
+  expect(askedAt).toBeGreaterThan(Date.now() - 60_000)
+  expect(askedAt).toBeLessThanOrEqual(Date.now())
   expect(await liveSessions(page, a.email)).toBe(1)
   lukk('ok')
 
@@ -230,6 +233,10 @@ test('a page a route rule caches never hands one visitor\'s session to the next'
   const replayed = await served
 
   const body = await replayed.text()
+  // Positively the cached page first: every assertion below is a `not`, so a navigation that never
+  // happened, or a 404, would satisfy all of them and prove nothing.
+  expect(replayed.status()).toBe(200)
+  expect(body).toContain('data-testid="auth-state"')
   expect(body).not.toContain(user.email)
   expect(String((await replayed.allHeaders())['set-cookie'] ?? '')).not.toContain('lukk')
   expect((await stranger.cookies()).map(c => c.name)).not.toContain('__Host-lukk-session')

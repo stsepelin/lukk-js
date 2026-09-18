@@ -269,6 +269,21 @@ describe('session.client plugin — a logout the previous page never finished', 
       expect(restoreState(__test.nuxtApp).finishingLogout).toBeUndefined() // a plain logout: that session, confirmed
     })
 
+    it('clears the stood-down flag when the logout it finished stood down, so the page does not read as signed out', async () => {
+      // The one restore branch that never reset the flag. Its logout CAN stand down — another tab records
+      // a sign-in while this one waits on the cross-tab lock — and the session is then live and already
+      // restored here, so a flag left set renders this page signed out until the next load.
+      vi.stubGlobal('sessionStorage', fakeStorage)
+      store.set('lukk:logging-out:/', JSON.stringify({ at: Date.now(), fid: 'F1' }))
+      restoresAs('F1')
+      logout.mockImplementationOnce(async () => { restoreState(__test.nuxtApp).logoutStoodDown = true })
+
+      await run()
+
+      expect(logout).toHaveBeenCalledOnce()
+      expect(restoreState(__test.nuxtApp).logoutStoodDown).toBe(false)
+    })
+
     it('finishes the logout for an app with no user endpoint, where nothing ever reads as logged in', async () => {
       vi.stubGlobal('sessionStorage', fakeStorage)
       store.set('lukk:logging-out:/', JSON.stringify({ at: Date.now(), fid: 'F1' }))
@@ -345,17 +360,36 @@ describe('session.client plugin — a logout the previous page never finished', 
 
     it('finishes a logout the server couldn\'t — its note is still pending — without holding startup, renewing the note\'s minute first', async () => {
       __test.runtimeConfig.public.lukk = { mode: 'bff', logoutCookie: '__Host-lukk-logout' }
-      const { writes } = jar({ 'theme': 'dark', '__Host-lukk-logout': '1' })
+      const askedAt = Date.now() - 30_000 // the logout was asked for on the PREVIOUS page
+      const { writes } = jar({ 'theme': 'dark', '__Host-lukk-logout': String(askedAt) })
       let finishing: number | undefined
       logout.mockImplementationOnce(() => { finishing = restoreState(__test.nuxtApp).finishingLogout; return new Promise(() => {}) }) // lukk hanging
 
       await run()
 
-      expect(writes).toEqual(['__Host-lukk-logout=1; Path=/; Max-Age=60; SameSite=Strict; Secure'])
+      // A fresh minute, carrying the ORIGINAL time — not this page load's. `expect.any(Number)` here
+      // passed for `0`, which `askedAt = finishing ?? Date.now()` keeps (`??`, not `||`), and
+      // `signedInSince(scope, 0)` is then always true: every logout moot, never sent.
+      expect(writes).toEqual([`__Host-lukk-logout=${askedAt}; Path=/; Max-Age=60; SameSite=Strict; Secure`])
       expect(logout).toHaveBeenCalledOnce()
-      expect(finishing).toEqual(expect.any(Number)) // finishing that one: it stands down if the note stops saying pending
+      expect(finishing).toBe(askedAt)
       expect(initSession).not.toHaveBeenCalled()
       expect(useState<boolean>(READY_KEY, () => false).value).toBe(true)
+    })
+
+    it('falls back to this page\'s clock for a note written before notes carried a time', async () => {
+      // A browser mid-upgrade still holds `=1`. It must not read as 1970, which would make every sign-in
+      // ever recorded count as "since this logout" and stand every logout down.
+      __test.runtimeConfig.public.lukk = { mode: 'bff', logoutCookie: '__Host-lukk-logout' }
+      const { writes } = jar({ '__Host-lukk-logout': '1' })
+      const before = Date.now()
+      let finishing: number | undefined
+      logout.mockImplementationOnce(() => { finishing = restoreState(__test.nuxtApp).finishingLogout; return new Promise(() => {}) })
+
+      await run()
+
+      expect(finishing).toBeGreaterThanOrEqual(before)
+      expect(writes).toEqual([`__Host-lukk-logout=${finishing}; Path=/; Max-Age=60; SameSite=Strict; Secure`])
     })
 
     it('restores the newer session once that logout stood down for it, and swallows a failure', async () => {
