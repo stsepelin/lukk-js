@@ -16,11 +16,14 @@
     "lint": "eslint .",
     "dev": "pnpm --filter lukk-nuxt dev",
     "changeset": "changeset",
-    "release": "pnpm build && changeset publish"
+    "release": "pnpm build && changeset publish",
+    "test:mutation": "pnpm -r test:mutation"
   },
   "devDependencies": {
     "@changesets/cli": "^2.31.1",
     "@nuxt/eslint-config": "^1.17.0",
+    "@stryker-mutator/core": "^10.0.0",
+    "@stryker-mutator/vitest-runner": "^10.0.0",
     "eslint": "^9.39.5",
     "typescript": "^5.9.3"
   },

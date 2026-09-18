@@ -34,9 +34,12 @@
     "stub": "unbuild --stub",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --coverage",
-    "test:conformance": "vitest run --config vitest.conformance.config.ts"
+    "test:conformance": "vitest run --config vitest.conformance.config.ts",
+    "test:mutation": "stryker run"
   },
   "devDependencies": {
+    "@stryker-mutator/core": "^10.0.0",
+    "@stryker-mutator/vitest-runner": "^10.0.0",
     "@vitest/coverage-v8": "^3.2.7",
     "unbuild": "^2.0.0",
     "vitest": "^3.2.7"

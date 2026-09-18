@@ -14,6 +14,7 @@ pnpm typecheck                 # tsc (core) + nuxi typecheck (nuxt)
 pnpm lint                      # eslint flat config (@nuxt/eslint-config)
 pnpm dev                       # the lukk-nuxt playground
 pnpm --filter lukk-core test:conformance   # against a live lukk (see conformance/)
+pnpm test:mutation             # Stryker, both packages (minutes, not seconds)
 ```
 
 ## Architecture
@@ -37,6 +38,12 @@ pnpm --filter lukk-core test:conformance   # against a live lukk (see conformanc
 ## Quality gate
 
 Both packages enforce **100% coverage** (statements/branches/functions/lines; each `test` runs `--coverage`). The Nuxt runtime is unit-tested via a lightweight `#imports` alias-mock (`test/mocks/imports.ts`) + `h3` mocks for `bff.ts` — no Nuxt boot. The live conformance specs (`packages/core/conformance/`) are excluded from the unit run and gate.
+
+**Coverage is the weaker half of that gate.** It says every line ran, not that any test would fail if a line behaved differently — and the difference here is not academic: at 100% coverage the credential-attachment rule could be reverted to the naive version it was written to replace and 697 tests stayed green. `pnpm test:mutation` (Stryker) asks the other question. Measured baselines, 2026-09-18: **lukk-core 86.31%**, **lukk-nuxt 86.05%**; `thresholds.break` in each `stryker.conf.json` is set at that floor so the number cannot drift down unnoticed — raise it as the score rises, never lower it to turn a build green. CI runs it per-PR on the changed files (`--since`) and nightly in full, both against that same floor. Deliberately not 100 on PRs: at a mid-eighties baseline that would fail nearly every pull request, and a gate that is always red gets switched off. Pay the debt down by raising the floor on purpose.
+
+Stryker uses `vitest.mutation.config.ts`, not the ordinary config: it runs a *subset* of the suite per mutant, so the 100% coverage thresholds would fail every run and it reads that as "no tests executed". For lukk-nuxt it runs the **client** project only — `import.meta.server` is replaced at transform time, so mixing both projects makes every server-only branch look like a survivor; the server build keeps its own coverage gate in `vitest.config.ts`.
+
+**A mock is a second implementation, and it drifts.** `test/create-lukk-fetch.contract.test.ts` drives the credential decision through *real* ofetch and asserts on what reaches `fetch`, because the hand-built contexts elsewhere carry no `baseURL` while the real library always merges the instance default in — which is exactly how a rule that refused the bearer on every ordinary direct-mode app shipped green. Add to that file when a rule depends on library behaviour rather than on our own code.
 
 ## Audit history
 

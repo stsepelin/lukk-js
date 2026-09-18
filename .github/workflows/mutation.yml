@@ -1,0 +1,87 @@
+name: mutation
+
+# Does the suite NOTICE when the code changes?
+#
+# Both packages gate on 100% coverage, which says every line ran — not that any test would fail if a
+# line behaved differently. The first mutation run put real numbers on the difference: lukk-core 86%,
+# and inside lukk-nuxt the proxy and module surfaces in the seventies, all at 100% coverage. The rule
+# a whole release depended on was reverted to the naive version it had been written to replace, and
+# 697 tests stayed green.
+#
+# PRs mutate only what they touch, so the answer arrives before merge. The full run is nightly.
+
+on:
+  pull_request:
+  schedule:
+    # 03:40 UTC, off the hour and after the PHP package's run, which uses the same shared runners.
+    - cron: '40 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  changed:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    name: Mutation score (changed files)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Stryker's `--since` needs the merge base present locally.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # lukk-nuxt imports the built lukk-core.
+      - run: pnpm --filter lukk-core build
+
+      # `--since` mutates only the files this branch changed, against the SAME floor the nightly run
+      # uses (each package's `stryker.conf.json`). Not 100: both packages sit in the mid-eighties, so
+      # demanding perfection on every touched file would fail nearly every pull request — and a gate
+      # that is always red gets switched off, which is worse than no gate. This one fires when a change
+      # makes what it touches measurably worse. Paying the debt down means raising the floor, on purpose.
+      - name: lukk-core
+        run: pnpm --filter lukk-core exec stryker run --since=origin/${{ github.base_ref }}
+
+      - name: lukk-nuxt
+        run: pnpm --filter lukk-nuxt exec stryker run --since=origin/${{ github.base_ref }}
+
+  full:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [lukk-core, lukk-nuxt]
+    name: Mutation score (${{ matrix.package }})
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm --filter lukk-core build
+
+      # The break threshold lives in each package's stryker.conf.json. It is the MEASURED baseline, not
+      # an aspiration: it exists so the score cannot drift down unnoticed. Raise it when the number
+      # rises; never lower it to turn a red build green.
+      - run: pnpm --filter ${{ matrix.package }} test:mutation
