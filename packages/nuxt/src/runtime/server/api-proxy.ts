@@ -29,6 +29,7 @@ export default defineEventHandler(async (event) => {
     cookieNamespace?: string
     clientIpHeader?: string
   }
+  // Stryker disable next-line ArrayDeclaration: the list is only read as `.length` and `.includes(name)`, so a placeholder entry changes nothing unless an upstream sets a cookie named after Stryker's own sentinel.
   const forwardSetCookie = apiForwardSetCookie ?? []
   // Resolved through the shared guard: a post-build runtime override could otherwise name an
   // invalid or proxy-owned header and break every request here (see `confirmationHeaderName`).
@@ -61,6 +62,7 @@ export default defineEventHandler(async (event) => {
   }
 
   // Subpath after the mount, contained to the fixed target by `resolveTarget`.
+  // Stryker disable next-line StringLiteral: `resolveTarget` strips a leading `/` from the subpath, so '/' and '' build the identical URL — and its other use, the escape log, is unreachable for a subpath that cannot escape.
   const subpath = path.slice(apiPath.length) || '/'
   const base = resolveTarget(apiTarget, subpath)
   if (!base) return rejectUnresolvedTarget(event, apiTarget, 'lukk `api.target`', subpath)
@@ -95,6 +97,7 @@ export default defineEventHandler(async (event) => {
     // Not for a session a sign-in replaced or a logout ended while this request was out: re-sealing it
     // would put the previous session back in the browser. The stale bearer then 401s upstream.
     const ended = () => sessionEnded(sessionKey(session))
+    // Stryker disable next-line ObjectLiteral: `pair` is read only for truthiness on this path, and an absent key is as falsy as `null`.
     const { pair } = await ended() ? { pair: null } : await refreshOnce(session, baseURL, clientIp)
     if (pair && !(await ended())) {
       await session.update(pair)
@@ -156,6 +159,11 @@ export default defineEventHandler(async (event) => {
       // Last, so it can blank anything the client named in `Connection` (RFC 9110 §7.6.1) — but
       // never the headers this proxy sets itself, or a client could use `Connection` to strip its
       // own `authorization` and the step-up token on the way through.
+      // Stryker disable next-line StringLiteral: `'cookie'` is inert in this list — the bag already
+      // set `cookie: ''` above, so blanking it writes the identical value under the identical key,
+      // and no input can tell the two apart. (Line-granular, so the other five names are ignored
+      // with it; each stays pinned by the Connection-strip test, which asserts that the value this
+      // proxy set still reaches the upstream when the client names that header in `Connection`.)
       ...hopByHopHeaders(event, ['authorization', 'cookie', 'x-forwarded-for', 'via', 'accept', 'content-type', confirmationHeader]),
     },
     // Not a cookie/cache passthrough: strip upstream Set-Cookie, restore the rotated session,
@@ -189,6 +197,10 @@ export default defineEventHandler(async (event) => {
       // Opt-in passthrough: forward only allow-listed names — and NEVER a lukk sealed session
       // cookie (this app's OR a co-hosted app's, whatever the list says); an upstream must not be
       // able to set/overwrite any lukk session.
+      // Stryker disable next-line ConditionalExpression: with no allow-list `includes(name)` is false
+      // for every name, so the loop is already a no-op — this guard is a fast path, not a rule, and
+      // dropping it cannot change what is forwarded. (Line-granular, so the `false` direction is
+      // ignored with it; it stays pinned by the allow-list test, which needs this block to run.)
       if (forwardSetCookie.length) {
         for (const cookie of upstream) {
           const name = cookieName(cookie)
@@ -223,5 +235,6 @@ function toCookieArray(value: number | string | string[] | undefined): string[] 
 /** The cookie name from a `Set-Cookie` string (the part before the first `=`). */
 function cookieName(setCookie: string): string {
   const eq = setCookie.indexOf('=')
+  // Stryker disable next-line StringLiteral: the name is only matched against lukk's own cookie names, `isSessionCookieName`, and the allow-list — a nameless cookie and a sentinel are both "no match" unless the allow-list literally contains the empty string.
   return eq === -1 ? '' : setCookie.slice(0, eq).trim()
 }
