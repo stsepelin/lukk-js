@@ -92,6 +92,8 @@ export function createLukkClient(hooks: LukkClientHooks) {
       let pair: TokenPair | null
       // A throwing refresh hook means "not refreshable" — honor the documented contract.
       try { pair = await refreshOnce() }
+      // Stryker disable next-line BlockStatement: emptying this catch leaves `pair` undefined instead
+      // of null, and `isTokenPair` rejects both identically — no input can distinguish the two.
       catch { pair = null }
       // Gated on the shape, like every other sink (`commit`). The refresh path checked only for
       // truthiness, so any 2xx body from /refresh reached the binding's storage hook unvalidated —
@@ -145,9 +147,13 @@ export function createLukkClient(hooks: LukkClientHooks) {
     // `keepalive`, so a page that navigates away right after starting it doesn't cancel it — a cancelled
     // logout never reached lukk, and the session outlived what the user saw. A browser that refuses a
     // keepalive request needing a CORS preflight rejects it with a TypeError; it is sent again without.
+    // Stryker disable next-line LogicalOperator: `?? true` and `&& true` differ only for `undefined`,
+    // and `request`'s own parameter default turns that back into `true` — the same call either way.
     logout: (options: { retry?: boolean } = {}) => request<void>('/logout', { ...json({}), keepalive: true }, options.retry ?? true)
       .catch((error: unknown) => {
         if (!(error instanceof TypeError)) throw error
+        // Stryker disable next-line LogicalOperator: as above — `undefined` reaches `request`'s
+        // parameter default and becomes `true` regardless.
         return request<void>('/logout', json({}), options.retry ?? true)
       }),
     /**
@@ -260,11 +266,17 @@ export function isSameOrigin(base: string, path: string): boolean {
   const candidate = canonical(path)
 
   // No scheme, but an authority follows: protocol-relative, so always a foreign origin.
+  // Stryker disable next-line ConditionalExpression: removing this early return is unobservable —
+  // `carriesOrigin` also answers true for `//host`, and the `!/^https?:/i` test below then returns
+  // false for the same input. The early return states the intent; it does not change the answer.
   if (candidate.startsWith('//')) return false
 
   // Anything else carrying a scheme must be http(s) AND match the base's origin. A non-http scheme
   // (`javascript:`, `data:`, `blob:`) is never same-origin, whatever the base.
   if (carriesOrigin(candidate)) {
+    // Stryker disable next-line Regex: unanchoring the BASE test is unobservable — a base that
+    // contains `https://` without starting with it is relative, and `new URL(base)` then throws into
+    // the catch below, which returns false exactly as this line would have.
     if (!/^https?:/i.test(candidate) || !/^https?:\/\//i.test(base)) return false
     try { return new URL(candidate).origin === new URL(base).origin }
     catch { return false }
