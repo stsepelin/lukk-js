@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createLukkClient, isSameOrigin, lukkError } from '../src/client'
+import { carriesOrigin, createLukkClient, isSameOrigin, lukkError } from '../src/client'
 
 describe('lukkError', () => {
   it('shapes a Laravel error, and falls back to statusText / omits errors without a body', () => {
@@ -376,6 +376,34 @@ describe('isSameOrigin canonicalises before deciding', () => {
       '/\\evil.com/steal',
     ])
       expect(isSameOrigin(base, path), path).toBe(false)
+  })
+
+  it('refuses a URL whose scheme is split by a tab, LF or CR — the parser removes them from ANYWHERE', () => {
+    // The leading-only strip missed this: the URL parser removes ASCII tab, LF and CR from any
+    // position, so each of these resolves to a foreign origin while reading as a relative path. Proven
+    // end to end against real ofetch, which leaves the string unjoined (ufo's `hasProtocol` matches
+    // `\s` inside the scheme) and hands it to `fetch`, where the platform resolves it.
+    const TAB = String.fromCharCode(9), LF = String.fromCharCode(10), CR = String.fromCharCode(13)
+
+    for (const path of [
+      `ht${TAB}tps://evil.com/steal`,
+      `htt${LF}p://evil.com/steal`,
+      `h${CR}ttps://evil.com/steal`,
+      `https${TAB}://evil.com/steal`,
+      `/${TAB}/evil.com/steal`,
+      `//evil${LF}.com/steal`,
+    ]) {
+      expect(isSameOrigin(base, path), JSON.stringify(path)).toBe(false)
+      // And the platform really does resolve them somewhere else — the reason this matters.
+      expect(new URL(path, 'https://api.example.com/').origin, JSON.stringify(path)).not.toBe('https://api.example.com')
+    }
+  })
+
+  it('reports carriesOrigin for the same split-scheme shapes', () => {
+    const TAB = String.fromCharCode(9)
+    expect(carriesOrigin(`ht${TAB}tps://evil.com`)).toBe(true)
+    expect(carriesOrigin(`/${TAB}/evil.com`)).toBe(true)
+    expect(carriesOrigin('/still/relative')).toBe(false)
   })
 
   it('refuses a non-http scheme whatever the base', () => {

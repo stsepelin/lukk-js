@@ -66,6 +66,36 @@ describe('createLukkFetch through real ofetch', () => {
     expect(seen[0]!.credentials).toBe('same-origin')
   })
 
+  it('keeps redirect: manual even when the caller asks to follow', async () => {
+    // ofetch spreads per-call options over the instance defaults, so `redirect` living only in the
+    // defaults was caller-overridable — and a 307/308 preserves the method AND body across origins
+    // (RFC 9110 §15.4.8-9). The browser strips `Authorization` on a cross-origin redirect; it does not
+    // strip a credential in the body. Both sibling fetches already pin it after the caller's options.
+    const seen: RequestInit[] = []
+    const fetchImpl = createFetch({
+      fetch: (async (_input: string | Request, init?: RequestInit) => {
+        seen.push(init ?? {})
+        return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } })
+      }) as typeof globalThis.fetch,
+      Headers: OFetchHeaders as unknown as typeof globalThis.Headers,
+    }) as unknown as $Fetch
+
+    const api = createLukkFetch({
+      baseURL: 'https://api.example.com',
+      isServer: false,
+      canRefresh: false,
+      getCookieHeader: () => undefined,
+      getBearer: () => 'SECRET',
+      refresh: vi.fn(async () => ({ access_token: 'new' })),
+      onRedirect: vi.fn(),
+      fetchImpl,
+    })
+
+    await api('/me', { redirect: 'follow' } as Parameters<typeof api>[1])
+
+    expect(seen[0]!.redirect).toBe('manual')
+  })
+
   it('attaches on the plain path, where the instance base is the only one in play', async () => {
     const { api, seen } = drive()
 

@@ -336,4 +336,30 @@ describe('createRequestFetch (server-BFF)', () => {
     await api('/other')
     expect((requestFetch.mock.calls[1] as [string, FetchOptions])[1].baseURL).toBe('/api')
   })
+
+  it('blanks the inbound cookie for a target that is not the API — the transport attaches it before our hook', async () => {
+    // Nuxt's request-aware fetch is h3's `fetchWithEvent`, which merges the visitor's whole inbound
+    // `Cookie` into every request — absolute targets included — and does it BEFORE ofetch runs
+    // `onRequest`. The hook computed `sameOrigin === false` and attached nothing of its own, while the
+    // transport underneath had already sent the sealed BFF session to that host.
+    const requestFetch = vi.fn(async () => ({ ok: true }))
+    const { deps } = build({ baseURL: 'https://api.example.com', isServer: true })
+    const api = createRequestFetch(requestFetch, deps)
+
+    await api('https://collector.example/x')
+
+    const [, opts] = requestFetch.mock.calls[0] as [string, FetchOptions]
+    expect((opts.headers as Record<string, string>).cookie).toBe('')
+  })
+
+  it('leaves the request-aware transport to carry the cookie for the API itself', async () => {
+    const requestFetch = vi.fn(async () => ({ ok: true }))
+    const { deps } = build({ baseURL: 'https://api.example.com', isServer: true })
+    const api = createRequestFetch(requestFetch, deps)
+
+    await api('https://api.example.com/me')
+
+    const [, opts] = requestFetch.mock.calls[0] as [string, FetchOptions]
+    expect((opts.headers as Record<string, string> | undefined)?.cookie).toBeUndefined()
+  })
 })

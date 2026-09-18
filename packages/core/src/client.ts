@@ -221,16 +221,32 @@ function joinURL(base: string, path: string): string {
 }
 
 /**
- * Does this string carry its own origin — a scheme, or a protocol-relative `//host`?
+ * Canonicalise a URL string the way the WHATWG URL parser will, BEFORE anything decides what it is.
  *
- * Canonicalised the way the WHATWG URL parser will, BEFORE deciding: the parser strips leading C0
- * controls and spaces and treats `\` as `/` for special schemes, so ` https://evil.com`,
- * `\thttps://evil.com` and `https:/\evil.com` all resolve to an absolute URL while reading as
- * "relative" to a naive test — and a relative path is exactly what callers green-light.
+ * Three transformations, and all three have been a bypass:
+ *
+ *  1. Leading C0 controls and spaces are stripped (` https://evil.com`).
+ *  2. ASCII tab, LF and CR are removed from ANYWHERE in the input — not just the ends. This is the
+ *     one a leading-only strip misses: `ht<TAB>tps://evil.com` reads as a relative path to a naive
+ *     test, and the platform then fetches `https://evil.com`. Proven end to end against real ofetch,
+ *     which leaves such a string unjoined because ufo's `hasProtocol` matches `\s` inside the scheme.
+ *  3. `\` is treated as `/` for special schemes (`https:/\evil.com`).
+ *
+ * A relative path is exactly what callers green-light, so every one of these is a credential leak if
+ * it survives to the same-origin test.
  */
+function canonical(path: string): string {
+  return path
+    // eslint-disable-next-line no-control-regex -- removing exactly what the URL parser removes
+    .replace(/[\u0009\u000A\u000D]/g, '')
+    // eslint-disable-next-line no-control-regex -- C0 controls are exactly what the parser strips
+    .replace(/^[\u0000-\u0020]+/, '')
+    .replace(/\\/g, '/')
+}
+
+/** Does this string carry its own origin — a scheme, or a protocol-relative `//host`? */
 export function carriesOrigin(path: string): boolean {
-  // eslint-disable-next-line no-control-regex -- C0 controls are exactly what the parser strips
-  const candidate = path.replace(/^[\u0000-\u0020]+/, '').replace(/\\/g, '/')
+  const candidate = canonical(path)
   return candidate.startsWith('//') || /^[a-z][a-z0-9+.-]*:/i.test(candidate)
 }
 
@@ -241,8 +257,7 @@ export function carriesOrigin(path: string): boolean {
  * Exported so lukk-nuxt's `useLukkFetch` reuses the exact same guard.
  */
 export function isSameOrigin(base: string, path: string): boolean {
-  // eslint-disable-next-line no-control-regex -- C0 controls are exactly what the parser strips
-  const candidate = path.replace(/^[\u0000-\u0020]+/, '').replace(/\\/g, '/')
+  const candidate = canonical(path)
 
   // No scheme, but an authority follows: protocol-relative, so always a foreign origin.
   if (candidate.startsWith('//')) return false
