@@ -23,6 +23,23 @@ describe('the shared replaced-session store', () => {
     expect(await sessionEnded('a')).toBe(false)
   })
 
+  it('starts without a lukk runtime config at all', () => {
+    // A module registered before lukk's own config lands, or a stripped-down test app.
+    delete (__test.runtimeConfig as Record<string, unknown>).lukk
+    expect(runPlugin).not.toThrow()
+  })
+
+  it('reads only an expiry it wrote itself — anything else in the key is not "ended"', async () => {
+    // A string compares with `>` by coercion, so a foreign or re-serialised value in the mount would
+    // otherwise end every session it happens to name, for as long as its digits stay in the future.
+    ;(__test.runtimeConfig as Record<string, unknown>).lukk = { sharedStore: 'lukk-sessions' }
+    __test.storageMounts.add('lukk-sessions')
+    runPlugin()
+
+    await useStorage('lukk-sessions').setItem('ended:foreign', String(Date.now() + 60_000))
+    expect(await sessionEnded('foreign')).toBe(false)
+  })
+
   it('lets another instance see a session this one ended', async () => {
     ;(__test.runtimeConfig as Record<string, unknown>).lukk = { sharedStore: 'lukk-sessions' }
     __test.storageMounts.add('lukk-sessions')

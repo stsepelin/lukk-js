@@ -72,6 +72,34 @@ describe('finish-logout late check (BFF)', () => {
     expect(page.headers.get('vary')).toBe('cookie')
   })
 
+  it('beforeResponse leaves the caching headers alone for a request that ended no logout, or once they are out', async () => {
+    // `no-store` on every response would disable caching app-wide; after the headers are sent, writing
+    // them throws in h3 and would turn a finished response into an error.
+    const hooks = install()
+    const untouched = pageEvent(undefined)
+    const late = pageEvent(undefined, true)
+    ;(late.event.context as { lukkPerVisitor?: boolean }).lukkPerVisitor = true
+
+    await call(hooks, 'beforeResponse', untouched.event)
+    await call(hooks, 'beforeResponse', late.event)
+
+    for (const page of [untouched, late]) {
+      expect(page.headers.has('cache-control')).toBe(false)
+      expect(page.headers.has('vary')).toBe(false)
+    }
+  })
+
+  it('render:html tolerates an event with no context, like the proxy\'s own check', async () => {
+    // `withholdSignedOut` already does, and the app-API proxy relies on it; the render-time twin must
+    // not be the one that throws out of a finished render.
+    const hooks = install()
+    const page = pageEvent(undefined)
+    delete (page.event as { context?: unknown }).context
+
+    await expect(call(hooks, 'render:html', page.event)).resolves.toBeUndefined()
+    expect(page.headers.get('set-cookie')).toHaveLength(3)
+  })
+
   it.each(['beforeResponse', 'render:html'])('%s lets them go when nothing replaced it, for a response that finished no logout, and once the headers are out', async (name) => {
     const hooks = install()
     for (const page of [pageEvent(ended('S1')), pageEvent(ended(undefined)), pageEvent(undefined), pageEvent(ended('REPLACED'), true)]) {

@@ -72,14 +72,16 @@ export function markSessionEnded(key: string | undefined, now = Date.now()): voi
 }
 
 export function isSessionEnded(key: string | undefined, now = Date.now()): boolean {
+  // Stryker disable next-line ConditionalExpression: equivalent — `markSessionEnded` never stores an empty key, so the lookup below answers false for one anyway. Kept to name the case.
   if (!key) return false
   const expires = ended.get(key)
-  return expires !== undefined && expires > now
+  return (expires ?? 0) > now
 }
 
 // Flags on `globalThis` too, for the reason the record is: each server bundle has its own module copy,
 // and module-level flags reported an outage twice and backed off in one bundle only.
 interface RecordFlags { warned: boolean, storeFailureReported: boolean, storeDownUntil: number }
+// Stryker disable next-line ObjectLiteral: equivalent — every reader treats a missing flag as false and a missing time as 0.
 const flags: RecordFlags = ((globalThis as { __lukkEndedSessionFlags?: RecordFlags }).__lukkEndedSessionFlags ??= { warned: false, storeFailureReported: false, storeDownUntil: 0 })
 function warnSaturated(): void {
   if (flags.warned) return

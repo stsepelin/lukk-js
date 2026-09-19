@@ -23,11 +23,12 @@ const MAX_AGE_S = 60
  */
 const PLAUSIBLE_EPOCH_MS = 1_600_000_000_000
 
+// No `typeof document` guards below: on the server `document` is undeclared, and the ReferenceError lands in
+// the same `catch` that handles cookies being disabled — one path, not two.
 function write(name: string, value: string, maxAge: number): void {
-  if (typeof document === 'undefined') return
   const secure = name.startsWith('__Host-') ? '; Secure' : ''
   try { document.cookie = `${name}=${value}; Path=/; Max-Age=${maxAge}; SameSite=Strict${secure}` }
-  catch { /* cookies disabled: no note */ }
+  catch { /* no document, or cookies disabled: no note */ }
 }
 
 export function setLogoutCookie(name: string, at: number = Date.now()): void {
@@ -43,10 +44,10 @@ export function setLogoutCookie(name: string, at: number = Date.now()): void {
  * caller then falls back to its own clock, which is what every note did before.
  */
 export function logoutNoteAt(name: string, now = Date.now()): number | undefined {
-  if (typeof document === 'undefined') return undefined
   let raw: string | undefined
+  // Stryker disable next-line OptionalChaining: equivalent — without it a missing note throws inside this try, and `raw` stays undefined exactly as `?.` leaves it.
   try { raw = document.cookie.split(';').map(part => part.trim()).find(part => part.startsWith(`${name}=`))?.slice(name.length + 1) }
-  catch { return undefined }
+  catch { /* no document, or cookies disabled: `raw` stays undefined, and reads as no timestamp below */ }
   const at = Number(raw)
   // No tolerance ahead of now, for the same reason `signedInSince` has none: the write side clamps to the
   // present, so a future value is never one of ours. Unknown here is safe — the caller falls back to its
@@ -61,7 +62,6 @@ export function clearLogoutCookie(name: string): void {
 
 /** Is this cookie there — the pending note, or the server's signed-out answer to it? */
 export function hasLogoutCookie(name: string): boolean {
-  if (typeof document === 'undefined') return false
   try { return document.cookie.split(';').some(part => part.trim().startsWith(`${name}=`)) }
   catch { return false }
 }

@@ -79,6 +79,7 @@ export default defineEventHandler(async (event) => {
   const res = await finishOnce(event, key)
   // `?.()` as well: a runtime whose `Headers` predates `getSetCookie` would throw here, in middleware,
   // and 500 every page load rather than degrade to the browser finishing its own logout.
+  // Stryker disable next-line ArrayDeclaration: equivalent — any fallback that names neither cookie is inert below: it is not the note, so the logout reads as unfinished, and not the session, so nothing is forwarded.
   const forwarded = res?.headers.getSetCookie?.() ?? []
   // The proxy clears the note exactly when the session is over — not for a 401 it could still renew past,
   // nor when a renewal re-sealed it and the logout then failed.
@@ -117,14 +118,17 @@ const nameOf = (cookie: string) => cookie.slice(0, cookie.indexOf('='))
 export const FAILURE_LIMIT = 1_000
 
 function noteFailure(key: string, now = Date.now()): void {
+  // Out first, so re-noting a session already here does not count it against the limit: two requests
+  // sharing one failed logout (the single-flight) both land here, and on a full map the second would
+  // otherwise evict some other session to make room for one that was already in.
   failedUntil.delete(key)
-  // Bounded whatever the request rate: expired entries go first, then the oldest.
-  if (failedUntil.size >= FAILURE_LIMIT) {
-    for (const [held, until] of failedUntil) if (until <= now) failedUntil.delete(held)
-    for (const held of failedUntil.keys()) {
-      if (failedUntil.size < FAILURE_LIMIT) break
-      failedUntil.delete(held)
-    }
+  // Bounded whatever the request rate: expired entries go first, then the oldest. Pruned on every failure
+  // rather than only at the limit — at most a thousand entries, and it leaves no branch whose absence
+  // could only be seen through the size seam.
+  for (const [held, until] of failedUntil) if (until <= now) failedUntil.delete(held)
+  for (const held of failedUntil.keys()) {
+    if (failedUntil.size < FAILURE_LIMIT) break
+    failedUntil.delete(held)
   }
   failedUntil.set(key, now + RETRY_AFTER_FAILURE_MS)
 }

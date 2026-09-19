@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { acrossTabs, REFRESH_SETTLE_TIMEOUT, restoreState, TAB_LOCK_WAIT_MS } from '../src/runtime/utils/restore-state'
+import { acrossTabs, beginSession, REFRESH_SETTLE_TIMEOUT, restoreState, settle, signIn, TAB_LOCK_WAIT_MS } from '../src/runtime/utils/restore-state'
 
 /** A LockManager with the one behaviour that matters: an exclusive lock, queued, abortable while waiting. */
 function fakeLocks() {
@@ -150,5 +150,61 @@ describe('acrossTabs', () => {
 
     vi.stubGlobal('navigator', undefined)
     await expect(acrossTabs(tab(), async () => 'ran')).resolves.toBe('ran')
+  })
+})
+
+describe('restore-state leaves nothing running behind it', () => {
+  // Each of these timers is a cap on a wait that already ended. Left armed, every sign-in, refresh and
+  // logout parks another one on the event loop for the length of its cap.
+  it('settle disarms its cap once the promise answers', async () => {
+    vi.useFakeTimers()
+    await settle(Promise.resolve())
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('a granted tab lock disarms its wait cap, and its hold cap once released', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('navigator', { locks: fakeLocks() })
+
+    await acrossTabs(tab(), async () => {})
+
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('a lock request the browser refuses outright disarms its wait cap', async () => {
+    // Not only the timeout: `request` rejects at once where the lock manager is unavailable to the page.
+    vi.useFakeTimers()
+    vi.stubGlobal('navigator', { locks: { request: () => Promise.reject(new DOMException('denied', 'SecurityError')) } })
+
+    await acrossTabs(tab(), async () => {})
+
+    expect(vi.getTimerCount()).toBe(0)
+  })
+})
+
+describe('signIn and beginSession', () => {
+  it('releases the handover once the sign-in answered, so later refreshes do not wait on it', async () => {
+    const app = {}
+
+    await signIn(app, async () => 'answered', () => false)
+
+    expect(restoreState(app).handover).toBeNull()
+  })
+
+  it('starts a session on an app without $lukk, rather than throwing after the server issued it', async () => {
+    const app = {}
+
+    await expect(signIn(app, async () => 'tokens', () => true)).resolves.toEqual({ result: 'tokens', current: true })
+  })
+
+  it('only ever moves the session generation forward', () => {
+    // Generations are compared for equality, and other code moves them forward too: one that could step
+    // back would land on a generation already handed out, and a stale flight would read as current.
+    const app = {}
+    const before = restoreState(app).epoch
+
+    beginSession(app, Date.now())
+
+    expect(restoreState(app).epoch).toBeGreaterThan(before)
   })
 })
