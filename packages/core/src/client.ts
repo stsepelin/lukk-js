@@ -266,18 +266,21 @@ export function isSameOrigin(base: string, path: string): boolean {
   const candidate = canonical(path)
 
   // No scheme, but an authority follows: protocol-relative, so always a foreign origin.
-  // Stryker disable next-line ConditionalExpression: removing this early return is unobservable —
+  // Stryker disable next-line ConditionalExpression: removing this early return (`→ false`) is unobservable —
   // `carriesOrigin` also answers true for `//host`, and the `!/^https?:/i` test below then returns
   // false for the same input. The early return states the intent; it does not change the answer.
+  // Stryker cannot disable one variant of a node, so this also hides `→ true`, which "credential
+  // origin-scoping > attaches credentials to a same-origin absolute target" kills.
   if (candidate.startsWith('//')) return false
 
   // Anything else carrying a scheme must be http(s) AND match the base's origin. A non-http scheme
   // (`javascript:`, `data:`, `blob:`) is never same-origin, whatever the base.
   if (carriesOrigin(candidate)) {
-    // Stryker disable next-line Regex: unanchoring the BASE test is unobservable — a base that
-    // contains `https://` without starting with it is relative, and `new URL(base)` then throws into
-    // the catch below, which returns false exactly as this line would have.
-    if (!/^https?:/i.test(candidate) || !/^https?:\/\//i.test(base)) return false
+    if (!/^https?:/i.test(candidate)) return false
+    // Anchored, and it matters: the URL parser strips leading spaces and C0 controls, so an unanchored
+    // test let `' https://api.example'` through to `new URL(base)`, which then parses it — a base that
+    // should have been refused as malformed matched the target's origin instead.
+    if (!/^https?:\/\//i.test(base)) return false
     try { return new URL(candidate).origin === new URL(base).origin }
     catch { return false }
   }

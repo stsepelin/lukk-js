@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { carriesOrigin, createLukkClient, isSameOrigin, lukkError } from '../src/client'
 
 describe('lukkError', () => {
@@ -9,7 +9,14 @@ describe('lukkError', () => {
   })
 })
 
+// Every mocked response is built here, so this is where a runaway retry is stopped. A client that retries
+// without end (a broken retry guard) loops in microtasks alone — the event loop never turns, no test
+// timeout can fire, and the whole run freezes instead of failing. No test here needs more than a handful.
+let responses = 0
+beforeEach(() => { responses = 0 })
+
 function json(body: unknown, status = 200): Response {
+  if (++responses > 50) throw new Error('more than 50 responses in one test — a retry loop')
   return new Response(body === undefined ? '' : JSON.stringify(body), {
     status,
     headers: { 'content-type': 'application/json' },
@@ -376,6 +383,13 @@ describe('isSameOrigin canonicalises before deciding', () => {
       '/\\evil.com/steal',
     ])
       expect(isSameOrigin(base, path), path).toBe(false)
+  })
+
+  it('refuses a malformed BASE with leading whitespace or controls, even for a target it would parse to', () => {
+    // The parser would read `' https://api.example.com'` as that origin, so an unanchored base test
+    // matched it. A base like that is a misconfiguration; the answer to one is no credentials.
+    for (const bad of [' https://api.example.com/auth', '\thttps://api.example.com/auth', '\u0000https://api.example.com/auth'])
+      expect(isSameOrigin(bad, 'https://api.example.com/x'), JSON.stringify(bad)).toBe(false)
   })
 
   it('refuses a URL whose scheme is split by a tab, LF or CR — the parser removes them from ANYWHERE', () => {
