@@ -326,6 +326,17 @@ describe('session.client plugin — a logout the previous page never finished', 
       expect(announce).toHaveBeenCalledOnce()
     })
 
+    it('drops the note of a session already gone even when no other tab is listening', async () => {
+      vi.stubGlobal('sessionStorage', fakeStorage)
+      store.set('lukk:logging-out:/', JSON.stringify({ at: Date.now(), fid: 'F1' }))
+      restoresAs(undefined)
+
+      await run()
+
+      expect(store.has('lukk:logging-out:/')).toBe(false)
+      expect(useState<boolean>(READY_KEY, () => false).value).toBe(true)
+    })
+
     it('keeps the note when the restore couldn\'t tell (lukk unreachable), for the next load within its minute', async () => {
       vi.stubGlobal('sessionStorage', fakeStorage)
       store.set('lukk:logging-out:/', JSON.stringify({ at: Date.now(), fid: 'F1' }))
@@ -424,6 +435,46 @@ describe('session.client plugin — a logout the previous page never finished', 
       expect(logout).not.toHaveBeenCalled()
       expect(announce).toHaveBeenCalledOnce()
       expect(cookies.has('__Host-lukk-signed-out')).toBe(false)
+    })
+
+    it('reads no logout cookies in direct mode, even when some are configured', async () => {
+      // The cookie note belongs to the BFF's server; in direct mode the per-tab note is what counts.
+      __test.runtimeConfig.public.lukk = { mode: 'direct', logoutCookie: '__Host-lukk-logout', signedOutCookie: '__Host-lukk-signed-out' }
+      const { cookies } = jar({ '__Host-lukk-logout': String(Date.now()), '__Host-lukk-signed-out': '1' })
+      const announce = vi.fn()
+      restoreState(__test.nuxtApp).announce = announce
+
+      await run()
+
+      expect(logout).not.toHaveBeenCalled()
+      expect(announce).not.toHaveBeenCalled()
+      expect(cookies.has('__Host-lukk-signed-out')).toBe(true)
+      expect(initSession).toHaveBeenCalledOnce()
+    })
+
+    it('restores as usual when the signed-out answer is configured but not on this request', async () => {
+      __test.runtimeConfig.public.lukk = { mode: 'bff', logoutCookie: '__Host-lukk-logout', signedOutCookie: '__Host-lukk-signed-out' }
+      jar({ theme: 'dark' })
+      const announce = vi.fn()
+      restoreState(__test.nuxtApp).announce = announce
+
+      await run()
+
+      expect(announce).not.toHaveBeenCalled()
+      expect(initSession).toHaveBeenCalledOnce()
+    })
+
+    it('still resolves the session when no other tab is listening for the announcement', async () => {
+      // `announce` is wired by the client plugin only where tabs can talk (BroadcastChannel); without it
+      // the signed-out answer must still settle this page rather than throw out of the restore.
+      __test.runtimeConfig.public.lukk = { mode: 'bff', logoutCookie: '__Host-lukk-logout', signedOutCookie: '__Host-lukk-signed-out' }
+      const { cookies } = jar({ '__Host-lukk-signed-out': '1' })
+
+      await run()
+
+      expect(cookies.has('__Host-lukk-signed-out')).toBe(false)
+      expect(useState<boolean>(READY_KEY, () => false).value).toBe(true)
+      expect(initSession).not.toHaveBeenCalled()
     })
 
     it('restores as usual without the note cookie — a per-tab note isn\'t read in BFF mode', async () => {
@@ -569,7 +620,9 @@ describe('keeping abilities in step with a refreshed token', () => {
     const token = (sub: string) => `h.${Buffer.from(JSON.stringify({ sub })).toString('base64url')}.s`
     user.value = { abilities: ['orders.read'] }
     const { provide } = boot()
-    fetchUser.mockImplementation(async () => { await provide.lukkRefresh() })
+    // Capped here, so a broken guard fails this assertion instead of looping forever and freezing the run.
+    let depth = 0
+    fetchUser.mockImplementation(async () => { if (++depth < 5) await provide.lukkRefresh() })
     captured.client!.refreshTokens.mockResolvedValue({ access_token: token('A'), expires_in: 900 })
 
     await provide.lukkRefresh()

@@ -443,3 +443,144 @@ describe('session secret and user endpoint validation', () => {
     expect(() => setup({ baseURL: 'https://api.example.com/auth', mode: 'direct', user: { endpoint: 'https://api.example.com/me' } })).not.toThrow()
   })
 })
+
+describe('lukk-nuxt module — what it registers, and when it speaks up', () => {
+  const password = 'x'.repeat(32)
+  /** Every warning one setup prints. */
+  function warnings(overrides: Record<string, unknown>, nuxtOptions: Record<string, unknown> = {}): string[] {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      setup(overrides, nuxtOptions)
+      return warn.mock.calls.map(c => String(c[0]))
+    }
+    finally { warn.mockRestore() }
+  }
+  const says = (list: string[], fragment: string) => list.some(w => w.includes(fragment))
+
+  it('declares itself, and ships the documented defaults', () => {
+    const mod = lukkModule as unknown as { meta: unknown, defaults: unknown }
+    expect(mod.meta).toEqual({ name: 'lukk-nuxt', configKey: 'lukk', compatibility: { nuxt: '>=3.13.0' } })
+    expect(mod.defaults).toEqual({
+      baseURL: '',
+      mode: 'bff',
+      ssrHydrate: true,
+      confirmationHeader: 'X-Lukk-Confirmation',
+      storage: 'cookie',
+      user: { endpoint: '' },
+      session: { password: '' },
+      api: { path: '', target: '', forceJson: true, forwardSetCookie: [] },
+      clientIpHeader: '',
+    })
+  })
+
+  it('registers exactly its composables, server utils, route middleware, plugins and handlers', () => {
+    setup({ baseURL: 'https://api/auth', mode: 'bff', session: { password }, api: { path: '/api/', target: 'https://laravel.test' } })
+
+    expect(kit.addImportsDir.mock.calls).toEqual([['./runtime/composables']])
+    expect(kit.addServerImportsDir.mock.calls).toEqual([['./runtime/server/utils']])
+    expect(kit.addRouteMiddleware.mock.calls.map(c => c[0])).toEqual([
+      { name: 'lukk-auth', path: './runtime/middleware/auth' },
+      { name: 'lukk-guest', path: './runtime/middleware/guest' },
+      { name: 'lukk-verified', path: './runtime/middleware/verified' },
+      { name: 'lukk-confirmed', path: './runtime/middleware/confirmed' },
+    ])
+    expect(kit.addPlugin.mock.calls.map(c => c[0])).toEqual([
+      './runtime/plugins/client',
+      { src: './runtime/plugins/session.client', mode: 'client' },
+      { src: './runtime/plugins/session.server', mode: 'server' },
+    ])
+    expect(kit.addServerHandler.mock.calls.map(c => c[0])).toEqual([
+      { route: '/api/_lukk/**', handler: './runtime/server/bff' },
+      { middleware: true, handler: './runtime/server/finish-logout' },
+      { route: '/api/**', handler: './runtime/server/api-proxy' },
+    ])
+    expect(kit.addServerPlugin.mock.calls.map(c => c[0])).toEqual([
+      './runtime/server/plugins/streaming-render',
+      './runtime/server/plugins/finish-logout-render',
+      './runtime/server/plugins/shared-ended-sessions',
+    ])
+  })
+
+  it('types $lukk and $lukkRefresh on the NuxtApp', () => {
+    setup({ baseURL: 'https://api/auth', mode: 'bff' })
+    const template = kit.addTypeTemplate.mock.calls[0]![0] as { filename: string, getContents: () => string }
+
+    expect(template.filename).toBe('types/lukk-nuxt.d.ts')
+    expect(template.getContents()).toBe([
+      `import type { LukkClient, TokenPair } from 'lukk-core'`,
+      `declare module '#app' {`,
+      `  interface NuxtApp {`,
+      `    /** The lukk-core client, wired for the configured transport. */`,
+      `    $lukk: LukkClient`,
+      `    /** The shared single-flight refresh; \`null\` when the session can't be refreshed. */`,
+      `    $lukkRefresh: () => Promise<TokenPair | null>`,
+      `  }`,
+      `}`,
+      `export {}`,
+      ``,
+    ].join('\n'))
+  })
+
+  it('warns about a half-configured app-API proxy in bff mode only, and not when it is whole or absent', () => {
+    const half = '`api.path` and `api.target`'
+    expect(says(warnings({ baseURL: 'https://api/auth', mode: 'bff', session: { password }, api: { path: '/api' } }), half)).toBe(true)
+    expect(says(warnings({ baseURL: 'https://api/auth', mode: 'bff', session: { password }, api: { target: 'https://l.test' } }), half)).toBe(true)
+    expect(says(warnings({ baseURL: 'https://api/auth', mode: 'bff', session: { password }, api: { path: '/api', target: 'https://l.test' } }), half)).toBe(false)
+    expect(says(warnings({ baseURL: 'https://api/auth', mode: 'bff', session: { password } }), half)).toBe(false)
+    expect(says(warnings({ baseURL: 'https://api/auth', mode: 'direct', api: { path: '/api' } }), half)).toBe(false)
+  })
+
+  it('registers no app-API proxy when only half of it is configured', () => {
+    for (const api of [{ path: '/api' }, { target: 'https://l.test' }]) {
+      kit.addServerHandler.mockClear()
+      warnings({ baseURL: 'https://api/auth', mode: 'bff', session: { password }, api })
+      expect(kit.addServerHandler.mock.calls.map(c => (c[0] as { handler: string }).handler)).not.toContain('./runtime/server/api-proxy')
+    }
+  })
+
+  it('gates each mode-specific warning on its mode', () => {
+    // bff-only concerns stay quiet in direct mode, and the direct-only one in bff mode.
+    expect(says(warnings({ baseURL: 'https://api/auth', mode: 'direct', clientIpHeader: 'x-forwarded-for' }), 'append-style')).toBe(false)
+    expect(says(warnings({ baseURL: 'https://api/auth', mode: 'direct', session: { password: '', name: 'a b' } }), 'session.name')).toBe(false)
+    expect(says(warnings({ baseURL: 'https://api/auth', mode: 'bff', session: { password }, clientIpHeader: 'cf-connecting-ip' }), 'only applies in bff mode')).toBe(false)
+    expect(says(warnings({ baseURL: 'https://api/auth', mode: 'direct' }), 'only applies in bff mode')).toBe(false)
+    expect(says(warnings({ baseURL: 'https://api/auth', mode: 'direct' }), 'session secret')).toBe(false)
+  })
+
+  it('names the missing session secret, and an unset baseURL', () => {
+    const saved = process.env.NUXT_LUKK_SESSION_PASSWORD
+    delete process.env.NUXT_LUKK_SESSION_PASSWORD
+    try {
+      expect(warnings({ baseURL: 'https://api/auth', mode: 'bff' })).toContain('[lukk-nuxt] BFF mode needs a session secret (≥ 32 chars) — set `session.password` or NUXT_LUKK_SESSION_PASSWORD.')
+      expect(says(warnings({ baseURL: 'https://api/auth', mode: 'bff', session: { password } }), 'session secret')).toBe(false)
+    }
+    finally { if (saved !== undefined) process.env.NUXT_LUKK_SESSION_PASSWORD = saved }
+    expect(warnings({ baseURL: '', mode: 'direct' })).toContain('[lukk-nuxt] `baseURL` is not set — point it at your lukk auth URL.')
+  })
+
+  it('explains a short secret, a broken base and a base with a query, and names which setting', () => {
+    expect(() => setup({ baseURL: 'https://api/auth', mode: 'bff', session: { password: 'short' } })).toThrow(/the BFF equivalent of Laravel's APP_KEY/)
+    expect(() => setup({ baseURL: 'undefined/auth', mode: 'direct' })).toThrow(/^\[lukk-nuxt\] `baseURL` "undefined\/auth" is not a valid absolute URL\. It must start with http:\/\/ or https:\/\/, or be a root-relative path like "\/auth"\. A common cause is an unset build-time env var interpolating as "undefined" \(e\.g\. `\$\{process\.env\.API_URL\}\/auth`\)\. If you build once and supply the URL per environment, leave it empty and set NUXT_LUKK_BASE_URL at runtime instead\.$/)
+    // bff fetches the base server-side, where no relative form exists — so the message offers none.
+    expect(() => setup({ baseURL: 'undefined/auth', mode: 'bff', session: { password } })).toThrow(/It must start with http:\/\/ or https:\/\/\. A common cause/)
+    expect(() => setup({ baseURL: 'https://api/auth?x=1', mode: 'bff', session: { password } })).toThrow(/^\[lukk-nuxt\] `baseURL` "https:\/\/api\/auth\?x=1" carries a query or fragment\. The request path is appended after it, so every call would resolve to the wrong URL\. Use only the scheme, host and path\.$/)
+    expect(() => setup({ baseURL: 'https://api/auth', mode: 'bff', session: { password }, user: { endpoint: 'undefined/me' } })).toThrow(/`user\.endpoint` "undefined\/me"/)
+    expect(() => setup({ baseURL: 'https://api/auth', mode: 'bff', session: { password }, user: { endpoint: 'https://api/me' } })).toThrow(/it is fetched server-side with the sealed session cookie attached\./)
+  })
+
+  it('warns when the public config exposes the lukk URL in bff mode, never in direct mode', () => {
+    const exposed = (mode: string) => says(warnings({ baseURL: 'https://api/auth', mode, session: { password } }, { runtimeConfig: { public: { lukk: { baseURL: 'https://api/auth' } } } }), 'meant to stay server-side')
+    expect(exposed('bff')).toBe(true)
+    expect(exposed('direct')).toBe(false)
+  })
+
+  it.each([
+    'http://localhost:8000', 'http://app.localhost', 'http://127.0.0.1:8000', 'http://127.9.9.9', 'http://[::1]:8000', 'http://0.0.0.0:8000',
+  ])('warns that a production build points at this machine: %s', (base) => {
+    expect(says(warnings({ baseURL: base, mode: 'bff', session: { password } }), 'in a production build')).toBe(true)
+  })
+
+  it.each(['https://api.example.com', 'http://localhost.example.com', 'http://10.127.0.1', '/auth'])('does not call %s this machine', (base) => {
+    expect(says(warnings({ baseURL: base, mode: 'direct' }), 'in a production build')).toBe(false)
+  })
+})

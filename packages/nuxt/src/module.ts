@@ -38,6 +38,7 @@ function isLoopback(url: string): boolean {
     return hostname === 'localhost' || hostname.endsWith('.localhost')
       || /^127\./.test(hostname) || hostname === '[::1]' || hostname === '0.0.0.0'
   }
+  // Stryker disable next-line BlockStatement: equivalent — an emptied catch returns undefined, and the one caller tests truthiness.
   catch {
     return false
   }
@@ -49,6 +50,7 @@ function carriesQueryOrFragment(url: string): boolean {
     const { search, hash } = new URL(url)
     return !!search || !!hash
   }
+  // Stryker disable next-line BlockStatement: equivalent — an emptied catch returns undefined, and the one caller tests truthiness.
   catch {
     return false
   }

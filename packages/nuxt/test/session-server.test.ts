@@ -44,6 +44,11 @@ function app(o: { serverRendered?: boolean, prerenderedAt?: unknown, ssrContext?
 afterEach(() => { __test.reset(); loggedIn.value = false; vi.clearAllMocks() })
 
 describe('session.server (BFF SSR hydration)', () => {
+  it('runs after the client plugin, under its own name', () => {
+    // It hydrates through the client plugin's `$lukk` and the shared state that plugin sets up.
+    expect((serverPlugin as unknown as { meta: unknown }).meta).toEqual({ name: 'lukk:session-hydrate', dependsOn: ['lukk:client'] })
+  })
+
   it('checks the re-sealed session once more after the render, right before the response goes out', async () => {
     // The render takes a while and the cookie leaves with the page: a sign-in or logout during it would
     // otherwise have the old session written back over the new one.

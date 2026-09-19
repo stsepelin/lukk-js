@@ -21,8 +21,8 @@
     "configFile": "vitest.mutation.config.ts"
   },
   "thresholds": {
-    "high": 95,
-    "low": 90,
-    "break": 89
+    "high": 100,
+    "low": 100,
+    "break": 100
   }
 }

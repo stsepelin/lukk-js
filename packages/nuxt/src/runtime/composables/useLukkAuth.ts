@@ -140,6 +140,7 @@ export function useLukkAuth(): LukkAuth {
       // into `__NUXT_DATA__`. A challenge token is a live single-use credential, and at this point
       // in the flow no session cookie exists yet — so `no-store` never fires and a CDN may cache
       // the page with it embedded.
+      // Stryker disable next-line ConditionalExpression: the mutation run compiles the client, where this is `true` already; the server half is pinned in test/server-env/challenge.test.ts.
       if (import.meta.client) challenge.value = result.challenge_token
       return result
     }
@@ -161,6 +162,7 @@ export function useLukkAuth(): LukkAuth {
       return result
     }
     if (isTwoFactorChallenge(result)) {
+      // Stryker disable next-line ConditionalExpression: as in `login` — pinned by test/server-env/challenge.test.ts.
       if (import.meta.client) challenge.value = result.challenge_token
       return result
     }
@@ -296,6 +298,7 @@ export function useLukkAuth(): LukkAuth {
       // Then end the generation BEFORE sending: a restore, refresh, user load or sign-in still out must
       // not write its result after this.
       state.epoch++
+      // Stryker disable next-line UpdateOperator: equivalent — this is the only write, and it is compared only for equality, so a count that only ever falls never repeats either.
       state.logouts++
       // Unless the page already sent it on its way out.
       if (await claimSend()) await endSession(renewalFailed)
@@ -380,36 +383,40 @@ export function useLukkAuth(): LukkAuth {
   }
 
   /**
-   * `fetchUser`, reporting how it went — so a restore can tell "the user endpoint said you are signed
-   * out" from "the user endpoint failed". `fetchUser` keeps its `Promise<void>` signature.
+   * `fetchUser`, reporting whether the user endpoint could NOT be reached — so a restore can tell "the
+   * user endpoint said you are signed out" from "the user endpoint failed". Only that distinction is
+   * ever read, so it is the whole answer. `fetchUser` keeps its `Promise<void>` signature.
    */
-  async function loadUser(isCurrent: () => boolean): Promise<'loaded' | 'signed-out' | 'unavailable' | 'skipped' | 'stale'> {
-    if (!cfg.userEndpoint) return 'skipped'
+  async function loadUser(isCurrent: () => boolean): Promise<boolean> {
+    if (!cfg.userEndpoint) return false
     try {
       // userEndpoint is a full path; `baseURL: ''` keeps it as-is (in server-BFF the
       // request-aware transport resolves the relative endpoint in-process). `shapeUser`
       // auto-unwraps a Laravel `{ data: {...} }` API-Resource wrapper (configurable via `user.key`).
       const body = await api(cfg.userEndpoint, { baseURL: '' })
-      if (!isCurrent()) return 'stale'
+      // Stryker disable next-line BooleanLiteral: equivalent — a stale answer is never read: the caller re-checks `isCurrent()`, and a generation only moves on.
+      if (!isCurrent()) return false
       user.value = shapeUser(body, cfg.userKey || false)
       restoreFailedFlag.value = false
       state.subject = tokenSubject(access.value)
       // Dev-only: nudge the developer if the endpoint shape wasn't handled (no `id`, still wrapped).
+      // Stryker disable next-line ConditionalExpression: every test build defines `import.meta.dev` as true, and none compiles the production half — a development-only warning, whose regression would be console noise. Deliberately unpinned.
       if (import.meta.dev) {
         const warning = userShapeWarning(user.value)
         if (warning) console.warn(warning)
       }
-      return 'loaded'
+      return false
     }
     catch (e) {
       // Only an auth failure means "logged out". A transient 5xx/network error
       // must not flip `loggedIn` and bounce a logged-in user to /login.
-      if (!isAuthRejection(e)) return 'unavailable'
-      if (!isCurrent()) return 'stale'
+      if (!isAuthRejection(e)) return true
+      // Stryker disable next-line BooleanLiteral: equivalent — as above, a stale answer is never read.
+      if (!isCurrent()) return false
       user.value = null
       restoreFailedFlag.value = false
       state.subject = undefined
-      return 'signed-out'
+      return false
     }
   }
 
@@ -440,10 +447,10 @@ export function useLukkAuth(): LukkAuth {
       return
     }
 
-    const loaded = await loadUser(isCurrent)
+    const unavailable = await loadUser(isCurrent)
     // Set from the result, not only ever to `true`: a retry whose refresh succeeded on an app with no
-    // user endpoint (`skipped`) is a definitive answer and must clear an earlier failure.
-    if (isCurrent()) restoreFailedFlag.value = loaded === 'unavailable'
+    // user endpoint is a definitive answer and must clear an earlier failure.
+    if (isCurrent()) restoreFailedFlag.value = unavailable
   }
 
   /**
@@ -463,8 +470,10 @@ export function useLukkAuth(): LukkAuth {
    * development.
    */
   function whenReady(): Promise<void> {
+    // Stryker disable next-line ConditionalExpression,EqualityOperator,BooleanLiteral: the mutation run compiles the client, where this is `false` already; the server half is pinned in test/server-env/when-ready.test.ts.
     const isServer = import.meta.server === true
 
+    // Stryker disable next-line ConditionalExpression: every test build defines `import.meta.dev` as true, and none compiles the production half — a development-only warning, whose regression would be console noise. Deliberately unpinned.
     if (import.meta.dev) {
       if (isPrematureWait(ready.value, isServer, state.started)) {
         console.warn('[lukk-nuxt] whenReady() was called before the session-restore plugin started. Awaiting it in a plugin\'s setup can deadlock app startup — move that plugin to a `.client.ts` file with `dependsOn: [\'lukk:session-restore\']`. Depending on `lukk:client` is not enough.')
