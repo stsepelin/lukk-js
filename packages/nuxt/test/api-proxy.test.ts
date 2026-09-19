@@ -67,6 +67,8 @@ vi.mock('../src/runtime/server/revoke-dropped', () => ({ revokeDroppedSession: (
 import handler from '../src/runtime/server/api-proxy'
 // eslint-disable-next-line import/first
 import { endSession, forgetEndedSessions, markSessionEnded } from '../src/runtime/server/ended-sessions'
+// eslint-disable-next-line import/first
+import { confirmationHeaderName } from '../src/runtime/shared'
 
 /** A minimal JWT (header.payload.sig) carrying just the given claims — not signed. */
 function jwt(claims: Record<string, unknown>): string {
@@ -159,6 +161,24 @@ describe('app-API proxy', () => {
     sessionData = { access: 'tok', confirmation: 'server-ct' }
     await run(ev({ path: '/api/me', headers: { 'x-lukk-confirmation': 'forged-token' } }))
     expect(proxyRequest.mock.calls[0]![2]!.headers!['x-lukk-confirmation']).toBe('server-ct')
+  })
+
+  it('delivers the server-held step-up token under any configured name, even one this proxy writes itself', async () => {
+    // A step-up header named after a header this proxy sets or blanks passed validation, and the proxy
+    // then overwrote the token on every request: step-up silently stopped working through it. Driven
+    // from what the proxy ACTUALLY sends, so a header it starts writing later is covered with no edit.
+    sessionData = { access: 'tok', confirmation: 'server-ct' }
+    await run(ev({ path: '/api/me' }))
+    const written = Object.keys(proxyRequest.mock.calls[0]![2]!.headers!).filter(name => name !== 'x-lukk-confirmation')
+    expect(written.length).toBeGreaterThan(20)
+
+    for (const name of written) {
+      proxyRequest.mockClear()
+      ;(__test.runtimeConfig as Record<string, unknown>).public = { lukk: { confirmationHeader: name } }
+      await run(ev({ path: '/api/me' }))
+      const sent = proxyRequest.mock.calls[0]![2]!.headers!
+      expect(sent[confirmationHeaderName(name).toLowerCase()], name).toBe('server-ct')
+    }
   })
 
   it('blanks the sealed-session REQUEST header, under the exact name h3 would read it from', async () => {

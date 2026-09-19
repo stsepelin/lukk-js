@@ -148,6 +148,53 @@ describe('createLukkFetch — onRequest headers', () => {
     expect(ctx.options.credentials).toBe('same-origin')
   })
 
+  it('refuses a per-call baseURL that is not a primitive string, whatever it claims to be', async () => {
+    // ofetch applies any truthy base, and ufo resolves a boxed string to its host: read as "no base",
+    // `{ baseURL: new String('https://evil.example') }` passed the check and the bearer went there. Judging
+    // it by `String()` instead still failed open, because ufo coerces the same object with two different
+    // hints — so neither ignoring nor coercing is safe, and credentials stay home.
+    const { opts } = build({ baseURL: 'https://api.example.com', getBearer: () => 'SECRET' })
+    const api = 'https://api.example.com/v2'
+    const twoFaced = { [Symbol.toPrimitive]: (hint: string) => hint === 'string' ? api : 'https://evil.example', endsWith: (s: string) => api.endsWith(s) }
+
+    for (const base of [new String('https://evil.example'), new String(api), twoFaced]) {
+      const ctx = { request: '/me', options: { headers: new Headers(), baseURL: base } as unknown as { headers: Headers, credentials?: string } }
+      await opts.onRequest(ctx)
+      expect(ctx.options.headers.get('authorization')).toBeNull()
+      expect(ctx.options.credentials).toBe('same-origin')
+    }
+  })
+
+  it('treats a null per-call baseURL as none, the way ofetch does', async () => {
+    const { opts } = build({ baseURL: '/api', getBearer: () => 'SECRET' })
+    const ctx = { request: '/me', options: { headers: new Headers(), baseURL: null } as unknown as { headers: Headers, credentials?: string } }
+
+    await opts.onRequest(ctx)
+
+    expect(ctx.options.headers.get('authorization')).toBe('Bearer SECRET')
+  })
+
+  it('reads a plain-http API base as absolute — the app\'s origin never stands in for it', async () => {
+    // Local development runs the API on `http://`. Read as relative, the app's own origin became an
+    // accepted target and the bearer rode requests to the app's endpoints.
+    const { opts } = build({ baseURL: 'http://api.test', origin: 'http://app.test', getBearer: () => 'SECRET' })
+    const ctx = { request: 'http://app.test/track', options: { headers: new Headers() } as { headers: Headers, credentials?: string } }
+
+    await opts.onRequest(ctx)
+
+    expect(ctx.options.headers.get('authorization')).toBeNull()
+  })
+
+  it('reads a relative API base as relative even when its path contains a URL', async () => {
+    // The scheme test is anchored: only a base that STARTS with one names another origin.
+    const { opts } = build({ baseURL: '/relay/https://api.test', origin: 'https://app.test', getBearer: () => 'SECRET' })
+    const ctx = { request: 'https://app.test/relay/https://api.test/me', options: { headers: new Headers() } as { headers: Headers, credentials?: string } }
+
+    await opts.onRequest(ctx)
+
+    expect(ctx.options.headers.get('authorization')).toBe('Bearer SECRET')
+  })
+
   it('treats an EMPTY per-call baseURL as absent — it means "this path, as given"', async () => {
     // `loadUser` passes `{ baseURL: '' }` so a configured absolute `user.endpoint` is left alone. Read as
     // a relative base it was refused against an absolute API base, so every ordinary direct-mode app
@@ -261,6 +308,20 @@ describe('createLukkFetch — onResponse redirects', () => {
     expect(deps.onRedirect).not.toHaveBeenCalled()
   })
 
+  it.each([300, 399])('surfaces a %i — both edges of the redirect range', async (status) => {
+    const { opts, deps } = build()
+    await opts.onResponse({ response: { status, type: 'default', headers: new Headers({ location: '/login' }) } })
+    expect(deps.onRedirect).toHaveBeenCalledWith('/login')
+  })
+
+  it.each([200, 201, 400, 401])('never reports a Location on a %i as a redirect', async (status) => {
+    // `Location` is legal on a 201 (the created resource) and turns up on error pages; only a 3xx the
+    // client declined to follow is a redirect worth surfacing.
+    const { opts, deps } = build()
+    await opts.onResponse({ response: { status, type: 'default', headers: new Headers({ location: '/elsewhere' }) } })
+    expect(deps.onRedirect).not.toHaveBeenCalled()
+  })
+
   it('ignores a 3xx with no Location header', async () => {
     const { opts, deps } = build()
     await opts.onResponse({ response: { status: 302, type: 'default', headers: new Headers() } })
@@ -306,6 +367,14 @@ describe('createLukkFetch — onResponseError', () => {
   it('does not refresh a 401 once the retry budget is spent', async () => {
     const { opts, deps } = build({ canRefresh: true })
     await expect(opts.onResponseError(errCtx(401, {}, 0))).rejects.toMatchObject({ status: 401 })
+    expect(deps.refresh).not.toHaveBeenCalled()
+  })
+
+  it('does not refresh a 401 when the caller switched retries off', async () => {
+    // Refreshing there resolves the hook, ofetch declines to retry, and the call answers `undefined`
+    // instead of failing — a silent success on a request that was refused.
+    const { opts, deps } = build({ canRefresh: true })
+    await expect(opts.onResponseError(errCtx(401, {}, false))).rejects.toMatchObject({ status: 401 })
     expect(deps.refresh).not.toHaveBeenCalled()
   })
 

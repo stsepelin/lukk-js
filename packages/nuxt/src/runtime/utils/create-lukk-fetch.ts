@@ -26,6 +26,7 @@ export interface LukkFetchDeps {
 
 /** A 3xx that `redirect: 'manual'` left unfollowed (or a browser opaque redirect). */
 function redirectLocation(response: Response): string | null {
+  // Stryker disable next-line ConditionalExpression,StringLiteral: equivalent — an opaque-redirect filtered response has status 0 and an empty header list (Fetch §2.2.6), so the range test below already returns null. Kept to name the case.
   if (response.type === 'opaqueredirect') return null // browser hides the target
   if (response.status >= 300 && response.status < 400) return response.headers.get('location')
   return null
@@ -120,9 +121,21 @@ function targetIsOurs(deps: LukkFetchDeps, url: string, baseURL: unknown): boole
   // which `loadUser` passes so a configured absolute `user.endpoint` survives. Reading it as relative
   // refused the bearer on every direct-mode app whose API base is absolute — which is every ordinary
   // one — so login succeeded and the user then never loaded, burning a rotation per retry.
-  const declared = typeof baseURL === 'string' ? baseURL : undefined
-  const perCall = declared === '' ? undefined : declared
-  const known = (base: string | undefined, target: string) => base !== undefined && isSameOrigin(base, target)
+  //
+  // Any other truthy value is REFUSED — neither ignored nor judged by a coercion of our choosing. ofetch
+  // applies every truthy base, and ufo resolves a boxed `new String('https://evil.example')` to that
+  // host, so reading "not a string" as "no base" sent the bearer wherever the object pointed. Judging
+  // `String(baseURL)` was not enough either: ufo coerces the same object twice, with different hints
+  // (`endsWith` takes its `toString`, the `+` in `joinURL` its `valueOf`), so an object answering
+  // differently to each was cleared as the API and sent elsewhere. A falsy base (`''`, `null`) is
+  // ofetch's "none".
+  if (baseURL && typeof baseURL !== 'string') return false
+  const perCall = baseURL ? baseURL as string : undefined
+  const known = (base: string | undefined, target: string) => {
+    // Stryker disable next-line ConditionalExpression: equivalent — `isSameOrigin` refuses an absolute target against an undefined base (its `https?://` base test fails), and every relative target is already accepted by the API-base check this is OR-ed with. Its own line, so the comparison below stays under test.
+    if (base === undefined) return false
+    return isSameOrigin(base, target)
+  }
   const apiIsRelative = !/^https?:\/\//i.test(deps.baseURL)
   // This app's own origin stands in for the API's ONLY where the API base is the relative proxy mount:
   // there `isSameOrigin` refuses every absolute URL, and same-origin is exactly what the mount means.
