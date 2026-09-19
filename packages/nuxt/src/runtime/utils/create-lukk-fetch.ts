@@ -26,7 +26,7 @@ export interface LukkFetchDeps {
 
 /** A 3xx that `redirect: 'manual'` left unfollowed (or a browser opaque redirect). */
 function redirectLocation(response: Response): string | null {
-  // Stryker disable next-line ConditionalExpression,StringLiteral: equivalent — an opaque-redirect filtered response has status 0 and an empty header list (Fetch §2.2.6), so the range test below already returns null. Kept to name the case.
+  // Stryker disable next-line ConditionalExpression,StringLiteral: equivalent — an opaque-redirect filtered response has status 0 and an empty header list (Fetch §2.2.6), so the range test below already returns null. Kept to name the case. This also hides `→ true`, which "surfaces an unfollowed 3xx via onRedirect" kills.
   if (response.type === 'opaqueredirect') return null // browser hides the target
   if (response.status >= 300 && response.status < 400) return response.headers.get('location')
   return null
@@ -132,7 +132,7 @@ function targetIsOurs(deps: LukkFetchDeps, url: string, baseURL: unknown): boole
   if (baseURL && typeof baseURL !== 'string') return false
   const perCall = baseURL ? baseURL as string : undefined
   const known = (base: string | undefined, target: string) => {
-    // Stryker disable next-line ConditionalExpression: equivalent — `isSameOrigin` refuses an absolute target against an undefined base (its `https?://` base test fails), and every relative target is already accepted by the API-base check this is OR-ed with. Its own line, so the comparison below stays under test.
+    // Stryker disable next-line ConditionalExpression: equivalent — `isSameOrigin` refuses an absolute target against an undefined base (its `https?://` base test fails), and every relative target is already accepted by the API-base check this is OR-ed with. Its own line, so the comparison below stays under test. This also hides `→ true`, which "accepts an ABSOLUTE per-call baseURL (or URL) on this app's own origin" kills.
     if (base === undefined) return false
     return isSameOrigin(base, target)
   }

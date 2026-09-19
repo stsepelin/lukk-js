@@ -19,7 +19,7 @@ export function tokenFamily(jwt: unknown): string | undefined {
 
 function claim(jwt: unknown, name: 'sub' | 'fid'): string | undefined {
   const payload = typeof jwt === 'string' ? jwt.split('.')[1] : undefined
-  // Stryker disable next-line ConditionalExpression: equivalent — without it `payload.replace` throws inside the try, which returns undefined too. Kept so a missing segment is not decoded as an error path.
+  // Stryker disable next-line ConditionalExpression: equivalent — without it `payload.replace` throws inside the try, which returns undefined too. Kept so a missing segment is not decoded as an error path. This also hides `→ true`, which "records which account the loaded user belongs to, and forgets it on sign-out" kills.
   if (!payload) return undefined
 
   try {

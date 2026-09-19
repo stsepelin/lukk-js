@@ -125,9 +125,9 @@ export default defineEventHandler(async (event) => {
   return await proxyRequest(event, base + query, {
     streamRequest: true,
     // Never follow an upstream 3xx server-side — don't re-emit the injected bearer to a
-    // redirect host (CWE-918/200). undici returns an opaque response instead of following;
-    // onResponse turns that into a clean 502 (matching the BFF proxy) rather than the empty
-    // 200 h3 would otherwise sanitize a status-0 response into.
+    // redirect host (CWE-918/200). What comes back instead depends on the runtime: a browser-style
+    // opaque redirect (status 0), or — Node's undici, workerd, Deno — the real 3xx with its headers.
+    // onResponse turns either into a clean 502 (matching the BFF proxy).
     fetchOptions: { redirect: 'manual' },
     headers: {
       // FIRST, so a pathological `confirmationHeader` rename can never clobber a header set below.
@@ -171,11 +171,11 @@ export default defineEventHandler(async (event) => {
     async onResponse(ev, response) {
       // `sendProxy` copies the upstream's response headers — Set-Cookie included — BEFORE this
       // runs, so the strip and the rotated-cookie restore below must happen on every path. The
-      // 3xx branch used to return first: harmless on Node, where undici filters an opaque redirect
-      // down to zero headers, but on workerd/Deno `redirect: 'manual'` yields a real 3xx WITH
-      // headers — there the upstream's Set-Cookie (possibly a forged lukk session, defeating the
-      // guard below) reached the browser and a just-rotated session cookie was dropped, stranding
-      // it on a consumed refresh token.
+      // 3xx branch used to return first, and `redirect: 'manual'` yields a real 3xx WITH headers on
+      // Node (undici answers `type: 'basic'`, status 302, Location and Set-Cookie intact), workerd and
+      // Deno alike — so the upstream's Set-Cookie (possibly a forged lukk session, defeating the guard
+      // below) reached the browser and a just-rotated session cookie was dropped, stranding it on a
+      // consumed refresh token.
       const redirected = response.type === 'opaqueredirect' || (response.status >= 300 && response.status < 400)
 
       const upstream = toCookieArray(ev.node.res.getHeader('set-cookie'))

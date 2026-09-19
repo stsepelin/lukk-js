@@ -72,7 +72,7 @@ export function markSessionEnded(key: string | undefined, now = Date.now()): voi
 }
 
 export function isSessionEnded(key: string | undefined, now = Date.now()): boolean {
-  // Stryker disable next-line ConditionalExpression: equivalent — `markSessionEnded` never stores an empty key, so the lookup below answers false for one anyway. Kept to name the case.
+  // Stryker disable next-line ConditionalExpression: equivalent — `markSessionEnded` never stores an empty key, so the lookup below answers false for one anyway. Kept to name the case. This also hides `→ true`, which "remembers an ended session for the TTL, then forgets it" kills.
   if (!key) return false
   const expires = ended.get(key)
   return (expires ?? 0) > now
