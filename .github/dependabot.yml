@@ -27,6 +27,17 @@ updates:
         update-types: [version-update:semver-major]
       - dependency-name: '@vitest/coverage-v8'
         update-types: [version-update:semver-major]
+      # TypeScript 7 is the Go port, and it ships NO compiler API — 7.1 (stable 2026-11-24) is where
+      # that arrives. Until then three of our tools cannot run on it, any one of them fatal:
+      #   - `nuxi typecheck` → vue-tsc, which needs the TS 6 JS API (vuejs/language-tools#5381);
+      #   - typescript-eslint, whose peer is `>=4.8.4 <6.1.0` and which crashes inside
+      #     typescript-estree at import when forced — not gated on type-aware rules, which we do not
+      #     use (typescript-eslint#10940, work started 2026-09-11);
+      #   - unbuild → rollup-plugin-dts for lukk-core's .d.ts emit (peer `^5.9.2`, 13 months stale).
+      # Taken in a group bump it failed lint and held nine unrelated updates with it. Drop this entry
+      # when all three can run on 7 — watch microsoft/TypeScript#63703 for the 7.1 API.
+      - dependency-name: typescript
+        update-types: ['version-update:semver-major']
 
   - package-ecosystem: github-actions
     directory: /
