@@ -82,7 +82,10 @@ set_env LUKK_VERIFY_URL https://localhost:8443/verified
 ( cd "$APP_DIR" && php artisan optimize:clear >/dev/null && php artisan migrate:fresh --force >/dev/null && php artisan db:seed --force >/dev/null )
 
 echo "▶ booting the lukk API on 127.0.0.1:8000 ..."
-( cd "$APP_DIR" && php artisan serve --host=127.0.0.1 --port=8000 >"$RUN_DIR/api.log" 2>&1 ) &
+# `PHP_CLI_SERVER_WORKERS`: the built-in server is single-threaded, and these suites hold two
+# tabs open at once — a second request while one is in flight gets its socket closed, which the
+# proxy reports as "other side closed" and the test reads as a logout that never happened.
+( cd "$APP_DIR" && PHP_CLI_SERVER_WORKERS=4 php artisan serve --host=127.0.0.1 --port=8000 >"$RUN_DIR/api.log" 2>&1 ) &
 API_PID=$!
 up=""; for _ in $(seq 1 40); do curl -fsS http://127.0.0.1:8000/up >/dev/null 2>&1 && { up=1; break; }; sleep 0.25; done
 [ -n "$up" ] || { echo "✗ API did not come up — see $RUN_DIR/api.log"; exit 1; }

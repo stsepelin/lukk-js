@@ -78,7 +78,9 @@ jobs:
           LUKK_URL: http://127.0.0.1:8000/auth
           LUKK_COOKIE_MODE: ${{ matrix.cookie_mode }}
         run: |
-          (cd "$RUNNER_TEMP/lukk-fixture" && php artisan serve --host=127.0.0.1 --port=8000 &)
+          # Workers, because the built-in server is single-threaded: a second request while one is
+          # in flight gets its socket closed, which reads as a logout that never reached lukk.
+          (cd "$RUNNER_TEMP/lukk-fixture" && PHP_CLI_SERVER_WORKERS=4 php artisan serve --host=127.0.0.1 --port=8000 &)
           for i in $(seq 1 20); do curl -fsS http://127.0.0.1:8000/up >/dev/null 2>&1 && break; sleep 1; done
           pnpm --filter lukk-core test:conformance
 
