@@ -135,7 +135,18 @@ run_suite() {
   echo "▶ building the E2E app ($label) ..."
   pnpm -C "$dir" build || { SUMMARY="$SUMMARY\n  ✗ $label (build failed)"; RC=1; return; }
   echo "▶ running Playwright (BFF + SSR, same-origin, HTTPS) — $label ..."
-  if pnpm -C "$dir" exec playwright test; then SUMMARY="$SUMMARY\n  ✓ $label"; else SUMMARY="$SUMMARY\n  ✗ $label"; RC=1; fi
+  if pnpm -C "$dir" exec playwright test; then
+    SUMMARY="$SUMMARY\n  ✓ $label"
+  else
+    SUMMARY="$SUMMARY\n  ✗ $label"; RC=1
+    # What the API actually answered. Without this a CI-only failure is guesswork: the proxy logs
+    # "other side closed" for any dropped hop, which says nothing about lukk's own reply.
+    echo "── lukk API log (last 60 lines) ──"; tail -60 "$RUN_DIR/api.log" 2>/dev/null || echo "(none)"
+    for ctx in "$dir"/test-results/*/error-context.md; do
+      [ -f "$ctx" ] || continue
+      echo "── $(basename "$(dirname "$ctx")") ──"; head -40 "$ctx"
+    done
+  fi
 }
 
 if [ -z "$NUXT_VERSIONS" ]; then
