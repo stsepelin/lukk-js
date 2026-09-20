@@ -63,6 +63,7 @@ export function useLukkConfirmation() {
    * flip `confirmed`. Shared with the passkey step-up path.
    */
   function record(result: { confirmation_token?: string }): void {
+    /* v8 ignore next -- `import.meta.client` is a build-time constant; the unit build defines it true, so the other side is not code here. */
     if (import.meta.client && result.confirmation_token) token.value = result.confirmation_token
     confirmedFlag.value = true
   }
@@ -109,6 +110,10 @@ export function useLukkConfirmation() {
     return new Promise((resolve, reject) => {
       const stop = watch([confirmedFlag, required], ([ok, req]) => {
         // `confirmed` wins over `required` going false, so a concurrent retry can't cancel this one.
+        /* v8 ignore else -- exhaustive here: the watcher runs only when one of the flags CHANGES,
+           `withConfirmation` clears `confirmed` before it raises `required`, and every later change
+           is either a confirmation (ok) or a cancellation (!req). Falling through would need
+           `confirmed` to go true→false while `required` stayed true, which no path produces. */
         if (ok) { stop(); resolve() }
         else if (!req) { stop(); reject(unearnable ?? new Error('lukk: confirmation cancelled')) }
       })

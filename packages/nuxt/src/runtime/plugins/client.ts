@@ -36,6 +36,7 @@ export default defineNuxtPlugin({
     // The closures reference `client`, which only runs after assignment, so const is safe.
     const refresh = singleFlight(async () => {
       const pair = await client.refreshTokens()
+      /* v8 ignore next -- `import.meta.client` is a build-time constant; the unit build defines it true, so the other side is not code here. */
       if (import.meta.client) accessToken.value = pair.access_token
       return pair
     })
@@ -65,6 +66,7 @@ export default defineNuxtPlugin({
     // A throwing refresh means "not refreshable" → null (the documented contract).
     const safeRefresh = () => refresh()
       .then((pair) => {
+        /* v8 ignore next -- `import.meta.client` is a build-time constant; the unit build defines it true, so the other side is not code here. */
         if (import.meta.client) void resyncAbilities().catch(() => {})
         return pair
       })
@@ -80,6 +82,7 @@ export default defineNuxtPlugin({
       getAccessToken: () => accessToken.value,
       getConfirmationToken: () => confirmation.value,
       refresh: safeRefresh,
+      /* v8 ignore next -- `import.meta.client` is a build-time constant; the unit build defines it true, so the other side is not code here. */
       onTokens: (pair) => { if (import.meta.client) accessToken.value = pair.access_token },
       onUnauthenticated: () => { accessToken.value = null },
     })

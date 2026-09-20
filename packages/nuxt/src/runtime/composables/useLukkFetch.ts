@@ -36,6 +36,7 @@ export function useLukkFetch() {
     baseURL: cfg.apiBaseURL,
     isServer: import.meta.server === true,
     // Direct mode holds the token in client memory; SSR has none, so nothing to refresh.
+    /* v8 ignore next -- `import.meta.client` is a build-time constant; the unit build defines it true, so the other side is not code here. */
     canRefresh: isDirect && import.meta.client === true,
     getCookieHeader: () => cookie,
     getBearer: () => (isDirect ? access.value : null),
