@@ -634,6 +634,44 @@ describe('a sign-in or logout in another tab', () => {
     expect(channel.posted).toEqual(['changed', 'changed'])
   })
 
+  it('BFF: tells the other tabs a logout was asked for before sending it, not only once it lands', async () => {
+    // A page that navigates away as it logs out cancels the request, and with it everything after —
+    // including the announcement. The other tabs then went on showing the account until they reloaded.
+    // Announcing first is sound here because the note is a cookie: it rides the other tabs' own requests,
+    // and the server treats a request carrying it as signed out.
+    const onTheWire = deferred<void>()
+    api.mockRejectedValue({ status: 401 })
+    boot('bff', { logoutCookie: 'lukk-logout' })
+    const auth = useLukkAuth()
+    wire.client.logout = vi.fn(() => onTheWire.promise)
+
+    const out = auth.logout()
+    await macrotask()
+    expect(FakeChannel.instances[0]!.posted).toEqual(['changed'])
+
+    onTheWire.resolve()
+    await out
+    expect(FakeChannel.instances[0]!.posted).toEqual(['changed', 'changed'])
+  })
+
+  it('direct: waits for the logout to land — its note is no evidence to another tab', async () => {
+    // The note lives in this tab's `sessionStorage`, so another tab told early would renew from the
+    // shared cookie, succeed (the session is still live) and learn nothing — having rotated the refresh
+    // token this logout still has to send.
+    const onTheWire = deferred<void>()
+    boot()
+    const auth = useLukkAuth()
+    wire.client.logout = vi.fn(() => onTheWire.promise)
+
+    const out = auth.logout()
+    await macrotask()
+    expect(FakeChannel.instances[0]!.posted).toEqual([])
+
+    onTheWire.resolve()
+    await out
+    expect(FakeChannel.instances[0]!.posted).toEqual(['changed'])
+  })
+
   it('BFF: reloads the user, so the tab stops showing the account it loaded', async () => {
     // The browser's cookie now belongs to the other tab's session; a BFF tab holds no token to notice.
     api.mockResolvedValue({ id: 'B' })

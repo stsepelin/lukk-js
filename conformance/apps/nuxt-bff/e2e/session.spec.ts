@@ -74,6 +74,23 @@ test('the visitor\'s other tabs follow that logout', async ({ page, context }) =
   await expect(other.getByTestId('auth-state')).toHaveText('guest', { timeout: 10_000 })
 })
 
+test('the other tabs follow that logout even when the BFF answers before lukk does', async ({ page, context }) => {
+  // The BFF answers a logout without waiting for lukk, so the announcement can reach the other tab
+  // while the session is still being ended: that tab's check comes back with the account on its way
+  // out, and the tab went on showing an account nobody is signed in to. Only ever seen where the
+  // round trip is slow — CI, not a laptop — so the latency here is deliberate rather than incidental.
+  const user = await freshUser(page)
+  await login(page, user.email, user.password)
+  const other = await context.newPage()
+  await visit(other, '/')
+  await expect(other.getByTestId('auth-state')).toHaveText('authenticated')
+
+  lukk('ok', 800)
+  await page.getByTestId('logout-navigate').click()
+
+  await expect(other.getByTestId('auth-state')).toHaveText('guest', { timeout: 10_000 })
+})
+
 test('a tab that was away when the server finished the logout still hears about it', async ({ page, context }) => {
   // The other half of "other tabs follow": not the announcing tab's own logout, but a tab whose page
   // load is the one that finished it — it reads the server's signed-out answer and tells the rest.

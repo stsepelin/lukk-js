@@ -232,6 +232,19 @@ export function useLukkAuth(): LukkAuth {
     if (import.meta.client && finishing === undefined) {
       if (noteCookie) setLogoutCookie(noteCookie, askedAt)
       else notePendingLogout(state.scope, tokenFamily(access.value))
+      // Tell the other tabs NOW rather than only when this finishes. A page that navigates away as it
+      // logs out takes the request with it — the announcement in `endAndClear` never runs, and the other
+      // tabs went on showing the account for as long as they stayed open.
+      //
+      // BFF only, because there the note is a COOKIE: it rides the other tabs' next request, and every
+      // path that reads the session treats it as ended (`api-proxy`, `getLukkAccessToken`, `hydrate`), so
+      // a tab that re-checks from here on is answered signed out without lukk being asked at all. A
+      // logout that later stands down for a newer sign-in corrects itself: that sign-in announces too.
+      // Direct mode's note is per TAB (`sessionStorage`), so it is no evidence to another one: a follower
+      // would renew from the shared cookie, succeed — the session is still live at this point — and learn
+      // nothing, having rotated the refresh token the pending logout still has to send. It keeps hearing
+      // about a direct-mode logout when the logout itself lands.
+      if (noteCookie) state.announce?.()
     }
     const clearNote = () => noteCookie ? clearLogoutCookie(noteCookie) : clearPendingLogout(state.scope)
 
