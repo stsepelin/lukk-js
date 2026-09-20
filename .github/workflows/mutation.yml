@@ -8,10 +8,13 @@ name: mutation
 # a whole release depended on was reverted to the naive version it had been written to replace, and
 # 697 tests stayed green.
 #
-# PRs mutate only what they touch, so the answer arrives before merge. The full run is nightly.
+# The full run is NIGHTLY, and that is the gate. A PR can ask for the same check on the files it
+# touches by carrying the `mutation` label — minutes, not seconds, so it is opt-in rather than a toll
+# on every push.
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
   schedule:
     # 03:40 UTC, off the hour and after the PHP package's run, which uses the same shared runners.
     - cron: '40 3 * * *'
@@ -22,10 +25,10 @@ permissions:
 
 jobs:
   changed:
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'mutation')
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    name: Mutation score (changed files)
+    name: Mutation score (changed files, label `mutation`)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
