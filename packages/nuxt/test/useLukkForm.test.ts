@@ -458,3 +458,90 @@ describe('hostile validation bag', () => {
     expect(Object.keys(form.errors)).toEqual(['email'])
   })
 })
+
+describe('useLukkForm — gaps found by mutation testing', () => {
+  const bodyOf = () => api.mock.calls.at(-1)![1]!.body as FormData
+
+  it('starts not successful — neither just now nor recently', () => {
+    const form = useLukkForm({ a: 1 })
+    expect(form.wasSuccessful).toBe(false)
+    expect(form.recentlySuccessful).toBe(false)
+  })
+
+  it('never lets a field named __proto__ or constructor into the error bag', async () => {
+    // A 422 bag is parsed JSON, where `__proto__` is an ordinary own key. Assigned through Vue's reactive
+    // proxy it re-parents the bag; either name can only ever be an attempt, never a real field.
+    const form = useLukkForm({ email: '' })
+    // An OBJECT message is the dangerous one: a string assigned to `__proto__` is silently ignored, an
+    // object becomes the bag's prototype, and every field it names then reads as an error.
+    api.mockRejectedValueOnce({ status: 422, message: 'Invalid.', errors: JSON.parse('{"__proto__":[{"password":"inherited"}],"constructor":["y"],"email":["taken"]}') })
+
+    await expect(form.post('/x')).rejects.toMatchObject({ status: 422 })
+
+    expect({ ...form.errors }).toEqual({ email: 'taken' })
+    expect(Object.getPrototypeOf(form.errors)).toBe(Object.prototype)
+    expect((form.errors as Record<string, unknown>).password).toBeUndefined()
+    expect(Object.keys(form.errors)).toEqual(['email'])
+  })
+
+  it('restores an array field as an array', () => {
+    const form = useLukkForm({ tags: ['a', 'b'] })
+    form.data.tags.push('c')
+    form.reset()
+    expect(Array.isArray(form.data.tags)).toBe(true)
+    expect(form.data.tags).toEqual(['a', 'b'])
+  })
+
+  it('ignores a reset of a field the form does not have', () => {
+    const form = useLukkForm({ a: 1 })
+    form.reset('nope' as never)
+    expect(Object.keys(form.data)).toEqual(['a'])
+  })
+
+  it('switches to multipart when ANY item of a list is a file, keeping the file\'s name', async () => {
+    const form = useLukkForm({ docs: [new File(['x'], 'scan.pdf'), 'note'] as unknown[] })
+    await form.post('/upload')
+    const body = bodyOf()
+    expect(body).toBeInstanceOf(FormData)
+    expect((body.get('docs[0]') as File).name).toBe('scan.pdf')
+    expect(body.get('docs[1]')).toBe('note')
+  })
+
+  it('sends null and undefined fields as empty strings in multipart, and handles null in a plain body', async () => {
+    const form = useLukkForm({ file: new File(['x'], 'a.txt'), gone: null as string | null, unset: undefined as string | undefined })
+    await form.post('/upload')
+    expect(bodyOf().get('gone')).toBe('')
+    expect(bodyOf().get('unset')).toBe('')
+
+    const plain = useLukkForm({ name: 'x', middle: null as string | null })
+    await plain.post('/plain')
+    expect(api.mock.calls.at(-1)![1]!.body).toEqual({ name: 'x', middle: null })
+  })
+
+  it('does nothing when cancelled before anything was sent', () => {
+    expect(() => useLukkForm({ a: 1 }).cancel()).not.toThrow()
+  })
+
+  it('is not "recently successful" while a later submit is still out', async () => {
+    const form = useLukkForm({ a: 1 })
+    await form.post('/x')
+    expect(form.recentlySuccessful).toBe(true)
+
+    api.mockImplementationOnce(() => new Promise(() => {}))
+    void form.post('/x')
+    expect(form.recentlySuccessful).toBe(false)
+  })
+
+  it('restarts the "recently successful" window on each success', async () => {
+    vi.useFakeTimers()
+    try {
+      const form = useLukkForm({ a: 1 }, { recentlySuccessfulMs: 1000 })
+      await form.post('/x')
+      await vi.advanceTimersByTimeAsync(600)
+      await form.post('/x')
+      await vi.advanceTimersByTimeAsync(600) // past the FIRST window, inside the second
+      expect(form.recentlySuccessful).toBe(true)
+    }
+    finally { vi.useRealTimers() }
+  })
+})

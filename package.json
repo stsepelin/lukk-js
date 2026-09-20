@@ -10,17 +10,20 @@
   },
   "scripts": {
     "build": "pnpm -r --filter \"./packages/*\" build",
-    "test": "pnpm -r --filter \"./packages/*\" test",
+    "test": "pnpm --filter lukk-core build && pnpm -r --filter \"./packages/*\" test",
     "test:conformance": "pnpm -r --filter \"./packages/*\" test:conformance",
     "typecheck": "pnpm -r --filter \"./packages/*\" typecheck",
     "lint": "eslint .",
     "dev": "pnpm --filter lukk-nuxt dev",
     "changeset": "changeset",
-    "release": "pnpm build && changeset publish"
+    "release": "pnpm build && changeset publish",
+    "test:mutation": "pnpm -r test:mutation"
   },
   "devDependencies": {
     "@changesets/cli": "^3.0.3",
     "@nuxt/eslint-config": "^1.17.0",
+    "@stryker-mutator/core": "^10.0.0",
+    "@stryker-mutator/vitest-runner": "^10.0.0",
     "eslint": "^10.11.0",
     "typescript": "^5.9.3"
   },

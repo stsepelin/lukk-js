@@ -34,6 +34,19 @@ describe('useLukkFetch', () => {
     expect(d.getCookieHeader()).toBeUndefined() // client (import.meta.server=false)
   })
 
+  it('reports this app\'s origin, and nothing where there is no request to read it from', () => {
+    __test.runtimeConfig.public.lukk = { mode: 'bff', apiBaseURL: '/api' }
+    __test.requestURL = 'https://app.test/dashboard'
+    useLukkFetch()
+    expect(deps().origin).toBe('https://app.test')
+
+    // Outside a request, `useRequestURL` throws — the origin is simply unknown, and an absolute per-call
+    // `baseURL` then stays refused rather than being cleared against a guess.
+    __test.requestURL = 'not a url'
+    useLukkFetch()
+    expect(vi.mocked(createLukkFetch).mock.calls.at(-1)![0].origin).toBeUndefined()
+  })
+
   it('direct: canRefresh on the client, bearer from the access state', () => {
     __test.runtimeConfig.public.lukk = { mode: 'direct', apiBaseURL: 'https://api.example.com' }
     useState<string | null>(ACCESS_KEY, () => null).value = 'tok'
@@ -46,9 +59,15 @@ describe('useLukkFetch', () => {
 
   it('captures the request cookie eagerly (from useRequestHeaders)', () => {
     __test.runtimeConfig.public.lukk = { mode: 'bff', apiBaseURL: '/api' }
-    __test.requestHeaders = { cookie: '__Host-lukk-session=sealed' }
+    __test.requestHeaders = { cookie: '__Host-lukk-session=sealed', authorization: 'Bearer forged' }
     useLukkFetch()
     expect(deps().getCookieHeader()).toBe('__Host-lukk-session=sealed')
+  })
+
+  it('knows it is running in the browser', () => {
+    __test.runtimeConfig.public.lukk = { mode: 'direct', apiBaseURL: 'https://api.example.com' }
+    useLukkFetch()
+    expect(deps().isServer).toBe(false)
   })
 
   it('refresh delegates to $lukkRefresh, and resolves null when absent', async () => {

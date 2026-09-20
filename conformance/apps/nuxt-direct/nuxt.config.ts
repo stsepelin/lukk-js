@@ -11,7 +11,13 @@ export default defineNuxtConfig({
   compatibilityDate: '2025-01-01',
 
   lukk: {
-    baseURL: '/auth', // same-origin path under the unified proxy origin
+    // Same origin either way — the anti-leak invariant requires it — but the two SHAPES take different
+    // paths through the credential rule: a relative base makes `apiBaseURL` relative, an absolute one
+    // (what `docs/configuration.md` shows, and what an app with lukk on its own host writes) makes it
+    // absolute. Only the absolute shape reaches the check that judges `loadUser`'s empty per-call base,
+    // and while every direct topology here was relative, a bug that broke user loading outright on every
+    // ordinary direct install passed the whole suite. The runner builds each mode with one of the two.
+    baseURL: process.env.E2E_LUKK_BASE_URL || '/auth',
     mode: 'direct',
     user: { endpoint: '/user' }, // same-origin; the bearer is attached client-side
   },

@@ -4,6 +4,9 @@ dist/
 .output/
 .data/
 coverage/
+conformance/.matrix/
+test-results/
+playwright-report/
 *.log
 .DS_Store
 .env
@@ -14,3 +17,10 @@ coverage/
 docs/.vitepress/cache/
 docs/.vitepress/dist/
 conformance/.matrix/
+
+# Stryker copies the project into a sandbox to instrument it. Those copies are real .ts files, so
+# both git and vitest will pick them up unless told not to — a stale sandbox means the suite runs a
+# MUTATED second copy of itself, which fails in ways that look like the real tests breaking.
+.stryker-tmp/
+# Where Stryker writes its html/json reports when asked for them.
+**/reports/mutation/

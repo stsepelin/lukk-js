@@ -1,6 +1,6 @@
 import { isSameOrigin } from 'lukk-core'
-import { ofetch } from 'ofetch'
-import { navigateTo, useNuxtApp, useRequestFetch, useRequestHeaders, useRuntimeConfig, useState } from '#imports'
+import { type $Fetch, ofetch } from 'ofetch'
+import { navigateTo, useNuxtApp, useRequestFetch, useRequestHeaders, useRequestURL, useRuntimeConfig, useState } from '#imports'
 import { ACCESS_KEY } from '../keys'
 import { createLukkFetch, createRequestFetch, type LukkFetchDeps, type RequestFetch } from '../utils/create-lukk-fetch'
 
@@ -23,22 +23,31 @@ interface PublicLukk {
  * Always JSON, `redirect: 'manual'`, and rejects with a typed `LukkError`.
  * In a server route, pair with `getLukkAccessToken(event)` instead.
  */
-export function useLukkFetch() {
+export function useLukkFetch(): $Fetch {
   const cfg = useRuntimeConfig().public.lukk as PublicLukk
+  // Stryker disable next-line ArrowFunction: equivalent — the bearer is attached only when truthy, so undefined and null read alike.
   const access = useState<string | null>(ACCESS_KEY, () => null)
   const nuxtApp = useNuxtApp() as { $lukkRefresh?: () => Promise<unknown> }
   const isDirect = cfg.mode === 'direct'
   // Capture the request cookie eagerly, in valid Nuxt context — reading it lazily inside
   // ofetch's interceptor can lose the SSR async context (empty on the client).
   const cookie = useRequestHeaders(['cookie']).cookie
+  // Read here, in valid Nuxt context, for the same reason the cookie is.
+  const requestOrigin = (): string | undefined => {
+    try { return useRequestURL().origin }
+    // Stryker disable next-line BlockStatement: equivalent — an emptied catch returns undefined too.
+    catch { return undefined }
+  }
 
   const deps: LukkFetchDeps = {
     baseURL: cfg.apiBaseURL,
+    // Stryker disable next-line ConditionalExpression: the mutation run compiles the client, where this is `false` already; the server half is pinned in test/server-env/use-lukk-fetch.test.ts.
     isServer: import.meta.server === true,
     // Direct mode holds the token in client memory; SSR has none, so nothing to refresh.
-    /* v8 ignore next -- `import.meta.client` is a build-time constant; the unit build defines it true, so the other side is not code here. */
+    // Stryker disable next-line ConditionalExpression: the `import.meta.client` operand is `true` in the client compile the mutation run uses, so its `→ true` mutant cannot differ here; the server half is pinned in test/server-env/use-lukk-fetch.test.ts. Stryker cannot disable one variant of a node, so this also hides `canRefresh: true`, which the client test "BFF: baseURL from apiBaseURL, no bearer, no client-side refresh" kills.
     canRefresh: isDirect && import.meta.client === true,
     getCookieHeader: () => cookie,
+    origin: requestOrigin(),
     getBearer: () => (isDirect ? access.value : null),
     refresh: () => nuxtApp.$lukkRefresh?.() ?? Promise.resolve(null),
     // `external: true` opts out of Nuxt's absolute-URL block, so contain it ourselves: only follow
@@ -54,10 +63,11 @@ export function useLukkFetch() {
   // request-aware fetch, which resolves the relative URL in-process (no network egress,
   // no Host dependency) and forwards the session cookie to our own proxy.
   // Server-only glue; the routing itself is covered by createRequestFetch's tests.
-  /* v8 ignore next 3 */
-  if (import.meta.server === true && cfg.mode === 'bff') {
-    return createRequestFetch(useRequestFetch() as unknown as RequestFetch, deps)
-  }
+  // Stryker disable next-line ConditionalExpression: `import.meta.server` is `false` in the client compile the mutation run uses, so the `→ true` mutant cannot differ here; the server half is pinned in test/server-env/use-lukk-fetch.test.ts. This also hides the `→ false` variant, which every BFF-mode client test kills.
+  if (import.meta.server !== true) return createLukkFetch(deps)
 
-  return createLukkFetch(deps)
+  // Reached only in a server compile: measured by test/server-env/use-lukk-fetch.test.ts, never by the client-only mutation run.
+  /* v8 ignore next 2 */
+  // Stryker disable next-line all: unreachable in the client compile — see above.
+  return cfg.mode === 'bff' ? createRequestFetch(useRequestFetch() as unknown as RequestFetch, deps) : createLukkFetch(deps)
 }

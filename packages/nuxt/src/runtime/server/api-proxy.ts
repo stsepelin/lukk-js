@@ -1,8 +1,11 @@
 import { defineEventHandler, getRequestHeader, proxyRequest, setResponseStatus, useSession } from 'h3'
 import { useRuntimeConfig } from '#imports'
-import { LUKK_BFF_PREFIX, confirmationHeaderName, isSessionCookieName, sessionCookieName } from '../shared'
+import { LUKK_BFF_PREFIX, confirmationHeaderName, isSessionCookieName, sessionCookieName, signedOutCookieName } from '../shared'
 import { accessExpired } from './access-token'
 import { hopByHopHeaders, isForeignOrigin, reportProxyFailure, rejectUnresolvedTarget, resolveTarget, SPOOFABLE_FORWARDING, viaHeader, visitorIp } from './proxy-utils'
+import { sessionEnded, sessionKey } from './ended-sessions'
+import { logoutNoted, withholdSignedOut } from './logout-note'
+import { revokeDroppedSession } from './revoke-dropped'
 import { readSealedSession } from './sealed-session'
 import { refreshOnce, type TokenSession } from './utils/refresh'
 
@@ -26,6 +29,7 @@ export default defineEventHandler(async (event) => {
     cookieNamespace?: string
     clientIpHeader?: string
   }
+  // Stryker disable next-line ArrayDeclaration: the list is only read as `.length` and `.includes(name)`, so a placeholder entry changes nothing unless an upstream sets a cookie named after Stryker's own sentinel.
   const forwardSetCookie = apiForwardSetCookie ?? []
   // Resolved through the shared guard: a post-build runtime override could otherwise name an
   // invalid or proxy-owned header and break every request here (see `confirmationHeaderName`).
@@ -58,6 +62,7 @@ export default defineEventHandler(async (event) => {
   }
 
   // Subpath after the mount, contained to the fixed target by `resolveTarget`.
+  // Stryker disable next-line StringLiteral: `resolveTarget` strips a leading `/` from the subpath, so '/' and '' build the identical URL — and its other use, the escape log, is unreachable for a subpath that cannot escape.
   const subpath = path.slice(apiPath.length) || '/'
   const base = resolveTarget(apiTarget, subpath)
   if (!base) return rejectUnresolvedTarget(event, apiTarget, 'lukk `api.target`', subpath)
@@ -67,8 +72,13 @@ export default defineEventHandler(async (event) => {
   // which then collides with the streamed response). Only when the injected access
   // token has actually lapsed do we open the read-write session to rotate — and there
   // the seal is valid, so its id is restored (no re-mint).
-  const sealed = await readSealedSession(event, sessionPassword, sessionName)
+  // Not while a logout the browser noted is being finished (see `finish-logout`): the visitor asked to be
+  // signed out, and a page rendering right now must not show that account's data.
+  const sealed = logoutNoted(event, secure, cookieNamespace) ? {} : await readSealedSession(event, sessionPassword, sessionName)
   let access = sealed.access
+  // Set when this request re-seals the session, so the response can check it again at the last moment.
+  let resealed: (() => Promise<boolean>) | null = null
+  let rotatedRefresh: string | undefined
   if (access && sealed.refresh && accessExpired(access)) {
     const session = await useSession<TokenSession>(event, {
       password: sessionPassword,
@@ -83,10 +93,20 @@ export default defineEventHandler(async (event) => {
     // Proactive refresh: rotate ONCE (shared single-flight with the BFF proxy) so a
     // streamed request isn't spent on a guaranteed 401. A revoked session still
     // surfaces naturally: the refresh fails → null → the stale bearer → upstream 401.
-    const { pair } = await refreshOnce(session, baseURL, clientIp)
-    if (pair) {
+    //
+    // Not for a session a sign-in replaced or a logout ended while this request was out: re-sealing it
+    // would put the previous session back in the browser. The stale bearer then 401s upstream.
+    const ended = () => sessionEnded(sessionKey(session))
+    // Stryker disable next-line ObjectLiteral: `pair` is read only for truthiness on this path, and an absent key is as falsy as `null`.
+    const { pair } = await ended() ? { pair: null } : await refreshOnce(session, baseURL, clientIp)
+    if (pair && !(await ended())) {
       await session.update(pair)
       access = pair.access
+      rotatedRefresh = pair.refresh
+      resealed = ended
+    }
+    else if (pair) {
+      revokeDroppedSession(event, pair, baseURL, clientIp)
     }
   }
   // Carry any Set-Cookie h3 queued (the rotated session, on a refresh) through the
@@ -105,9 +125,9 @@ export default defineEventHandler(async (event) => {
   return await proxyRequest(event, base + query, {
     streamRequest: true,
     // Never follow an upstream 3xx server-side — don't re-emit the injected bearer to a
-    // redirect host (CWE-918/200). undici returns an opaque response instead of following;
-    // onResponse turns that into a clean 502 (matching the BFF proxy) rather than the empty
-    // 200 h3 would otherwise sanitize a status-0 response into.
+    // redirect host (CWE-918/200). What comes back instead depends on the runtime: a browser-style
+    // opaque redirect (status 0), or — Node's undici, workerd, Deno — the real 3xx with its headers.
+    // onResponse turns either into a clean 502 (matching the BFF proxy).
     fetchOptions: { redirect: 'manual' },
     headers: {
       // FIRST, so a pathological `confirmationHeader` rename can never clobber a header set below.
@@ -139,26 +159,48 @@ export default defineEventHandler(async (event) => {
       // Last, so it can blank anything the client named in `Connection` (RFC 9110 §7.6.1) — but
       // never the headers this proxy sets itself, or a client could use `Connection` to strip its
       // own `authorization` and the step-up token on the way through.
+      // Stryker disable next-line StringLiteral: `'cookie'` is inert in this list — the bag already
+      // set `cookie: ''` above, so blanking it writes the identical value under the identical key,
+      // and no input can tell the two apart. (Line-granular, so the other five names are ignored
+      // with it; each stays pinned by the Connection-strip test, which asserts that the value this
+      // proxy set still reaches the upstream when the client names that header in `Connection`.)
       ...hopByHopHeaders(event, ['authorization', 'cookie', 'x-forwarded-for', 'via', 'accept', 'content-type', confirmationHeader]),
     },
     // Not a cookie/cache passthrough: strip upstream Set-Cookie, restore the rotated session,
     // and (opt-in) re-emit only allow-listed app-API cookies. Keep it out of shared caches.
-    onResponse(ev, response) {
+    async onResponse(ev, response) {
       // `sendProxy` copies the upstream's response headers — Set-Cookie included — BEFORE this
       // runs, so the strip and the rotated-cookie restore below must happen on every path. The
-      // 3xx branch used to return first: harmless on Node, where undici filters an opaque redirect
-      // down to zero headers, but on workerd/Deno `redirect: 'manual'` yields a real 3xx WITH
-      // headers — there the upstream's Set-Cookie (possibly a forged lukk session, defeating the
-      // guard below) reached the browser and a just-rotated session cookie was dropped, stranding
-      // it on a consumed refresh token.
+      // 3xx branch used to return first, and `redirect: 'manual'` yields a real 3xx WITH headers on
+      // Node (undici answers `type: 'basic'`, status 302, Location and Set-Cookie intact), workerd and
+      // Deno alike — so the upstream's Set-Cookie (possibly a forged lukk session, defeating the guard
+      // below) reached the browser and a just-rotated session cookie was dropped, stranding it on a
+      // consumed refresh token.
       const redirected = response.type === 'opaqueredirect' || (response.status >= 300 && response.status < 400)
 
       const upstream = toCookieArray(ev.node.res.getHeader('set-cookie'))
       ev.node.res.removeHeader('set-cookie')
-      const keep = toCookieArray(sessionCookie) // the rotated session cookie (if any)
+      // The rotated session cookie (if any) — unless a sign-in or logout ended that session while the
+      // upstream was answering. This is the last point before the headers go out.
+      const replaced = (await resealed?.()) === true
+      if (replaced) revokeDroppedSession(event, { access, refresh: rotatedRefresh }, baseURL, clientIp)
+      // Nor the signed-out cookie a logout this request finished queued (see `finish-logout`), if a sign-in
+      // replaced that session while the upstream was answering.
+      // Both cookies, not just the marker: the queue may also hold a session the logout's renewal
+      // re-sealed, and this response is finalised after the upstream answered — late enough to land over
+      // the sign-in that replaced it and put the browser back on the previous account.
+      const ours = [signedOutCookieName(secure, cookieNamespace), sessionName]
+      const dropLogoutCookies = await withholdSignedOut(event)
+      const keep = replaced
+        ? []
+        : toCookieArray(sessionCookie).filter(cookie => !dropLogoutCookies || !ours.includes(cookieName(cookie)))
       // Opt-in passthrough: forward only allow-listed names — and NEVER a lukk sealed session
       // cookie (this app's OR a co-hosted app's, whatever the list says); an upstream must not be
       // able to set/overwrite any lukk session.
+      // Stryker disable next-line ConditionalExpression: with no allow-list `includes(name)` is false
+      // for every name, so the loop is already a no-op — this guard is a fast path, not a rule, and
+      // dropping it cannot change what is forwarded. (Line-granular, so the `false` direction is
+      // ignored with it; it stays pinned by the allow-list test, which needs this block to run.)
       if (forwardSetCookie.length) {
         for (const cookie of upstream) {
           const name = cookieName(cookie)
@@ -193,5 +235,6 @@ function toCookieArray(value: number | string | string[] | undefined): string[] 
 /** The cookie name from a `Set-Cookie` string (the part before the first `=`). */
 function cookieName(setCookie: string): string {
   const eq = setCookie.indexOf('=')
+  // Stryker disable next-line StringLiteral: the name is only matched against lukk's own cookie names, `isSessionCookieName`, and the allow-list — a nameless cookie and a sentinel are both "no match" unless the allow-list literally contains the empty string.
   return eq === -1 ? '' : setCookie.slice(0, eq).trim()
 }

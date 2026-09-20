@@ -33,24 +33,30 @@ export interface UseLukkFormOptions {
   rememberKey?: string
 }
 
-/** The reactive form returned by {@link useLukkForm}. Every mutator returns the form for chaining. */
+/**
+ * The reactive form returned by {@link useLukkForm}. Every mutator returns the form for chaining.
+ *
+ * Declared rather than inferred, like every composable's return type — the module build cannot resolve
+ * `#imports`. Derived and submit-owned state is `readonly`: writing a computed through the reactive form
+ * fails at runtime, and replacing `data` would detach it from what `submit` sends (mutate its fields).
+ */
 export interface LukkForm<T extends FormFields> {
   /** The live, editable fields — bind with `v-model="form.data.x"`. */
-  data: T
+  readonly data: T
   /** First validation message per field, from the last `422`. */
   errors: FormErrors<T>
   /** `errors` with Laravel's dotted keys (`address.street`) expanded into a nested object. */
-  nestedErrors: Record<string, unknown>
+  readonly nestedErrors: Record<string, unknown>
   /** True while a submit is in flight. */
-  processing: boolean
+  readonly processing: boolean
   /** True after the last submit succeeded (reset at the next submit). */
-  wasSuccessful: boolean
+  readonly wasSuccessful: boolean
   /** True briefly after a success — for a transient "Saved!" indicator. */
-  recentlySuccessful: boolean
+  readonly recentlySuccessful: boolean
   /** Whether any field currently has an error. */
-  hasErrors: boolean
+  readonly hasErrors: boolean
   /** Whether `data` differs from the current defaults (structural comparison). */
-  isDirty: boolean
+  readonly isDirty: boolean
   setError: {
     (field: keyof T, message: string): LukkForm<T>
     (errors: FormErrors<T>): LukkForm<T>
@@ -93,7 +99,7 @@ function cloneData<V>(value: V): V {
 /** Whether a value tree contains a `File`/`Blob` (so the submit must use `multipart/form-data`). */
 function hasFiles(value: unknown): boolean {
   if (value instanceof Blob) return true
-  if (Array.isArray(value)) return value.some(hasFiles)
+  // Arrays included: `Object.values` of an array is its items.
   if (value !== null && typeof value === 'object') return Object.values(value).some(hasFiles)
   return false
 }
@@ -104,10 +110,10 @@ function toFormData(source: Record<string, unknown>): FormData {
   for (const [key, value] of Object.entries(source)) appendFormData(form, key, value)
   return form
 }
+// Arrays take the object branch: `Object.entries` of an array keys its items `0`, `1`, … — `a[0]`, as Laravel
+// expects. A `File` keeps its own name when appended as a Blob (XHR/Fetch `FormData.append`).
 function appendFormData(form: FormData, key: string, value: unknown): void {
-  if (Array.isArray(value)) value.forEach((item, i) => appendFormData(form, `${key}[${i}]`, item))
-  else if (value instanceof File) form.append(key, value, value.name)
-  else if (value instanceof Blob) form.append(key, value)
+  if (value instanceof Blob) form.append(key, value)
   else if (value instanceof Date) form.append(key, value.toISOString())
   else if (typeof value === 'boolean') form.append(key, value ? '1' : '0') // Laravel truthiness
   else if (value === null || value === undefined) form.append(key, '')
@@ -271,15 +277,14 @@ export function useLukkForm<T extends FormFields>(initial: T, options: UseLukkFo
     processing.value = true
     wasSuccessful.value = false
     recentlySuccessful.value = false
-    if (recentlyTimer) clearTimeout(recentlyTimer)
+    clearTimeout(recentlyTimer)
     clearErrors()
     // A plain snapshot — don't hand the reactive proxy to the serializer.
     const source = { ...data } as T
     const payload = transformFn ? transformFn(source) : source
-    const asFormData = method !== 'get' && (forceFormData === true || hasFiles(payload))
     const carrier = method === 'get'
       ? { query: payload }
-      : { body: asFormData ? toFormData(payload as Record<string, unknown>) : payload }
+      : { body: forceFormData === true || hasFiles(payload) ? toFormData(payload as Record<string, unknown>) : payload }
     // Our own controller powers `cancel()`; a caller's own `signal` (in fetchOptions) wins.
     const controller = new AbortController()
     inFlight = controller

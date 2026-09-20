@@ -111,6 +111,7 @@ sealed server-side session, SSR hydration, the token-stripping proxy):
 
 ```bash
 LUKK_PATH=/abs/path/to/lukk conformance/browser.sh
+LUKK_PATH=/abs/path/to/lukk conformance/browser.sh --nuxt floor,3,4   # one run per Nuxt version
 ```
 
 The app under test is [`apps/nuxt-bff/`](./apps/nuxt-bff) (committed): `lukk-nuxt` in
@@ -119,6 +120,31 @@ The app under test is [`apps/nuxt-bff/`](./apps/nuxt-bff) (committed): `lukk-nux
 redirect, password login, **SSR hydration** (the server-rendered HTML already contains
 the user — asserted against the raw response), session persistence across a full reload,
 logout re-locking, and a **2FA challenge completed with a live TOTP**.
+
+A second suite ([`e2e/session.spec.ts`](./apps/nuxt-bff/e2e/session.spec.ts)) covers what
+happens around a logout the page never awaited — the case that keeps coming back, where the
+logout is still in flight while the next page is being served and another tab may sign in
+meanwhile: the session really ends and the next page is signed out **in the server HTML**,
+other tabs follow, a sign-in elsewhere survives the logout of the session it replaced, and an
+unreachable lukk neither holds up the page nor loses the logout. Those specs make lukk fail on
+demand through a fault-injecting hop in [`e2e/serve.mjs`](./apps/nuxt-bff/e2e/serve.mjs)
+(`e2e/faults.mjs`: `refuse`, `hang`, `fail-logout`), and assert against the API's
+`/conformance/live-sessions` count rather than against what a page happens to render.
+
+### Several Nuxt versions, one app (`--nuxt`)
+
+The module supports Nuxt 3.13 through 4.x, but an app can only pin one of them — so the suite
+used to prove the flows against whatever that pin happened to be, and checking another version
+meant building a throwaway app by hand. `--nuxt` (or `E2E_NUXT`) runs the **same specs** against
+each version in turn: `floor` is the declared `@nuxt/kit` floor (raising it moves the matrix with
+it), `3` / `4` the newest of that major, anything else a literal version.
+
+Each version gets a prepared copy of the app's own sources under `conformance/.matrix/`
+(gitignored) with that Nuxt pinned, `lukk-nuxt` linked back to the workspace, and Playwright
+pinned to the version the workspace resolved — see [`lib/nuxt-matrix.sh`](./lib/nuxt-matrix.sh).
+Installs are kept between runs, so only the first run per version is slow, and the database is
+reseeded between versions (the suite burns single-use things: a TOTP code inside its window, the
+signed verification link). `browser-direct.sh` takes the same flag. CI runs `floor`, `3` and `4`.
 
 Notes:
 - Served over **HTTPS** (self-signed cert, `Playwright ignoreHTTPSErrors`) via a tiny
@@ -137,13 +163,17 @@ cookie) in a real browser, for **both** build modes:
 
 ```bash
 LUKK_PATH=/abs/path/to/lukk conformance/browser-direct.sh   # runs spa then ssg (or pass `spa`/`ssg`)
+LUKK_PATH=/abs/path/to/lukk conformance/browser-direct.sh spa --nuxt floor,4
 ```
 
 The app is [`apps/nuxt-direct/`](./apps/nuxt-direct) (`ssr: false`); **SPA** = `nuxi build`
 (served by the Nitro preview), **SSG** = `nuxi generate` (served as static files). The suite
 ([`e2e/direct.spec.ts`](./apps/nuxt-direct/e2e/direct.spec.ts)) covers the client guard
 redirect, password login, **session restore on reload via the refresh cookie**, logout, and
-a 2FA challenge — identical flows in both modes.
+a 2FA challenge — identical flows in both modes. [`e2e/session.spec.ts`](./apps/nuxt-direct/e2e/session.spec.ts)
+adds direct mode's half of the logout-around-a-navigation story: with no server to finish the
+logout, the note the page leaves names the session it was for (the access token's family), so the
+next page load ends that one and keeps a sign-in that happened since.
 
 **Same-origin is required — and why.** lukk-core deliberately attaches the bearer / cookie
 **only to a same-origin `baseURL`** (`packages/core/src/client.ts` `isSameOrigin`) — an

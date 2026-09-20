@@ -24,11 +24,83 @@ default is safe.
 
 ---
 
-## No breaking changes yet
+## Upgrading to `lukk-nuxt` 0.12.0 / `lukk-core` 0.12.0 (unreleased)
 
-Every release so far has been additive and backward-compatible — new composables, new options,
-and fixes, all opt-in. There is nothing to do beyond bumping the version and reading the
-changelog.
+Everything before this release was additive. This one is not: the published type declarations
+stopped lying, which can fail a typecheck that passed before, and one route-middleware decision
+changed. No runtime API was renamed or removed, so an app that doesn't typecheck its own code
+has only the middleware entry to read.
 
-When the first breaking change ships, it will be documented here (highest version first) with
-the impact tag and the exact migration step, before it lands in a release.
+### Every composable now declares its return type
+
+**High impact — if you run `vue-tsc` / `nuxi typecheck`.**
+
+The published declarations typed most composable members `any`, so an assignment to internal
+state, or a property that doesn't exist, type-checked. `useLukkAuth()` now returns `LukkAuth`,
+and `useLukkAbilities`, `useLukkAccount`, `useLukkChangePassword`, `useLukkConfirmation`,
+`useLukkEmailVerification`, `useLukkPasskeys`, `useLukkPasswordReset` and `useLukkTwoFactor`
+each return their own declared type; `useLukkFetch()` is `$Fetch`, and `LukkForm<T>` marks its
+derived members `readonly`.
+
+Three things start failing, all of them code that was already wrong:
+
+- **`user` is `Ref<LukkUser | null>`**, and `LukkUser` declares only what lukk itself knows
+  about — so `user.value.name` fails, and so does `user.value?.name`. Augment it with your own
+  user shape, once, anywhere in your app:
+
+  ```ts
+  declare module 'lukk-core' {
+    interface LukkUser {
+      name: string
+      avatar_url: string | null
+    }
+  }
+  ```
+
+- **Assigning to derived state.** `loggedIn`, `useLukkConfirmation().required` and `.token`, and
+  a form's `processing` / `data` are computed or internal; write through the composable's own
+  methods instead.
+- **Values that used to be `any`** now carry a real type at the call site, so a mismatch that
+  was silently accepted surfaces where it is.
+
+### `LukkAuth` is auto-imported as a global type
+
+**Medium impact — if your app declares a type of the same name.**
+
+`LukkAuth` (and the other composable return types) are registered as global types, so an app
+type called `LukkAuth` now clashes. Rename yours, or import it explicitly under an alias where
+you use it.
+
+### `PasskeySummary.last_used_at` is a number, not a string
+
+**Low impact — if you read that field.**
+
+`GET /auth/passkeys` has always returned a unix timestamp here; the declaration said `string`.
+Code that formatted it as a date string was already producing the wrong output at runtime, and
+now fails to typecheck. `AccountExport` also gains an optional `lockouts` array, for lukk
+releases that include the [account-lockout](https://stsepelin.github.io/lukk-docs/account-lockout)
+counters in the export.
+
+### `lukk-auth` can render a protected page for a visitor it couldn't identify
+
+**Medium impact — behaviour change; no action if your API enforces access.**
+
+`lukk-auth` used to redirect whenever `loggedIn` was `false`, which included a server render
+that couldn't resolve the session — sending a signed-in visitor to `/login` before their client
+had restored them. It now defers while `ready` is `false`, and doesn't redirect when
+`restoreFailed` is `true` so the page can offer a retry. The consequence is that a protected
+page can render for a visitor the server couldn't identify, before the client redirects them.
+Route middleware isn't access control; your API is. Never put protected data in the page from
+anything but an authenticated API response.
+
+### Sign-in calls no longer refresh and retry on a `401`
+
+**Low impact — informational.**
+
+`login`, `register`, `twoFactorChallenge` and `loginWithPasskey` don't authenticate with the
+current session, so a `401` from one is the server's answer (lukk returns it for a passkey whose
+user no longer exists), not an expired access token. They now reject with it directly, in
+lukk-core's client and in lukk-nuxt's BFF proxy. Refreshing on it rotated the refresh token of
+the session being replaced and then re-sent the credentials, or an already-spent passkey
+ceremony. `logout()` keeps its refresh-and-retry, and accepts `{ retry: false }` for a binding
+that renews the token itself.

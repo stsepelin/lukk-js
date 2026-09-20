@@ -1,5 +1,17 @@
 import type { ResetPasswordInput } from 'lukk-core'
+import type { Ref } from 'vue'
 import { ref, useNuxtApp } from '#imports'
+
+/**
+ * Declared rather than inferred: the module build cannot resolve `#imports`, so an inferred return type
+ * shipped as `any` in the published declarations — and `sending.value = false` type-checked in a consumer app.
+ */
+export interface LukkPasswordReset {
+  sending: Readonly<Ref<boolean>>
+  resetting: Readonly<Ref<boolean>>
+  sendResetLink: (email: string) => Promise<void>
+  reset: (input: ResetPasswordInput) => Promise<void>
+}
 
 /**
  * Password reset (pairs with lukk's `features.password_reset`).
@@ -10,7 +22,7 @@ import { ref, useNuxtApp } from '#imports'
  * `reset()` along with the new password. On success the user can log in with the new password
  * (lukk revokes any pre-existing sessions by default), so route them to your login page.
  */
-export function useLukkPasswordReset() {
+export function useLukkPasswordReset(): LukkPasswordReset {
   const { $lukk } = useNuxtApp()
 
   /** True while the reset-link request is in flight — bind a button's disabled state to it. */

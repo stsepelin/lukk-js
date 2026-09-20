@@ -1,5 +1,23 @@
+import type { ComputedRef, Ref } from 'vue'
 import { computed, useNuxtApp, useState, watch } from '#imports'
 import { CONFIRM_REQUIRED_KEY, CONFIRMATION_KEY, CONFIRMED_KEY } from '../keys'
+
+/**
+ * Declared rather than inferred: the module build cannot resolve `#imports`, so an inferred return type
+ * shipped as `any` in the published declarations — and `confirmed.value = true` type-checked in a
+ * consumer app. `required` and `token` are read-only too: flip them with `cancel()`/`record()`/`clear()`.
+ */
+export interface LukkConfirmation {
+  abandonIfUnearnable: (error: unknown) => void
+  confirmed: ComputedRef<boolean>
+  required: Readonly<Ref<boolean>>
+  token: Readonly<Ref<string | null>>
+  confirmPassword: (password: string) => Promise<void>
+  record: (result: { confirmation_token?: string }) => void
+  clear: () => void
+  withConfirmation: <T>(action: () => Promise<T>) => Promise<T>
+  cancel: () => void
+}
 
 /**
  * Step-up ("sudo") confirmation. Re-confirm identity to unlock sensitive,
@@ -16,7 +34,7 @@ import { CONFIRM_REQUIRED_KEY, CONFIRMATION_KEY, CONFIRMED_KEY } from '../keys'
  *    opens your modal (`required`), waits for a fresh confirm, and retries once.
  *  - **Per-page (section):** gate the route with the `lukk-confirmed` middleware.
  */
-export function useLukkConfirmation() {
+export function useLukkConfirmation(): LukkConfirmation {
   const { $lukk } = useNuxtApp()
   const token = useState<string | null>(CONFIRMATION_KEY, () => null)
   const confirmedFlag = useState<boolean>(CONFIRMED_KEY, () => false)
@@ -63,9 +81,13 @@ export function useLukkConfirmation() {
    * flip `confirmed`. Shared with the passkey step-up path.
    */
   function record(result: { confirmation_token?: string }): void {
-    /* v8 ignore next -- `import.meta.client` is a build-time constant; the unit build defines it true, so the other side is not code here. */
-    if (import.meta.client && result.confirmation_token) token.value = result.confirmation_token
-    confirmedFlag.value = true
+    // Client-only, both halves: a step-up is earned by a request the browser made, and a `true` serialised
+    // into `__NUXT_DATA__` would claim one for whoever the render is later handed to.
+    // Stryker disable next-line ConditionalExpression: the mutation run compiles the client, where this is `true` already; the server half is pinned in test/server-env/confirmation.test.ts.
+    if (import.meta.client) {
+      if (result.confirmation_token) token.value = result.confirmation_token
+      confirmedFlag.value = true
+    }
   }
 
   /** Drop the confirmation (e.g. after the sensitive action completes). */
@@ -110,12 +132,13 @@ export function useLukkConfirmation() {
     return new Promise((resolve, reject) => {
       const stop = watch([confirmedFlag, required], ([ok, req]) => {
         // `confirmed` wins over `required` going false, so a concurrent retry can't cancel this one.
-        /* v8 ignore else -- exhaustive here: the watcher runs only when one of the flags CHANGES,
-           `withConfirmation` clears `confirmed` before it raises `required`, and every later change
-           is either a confirmation (ok) or a cancellation (!req). Falling through would need
-           `confirmed` to go true→false while `required` stayed true, which no path produces. */
-        if (ok) { stop(); resolve() }
-        else if (!req) { stop(); reject(unearnable ?? new Error('lukk: confirmation cancelled')) }
+        if (ok) {
+          stop()
+          resolve()
+          return
+        }
+        // Stryker disable next-line ConditionalExpression: equivalent — `confirmed` is cleared before this watcher starts and it stops the moment `confirmed` turns true, so while it is alive the only change it can see with `ok` false is `required` going false.
+        if (!req) { stop(); reject(unearnable ?? new Error('lukk: confirmation cancelled')) }
       })
     })
   }

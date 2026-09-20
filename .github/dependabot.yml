@@ -16,6 +16,17 @@ updates:
         dependency-type: production
       development:
         dependency-type: development
+    ignore:
+      # vitest 5 is held back by the MUTATION gate, not by the test suite — which passes on it. Stryker
+      # 10's vitest runner uses "perTest" coverage analysis to decide which tests to run for each mutant,
+      # and on vitest 5 that mapping comes back empty: measured here, `session.server.ts` scored 100.00%
+      # (29 killed) on vitest 3 and 13.79% on vitest 5, running 0.13 tests per mutant instead of 2.63.
+      # With `thresholds.break = 100` that fails every mutation run while proving nothing. Drop this once
+      # @stryker-mutator/vitest-runner declares vitest 5 support, and re-measure before trusting a score.
+      - dependency-name: vitest
+        update-types: [version-update:semver-major]
+      - dependency-name: '@vitest/coverage-v8'
+        update-types: [version-update:semver-major]
 
   - package-ecosystem: github-actions
     directory: /

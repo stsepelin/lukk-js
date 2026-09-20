@@ -90,6 +90,15 @@ describe('the abilities list handed back to consumers', () => {
 })
 
 describe('lukk\'s own gated routes', () => {
+  it('reads a signed-out visitor as no machine token, and as able to manage nothing', () => {
+    user.value = null
+    const a = useLukkAbilities()
+
+    expect(a.pinned.value).toBe(false)
+    expect(a.canManageSessions.value).toBe(false)
+    expect(a.canManageAccount.value).toBe(false)
+  })
+
   it('does not hide session management from an ordinary user', () => {
     // lukk's own routes gate PINNED tokens only. Asking `can('lukk.sessions')` directly would hide
     // "sign out other devices" from every normal user, whose derived grant never contains it — and

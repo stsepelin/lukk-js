@@ -14,6 +14,7 @@ export function base64urlToBuffer(value: string): ArrayBuffer {
   const pad = value.length % 4 === 0 ? '' : '='.repeat(4 - (value.length % 4))
   const binary = atob(value.replace(/-/g, '+').replace(/_/g, '/') + pad)
   const bytes = new Uint8Array(binary.length)
+  // Stryker disable next-line EqualityOperator: `i <= binary.length` cannot be observed — the extra pass writes `charCodeAt(len)` (NaN) to an out-of-range index of an exactly-sized Uint8Array, which is a spec-level no-op even in strict mode.
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
   return bytes.buffer
 }
@@ -22,6 +23,7 @@ export function bufferToBase64url(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer)
   let binary = ''
   for (const b of bytes) binary += String.fromCharCode(b)
+  // Stryker disable next-line Regex: dropping the `$` cannot be observed — `btoa` emits `=` only as trailing padding and neither preceding replacement can introduce one, so `/=+/` matches the same run.
   return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 }
 
