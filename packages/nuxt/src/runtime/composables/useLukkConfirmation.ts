@@ -1,5 +1,23 @@
+import type { ComputedRef, Ref } from 'vue'
 import { computed, useNuxtApp, useState, watch } from '#imports'
 import { CONFIRM_REQUIRED_KEY, CONFIRMATION_KEY, CONFIRMED_KEY } from '../keys'
+
+/**
+ * Declared rather than inferred: the module build cannot resolve `#imports`, so an inferred return type
+ * shipped as `any` in the published declarations — and `confirmed.value = true` type-checked in a
+ * consumer app. `required` and `token` are read-only too: flip them with `cancel()`/`record()`/`clear()`.
+ */
+export interface LukkConfirmation {
+  abandonIfUnearnable: (error: unknown) => void
+  confirmed: ComputedRef<boolean>
+  required: Readonly<Ref<boolean>>
+  token: Readonly<Ref<string | null>>
+  confirmPassword: (password: string) => Promise<void>
+  record: (result: { confirmation_token?: string }) => void
+  clear: () => void
+  withConfirmation: <T>(action: () => Promise<T>) => Promise<T>
+  cancel: () => void
+}
 
 /**
  * Step-up ("sudo") confirmation. Re-confirm identity to unlock sensitive,
@@ -16,7 +34,7 @@ import { CONFIRM_REQUIRED_KEY, CONFIRMATION_KEY, CONFIRMED_KEY } from '../keys'
  *    opens your modal (`required`), waits for a fresh confirm, and retries once.
  *  - **Per-page (section):** gate the route with the `lukk-confirmed` middleware.
  */
-export function useLukkConfirmation() {
+export function useLukkConfirmation(): LukkConfirmation {
   const { $lukk } = useNuxtApp()
   const token = useState<string | null>(CONFIRMATION_KEY, () => null)
   const confirmedFlag = useState<boolean>(CONFIRMED_KEY, () => false)

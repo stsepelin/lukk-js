@@ -6,6 +6,7 @@ const kit = vi.hoisted(() => ({
   addRouteMiddleware: vi.fn(),
   addServerHandler: vi.fn(),
   addServerImportsDir: vi.fn(),
+  addServerPlugin: vi.fn(),
   createResolver: () => ({ resolve: (p: string) => p }),
   defineNuxtModule: (def: unknown) => def,
 }))
@@ -65,6 +66,19 @@ describe('lukk-nuxt module', () => {
     expect((unset.options.runtimeConfig.lukk as { cookieNamespace?: string }).cookieNamespace).toBeUndefined()
     const named = setup({ baseURL: 'https://api/auth', mode: 'bff', session: { password: 'x'.repeat(32), name: 'admin' } })
     expect((named.options.runtimeConfig.lukk as { cookieNamespace?: string }).cookieNamespace).toBe('admin')
+  })
+
+  it('passes session.sharedStore through and registers the plugin that wires it (bff only)', () => {
+    const unset = setup({ baseURL: 'https://api/auth', mode: 'bff' })
+    expect((unset.options.runtimeConfig.lukk as { sharedStore?: string }).sharedStore).toBe('')
+    expect(kit.addServerPlugin).toHaveBeenCalledWith('./runtime/server/plugins/shared-ended-sessions')
+
+    const shared = setup({ baseURL: 'https://api/auth', mode: 'bff', session: { password: 'x'.repeat(32), sharedStore: 'lukk-sessions' } })
+    expect((shared.options.runtimeConfig.lukk as { sharedStore?: string }).sharedStore).toBe('lukk-sessions')
+
+    kit.addServerPlugin.mockClear()
+    setup({ baseURL: 'https://api/auth', mode: 'direct' })
+    expect(kit.addServerPlugin).not.toHaveBeenCalled()
   })
 
   it('warns on a session.name that is not a cookie-safe slug, but not on a valid one / when unset', () => {

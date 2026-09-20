@@ -119,15 +119,37 @@ export function createLukkClient(hooks: LukkClientHooks) {
     request,
 
     // --- session ---
+    // The sign-in calls never refresh-and-retry (`false`). They don't authenticate with the current
+    // session, so a 401 from one — lukk answers an unknown passkey that way — is the answer, not an
+    // expired token. Retrying rotated the refresh token of the session being REPLACED, and a binding
+    // that holds refreshes back while a sign-in is on the wire would wait on itself.
     /** Create an account and (unless verification blocks it) start a session — like login. */
-    register: (input: RegisterInput) => request<RegisterResult>('/register', json(input)).then(commit),
-    login: (c: LoginInput) => request<LoginResult>('/login', json(c)).then(commit),
-    twoFactorChallenge: (i: TwoFactorInput) => request<TokenPair>('/two-factor-challenge', json(i)).then(commit),
+    register: (input: RegisterInput) => request<RegisterResult>('/register', json(input), false).then(commit),
+    login: (c: LoginInput) => request<LoginResult>('/login', json(c), false).then(commit),
+    twoFactorChallenge: (i: TwoFactorInput) => request<TokenPair>('/two-factor-challenge', json(i), false).then(commit),
     /** Direct mode passes the refresh token; cookie/BFF mode relies on the cookie. */
     refreshTokens: (refresh_token?: string) => request<TokenPair>('/refresh', json(refresh_token ? { refresh_token } : {}), false),
     /** Silently restore a session on app load (returns null when there's no valid refresh). */
     restore: () => request<TokenPair>('/refresh', json({}), false).then(commit).catch(() => null as TokenPair | null),
-    logout: () => request<void>('/logout', { method: 'POST' }),
+    /**
+     * End the session. `retry: false` skips the refresh-and-retry on a 401, for a binding that renews
+     * the token itself: one that holds refreshes back while a logout is on the wire would otherwise
+     * have that refresh wait on the very logout waiting for it.
+     */
+    //
+    // Sent with a JSON body: lukk accepts a logout authenticated only by the refresh cookie (an expired
+    // access token otherwise left the session alive), and requires a non-simple request for that path so
+    // a cross-site form can't log anyone out. `application/json` is that signal — and it forces a CORS
+    // preflight, which a plain `POST` with no body did not.
+    //
+    // `keepalive`, so a page that navigates away right after starting it doesn't cancel it — a cancelled
+    // logout never reached lukk, and the session outlived what the user saw. A browser that refuses a
+    // keepalive request needing a CORS preflight rejects it with a TypeError; it is sent again without.
+    logout: (options: { retry?: boolean } = {}) => request<void>('/logout', { ...json({}), keepalive: true }, options.retry ?? true)
+      .catch((error: unknown) => {
+        if (!(error instanceof TypeError)) throw error
+        return request<void>('/logout', json({}), options.retry ?? true)
+      }),
     revokeAllSessions: () => request<void>('/sessions', { method: 'DELETE' }),
     revokeOtherSessions: () => request<void>('/sessions/others', { method: 'DELETE' }),
 
@@ -176,7 +198,7 @@ export function createLukkClient(hooks: LukkClientHooks) {
     passkeyRegistrationOptions: () => request<PublicKeyCredentialCreationOptionsJSON>('/passkeys/registration-options', { method: 'POST' }),
     registerPasskey: (credential: unknown, name?: string) => request<void>('/passkeys', json({ credential, name })),
     passkeyLoginOptions: () => request<PasskeyLoginOptions>('/passkeys/login-options', { method: 'POST' }),
-    loginWithPasskey: (ceremony_id: string, credential: unknown) => request<TokenPair>('/passkeys/login', json({ ceremony_id, credential })).then(commit),
+    loginWithPasskey: (ceremony_id: string, credential: unknown) => request<TokenPair>('/passkeys/login', json({ ceremony_id, credential }), false).then(commit),
     listPasskeys: () => request<{ passkeys: PasskeySummary[] }>('/passkeys'),
     deletePasskey: (id: string) => request<void>(`/passkeys/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   }

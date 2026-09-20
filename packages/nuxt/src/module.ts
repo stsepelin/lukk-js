@@ -3,6 +3,7 @@ import {
   addPlugin,
   addRouteMiddleware,
   addServerHandler,
+  addServerPlugin,
   addServerImportsDir,
   createResolver,
   defineNuxtModule,
@@ -144,8 +145,14 @@ export interface ModuleOptions {
    * trust apps on separate subdomains — where `__Host-` + the host-level Origin check give real
    * isolation — and give each app a distinct strong `session.password`; the seal password, not the
    * name, is the isolation boundary.
+   *
+   * `sharedStore` names a Nitro storage mount (`nitro.storage`) that every server instance reads, for
+   * the record of sessions a sign-in replaced or a logout ended. Without it the record is per process,
+   * so behind a load balancer without sticky sessions — or on serverless and edge runtimes — a late
+   * refresh served by another instance can still write a replaced session back. Use a strongly
+   * consistent driver that expires keys (Redis, Upstash / Vercel KV) — not an eventually consistent one.
    */
-  session: { password: string, cookieSecure?: boolean, name?: string }
+  session: { password: string, cookieSecure?: boolean, name?: string, sharedStore?: string }
   /**
    * BFF only, optional: proxy your own app API so it's authenticated out of the
    * box. Requests to `${path}/**` are forwarded to the FIXED `target` (your
@@ -267,6 +274,7 @@ export default defineNuxtModule<ModuleOptions>({
         // this + the runtime `cookieSecure`, so the `__Host-` prefix and the Secure attribute always
         // come from ONE source and can't diverge under an independent runtime-config override.
         cookieNamespace: options.session.name,
+        sharedStore: options.session.sharedStore ?? '',
         apiPath,
         apiTarget: options.api.target,
         apiForceJson: options.api.forceJson,
@@ -398,6 +406,8 @@ export default defineNuxtModule<ModuleOptions>({
     // BFF mode: the same-origin Nitro proxy that holds tokens server-side.
     if (options.mode === 'bff') {
       addServerHandler({ route: `${LUKK_BFF_PREFIX}/**`, handler: resolver.resolve('./runtime/server/bff') })
+      // Wires `session.sharedStore`, when set, into the replaced-session record.
+      addServerPlugin(resolver.resolve('./runtime/server/plugins/shared-ended-sessions'))
 
       // Optional: proxy the app's own API so it's authenticated out of the box.
       if (apiPath && options.api.target) {

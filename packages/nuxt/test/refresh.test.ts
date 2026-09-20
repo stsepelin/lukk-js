@@ -37,6 +37,63 @@ describe('refreshOnce with an unusable baseURL', () => {
   })
 })
 
+describe('refreshOnce when lukk can\'t be reached', () => {
+  it('reports it retryable instead of throwing out of the handler as a 500', async () => {
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('fetch failed'))
+
+    const result = await refreshOnce({ id: `h3-${Math.random()}`, data: { refresh: 'rt', sid: `s-${Math.random()}` } }, 'https://lukk/auth')
+
+    expect(result).toEqual({ pair: null, retryable: true })
+  })
+})
+
+describe('refreshOnce single-flight identity', () => {
+  it('keys on the session\'s own sid, so a new session never joins a refresh for the one it replaced', async () => {
+    // A sign-in re-seals the NEW session under the OLD h3 id. Keyed on that id, a refresh for the new
+    // session joined one still out for the old — and sealed the old session's tokens under the new one.
+    let answer!: (r: Response) => void
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+      .mockImplementationOnce(() => new Promise((resolve) => { answer = resolve }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: 'B2' }), { status: 200 }))
+    const h3id = `h3-${Math.random()}`
+
+    const old = refreshOnce({ id: h3id, data: { refresh: 'rA', sid: 'session-A' } }, 'https://lukk/auth')
+    const replacement = await refreshOnce({ id: h3id, data: { refresh: 'rB', sid: 'session-B' } }, 'https://lukk/auth')
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
+    expect(replacement.pair?.access).toBe('B2')
+    answer(new Response(JSON.stringify({ access_token: 'A2' }), { status: 200 }))
+    expect((await old).pair?.access).toBe('A2')
+  })
+
+  it('collapses refreshes of one session across separately bundled copies of the module', async () => {
+    // SSR hydration runs from the Nuxt app's server bundle, the proxies from Nitro's: each has its own
+    // copy of this module, and module-level state never saw the other's refresh in flight.
+    let answer!: (r: Response) => void
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(() => new Promise((resolve) => { answer = resolve }))
+    vi.resetModules()
+    const copy = await import('../src/runtime/server/utils/refresh')
+    const session = { id: `h3-${Math.random()}`, data: { refresh: 'rA', sid: `s-${Math.random()}` } }
+
+    const fromProxy = refreshOnce(session, 'https://lukk/auth')
+    const fromRender = copy.refreshOnce(session, 'https://lukk/auth')
+    answer(new Response(JSON.stringify({ access_token: 'A2' }), { status: 200 }))
+
+    expect((await fromRender).pair?.access).toBe('A2')
+    expect(await fromProxy).toBe(await fromRender)
+    expect(fetchSpy).toHaveBeenCalledOnce()
+  })
+
+  it('still collapses concurrent refreshes of the SAME session into one', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ access_token: 'A2' }), { status: 200 }))
+    const session = { id: `h3-${Math.random()}`, data: { refresh: 'rA', sid: `s-${Math.random()}` } }
+
+    await Promise.all([refreshOnce(session, 'https://lukk/auth'), refreshOnce(session, 'https://lukk/auth')])
+
+    expect(fetchSpy).toHaveBeenCalledOnce()
+  })
+})
+
 describe('refreshOnce client identity', () => {
   const ok = () => new Response(JSON.stringify({ access_token: 'a', refresh_token: 'r2' }), { status: 200 })
 

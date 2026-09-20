@@ -50,9 +50,13 @@ vi.mock('h3', () => ({
 
 const refreshOnce = vi.fn<(s: unknown, b: string) => Promise<TokenSession | null>>()
 vi.mock('../src/runtime/server/utils/refresh', () => ({ refreshOnce: (...a: unknown[]) => refreshOnce(...(a as [unknown, string])) }))
+const revokeDroppedSession = vi.fn()
+vi.mock('../src/runtime/server/revoke-dropped', () => ({ revokeDroppedSession: (...a: unknown[]) => revokeDroppedSession(...a) }))
 
 // eslint-disable-next-line import/first
 import handler from '../src/runtime/server/api-proxy'
+// eslint-disable-next-line import/first
+import { forgetEndedSessions, markSessionEnded } from '../src/runtime/server/ended-sessions'
 
 /** A minimal JWT (header.payload.sig) carrying just the given claims — not signed. */
 function jwt(claims: Record<string, unknown>): string {
@@ -325,6 +329,56 @@ describe('app-API proxy', () => {
     // Upstream Set-Cookie stripped, but the rotated session cookie restored.
     expect(e.node.res.removeHeader).toHaveBeenCalledWith('set-cookie')
     expect(e.node.res.setHeader).toHaveBeenCalledWith('set-cookie', '__Host-lukk-session=rotated')
+  })
+
+  describe('a session a sign-in replaced or a logout ended while this request was out', () => {
+    // Re-sealing it would put the previous session back in the browser, over the newer cookie.
+    afterEach(() => forgetEndedSessions())
+
+    it('is not refreshed at all once it has ended', async () => {
+      const stale = expiredJwt()
+      sessionData = { access: stale, refresh: 'r', sid: 'session-A' }
+      markSessionEnded('session-A')
+      const e = ev({ path: '/api/me' })
+
+      await run(e)
+
+      expect(refreshOnce).not.toHaveBeenCalled()
+      expect(proxyRequest).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ headers: expect.objectContaining({ authorization: `Bearer ${stale}` }) }))
+      expect(e.node.res.setHeader).not.toHaveBeenCalledWith('set-cookie', expect.anything())
+    })
+
+    it('withholds the re-sealed cookie when the session ended while the upstream was answering', async () => {
+      sessionData = { access: expiredJwt(), refresh: 'r', sid: 'session-A' }
+      refreshOnce.mockResolvedValue({ pair: { access: 'new-tok', refresh: 'r2' }, retryable: false })
+      const original = proxyRequest.getMockImplementation()!
+      proxyRequest.mockImplementationOnce(async (...args) => {
+        markSessionEnded('session-A') // a sign-in in another tab lands mid-request
+        return original(...args)
+      })
+      const e = ev({ path: '/api/me' })
+
+      await run(e)
+
+      expect(e.node.res.getHeader('set-cookie')).toBeUndefined()
+      expect(revokeDroppedSession).toHaveBeenCalledWith(e, { access: 'new-tok', refresh: 'r2' }, 'https://api/auth', '')
+    })
+
+    it('is not re-sealed, nor its new token used, when it ended during the refresh', async () => {
+      const stale = expiredJwt()
+      sessionData = { access: stale, refresh: 'r', sid: 'session-A' }
+      refreshOnce.mockImplementation(async () => {
+        markSessionEnded('session-A')
+        return { pair: { access: 'new-tok', refresh: 'r2' }, retryable: false }
+      })
+      const e = ev({ path: '/api/me' })
+
+      await run(e)
+
+      expect(proxyRequest).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ headers: expect.objectContaining({ authorization: `Bearer ${stale}` }) }))
+      expect(e.node.res.setHeader).not.toHaveBeenCalledWith('set-cookie', expect.anything())
+      expect(revokeDroppedSession).toHaveBeenCalledWith(e, { access: 'new-tok', refresh: 'r2' }, 'https://api/auth', '')
+    })
   })
 
   it('lets a failed refresh fall through to an upstream 401 (revoked session), keeping the stale bearer', async () => {

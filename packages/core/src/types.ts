@@ -129,7 +129,8 @@ export interface ConfirmationToken {
 export interface PasskeySummary {
   id: string
   name: string | null
-  last_used_at: string | null
+  /** Unix seconds — lukk sends a number here, not the ISO string the export's session times use. */
+  last_used_at: number | null
 }
 
 /** `POST /auth/passkeys/login-options` — opaque ceremony id + WebAuthn options. */
@@ -191,4 +192,15 @@ export interface AccountExport {
   /** The FACT of each passkey — never the COSE public key. */
   passkeys: Array<{ credential_id: string, name: string | null, last_used_at: number | null }>
   two_factor: { enabled: boolean, confirmed_at: string | null }
+  /**
+   * The account-lockout counters held against this account — the rows erasure also removes. Sent by
+   * lukk releases after 0.6.0 (absent before). Timestamps are unix seconds.
+   */
+  lockouts?: Array<{
+    purpose: 'login' | 'two_factor' | 'confirm'
+    attempts: number
+    locked_at: number | null
+    first_failed_at: number | null
+    last_failed_at: number | null
+  }>
 }

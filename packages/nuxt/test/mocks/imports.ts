@@ -10,6 +10,7 @@ export const __test = {
   navigated: undefined as unknown,
   navigatedOptions: undefined as unknown,
   requestHeaders: {} as Record<string, string | undefined>,
+  storageMounts: new Set<string>(),
   reset() {
     states.clear()
     this.nuxtApp = {}
@@ -17,6 +18,7 @@ export const __test = {
     this.navigated = undefined
     this.navigatedOptions = undefined
     this.requestHeaders = {}
+    this.storageMounts = new Set()
   },
 }
 
@@ -32,8 +34,25 @@ export const useRequestHeaders = (_keys?: string[]) => __test.requestHeaders
 // unreachable in the client test env (it's driven via createRequestFetch's own test).
 export const useRequestFetch = () => (async () => undefined) as unknown
 // Accepts a function plugin or the object form `{ name, dependsOn, setup }`; tests invoke the
-// returned setup directly (plugin metadata like `name`/`dependsOn` is a Nuxt-runtime concern).
-export const defineNuxtPlugin = (plugin: unknown): unknown =>
-  typeof plugin === 'function' ? plugin : (plugin as { setup: unknown }).setup
+// returned setup directly. The object form's metadata rides along on `.meta`: consumers are told to
+// `dependsOn` a plugin by NAME, and Nuxt silently ignores a name that matches nothing — so a rename
+// has to fail a test, not reintroduce a startup deadlock.
+export const defineNuxtPlugin = (plugin: unknown): unknown => {
+  if (typeof plugin === 'function') return plugin
+  const { setup, ...meta } = plugin as { setup: (...args: unknown[]) => unknown }
+  return Object.assign((...args: unknown[]) => setup(...args), { meta })
+}
 export const defineNuxtRouteMiddleware = <T>(fn: T): T => fn
+export const defineNitroPlugin = <T>(fn: T): T => fn
+// A Nitro storage mount stand-in: an in-memory key/value map per mount name.
+const storages = new Map<string, Map<string, unknown>>()
+export const useStorage = (mount = '') => {
+  const items = storages.get(mount) ?? storages.set(mount, new Map()).get(mount)!
+  return {
+    setItem: async (key: string, value: unknown, _options?: unknown) => { items.set(key, value) },
+    getItem: async (key: string) => (items.has(key) ? items.get(key) : null),
+    // Nitro's root storage answers `base: ''` for a key under no mount; the test declares its mounts.
+    getMount: (key: string) => ({ base: __test.storageMounts.has(key.replace(/:$/, '')) ? key : '' }),
+  }
+}
 export { computed, reactive, ref, shallowRef, toRaw, watch }

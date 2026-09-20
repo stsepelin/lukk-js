@@ -3,6 +3,8 @@ import { useRuntimeConfig } from '#imports'
 import { LUKK_BFF_PREFIX, confirmationHeaderName, isSessionCookieName, sessionCookieName } from '../shared'
 import { accessExpired } from './access-token'
 import { hopByHopHeaders, isForeignOrigin, reportProxyFailure, rejectUnresolvedTarget, resolveTarget, SPOOFABLE_FORWARDING, viaHeader, visitorIp } from './proxy-utils'
+import { sessionEnded, sessionKey } from './ended-sessions'
+import { revokeDroppedSession } from './revoke-dropped'
 import { readSealedSession } from './sealed-session'
 import { refreshOnce, type TokenSession } from './utils/refresh'
 
@@ -69,6 +71,9 @@ export default defineEventHandler(async (event) => {
   // the seal is valid, so its id is restored (no re-mint).
   const sealed = await readSealedSession(event, sessionPassword, sessionName)
   let access = sealed.access
+  // Set when this request re-seals the session, so the response can check it again at the last moment.
+  let resealed: (() => Promise<boolean>) | null = null
+  let rotatedRefresh: string | undefined
   if (access && sealed.refresh && accessExpired(access)) {
     const session = await useSession<TokenSession>(event, {
       password: sessionPassword,
@@ -83,10 +88,19 @@ export default defineEventHandler(async (event) => {
     // Proactive refresh: rotate ONCE (shared single-flight with the BFF proxy) so a
     // streamed request isn't spent on a guaranteed 401. A revoked session still
     // surfaces naturally: the refresh fails → null → the stale bearer → upstream 401.
-    const { pair } = await refreshOnce(session, baseURL, clientIp)
-    if (pair) {
+    //
+    // Not for a session a sign-in replaced or a logout ended while this request was out: re-sealing it
+    // would put the previous session back in the browser. The stale bearer then 401s upstream.
+    const ended = () => sessionEnded(sessionKey(session))
+    const { pair } = await ended() ? { pair: null } : await refreshOnce(session, baseURL, clientIp)
+    if (pair && !(await ended())) {
       await session.update(pair)
       access = pair.access
+      rotatedRefresh = pair.refresh
+      resealed = ended
+    }
+    else if (pair) {
+      revokeDroppedSession(event, pair, baseURL, clientIp)
     }
   }
   // Carry any Set-Cookie h3 queued (the rotated session, on a refresh) through the
@@ -143,7 +157,7 @@ export default defineEventHandler(async (event) => {
     },
     // Not a cookie/cache passthrough: strip upstream Set-Cookie, restore the rotated session,
     // and (opt-in) re-emit only allow-listed app-API cookies. Keep it out of shared caches.
-    onResponse(ev, response) {
+    async onResponse(ev, response) {
       // `sendProxy` copies the upstream's response headers — Set-Cookie included — BEFORE this
       // runs, so the strip and the rotated-cookie restore below must happen on every path. The
       // 3xx branch used to return first: harmless on Node, where undici filters an opaque redirect
@@ -155,7 +169,11 @@ export default defineEventHandler(async (event) => {
 
       const upstream = toCookieArray(ev.node.res.getHeader('set-cookie'))
       ev.node.res.removeHeader('set-cookie')
-      const keep = toCookieArray(sessionCookie) // the rotated session cookie (if any)
+      // The rotated session cookie (if any) — unless a sign-in or logout ended that session while the
+      // upstream was answering. This is the last point before the headers go out.
+      const replaced = (await resealed?.()) === true
+      if (replaced) revokeDroppedSession(event, { access, refresh: rotatedRefresh }, baseURL, clientIp)
+      const keep = replaced ? [] : toCookieArray(sessionCookie)
       // Opt-in passthrough: forward only allow-listed names — and NEVER a lukk sealed session
       // cookie (this app's OR a co-hosted app's, whatever the list says); an upstream must not be
       // able to set/overwrite any lukk session.

@@ -1,16 +1,23 @@
+import { sessionKey } from '../ended-sessions'
 import { reportUnusableBase, resolveTarget } from '../proxy-utils'
 
 export interface TokenSession {
   access?: string
   refresh?: string
   confirmation?: string
+  /** Identifies this sealed session across refreshes; minted by each sign-in. See `ended-sessions.ts`. */
+  sid?: string
 }
 
 // Per-session single-flight, shared by BOTH proxies (the lukk-auth `bff.ts` and the
 // app-API proxy) so a concurrent auth-401 refresh and an app-API proactive refresh
 // for the same session collapse to ONE `/refresh` — the rotating token is never
 // replayed (which reuse detection would punish with a family revoke).
-const inflightRefresh = new Map<string, Promise<RefreshResult>>()
+//
+// On `globalThis`, not module scope: the Nuxt app's server bundle (SSR hydration) gets its own copy of
+// this module, separate from Nitro's handlers, so a module-level Map never collapsed a page render's
+// refresh with a proxy's for the same session.
+const inflightRefresh: Map<string, Promise<RefreshResult>> = ((globalThis as { __lukkInflightRefresh?: Map<string, Promise<RefreshResult>> }).__lukkInflightRefresh ??= new Map())
 
 /**
  * The outcome of a rotation attempt.
@@ -24,7 +31,10 @@ export type RefreshResult = { pair: TokenSession | null, expiresIn?: number, ret
 
 /** Single-flight the server-side refresh per session, returning the rotation outcome. */
 export function refreshOnce(session: { id?: string, data: TokenSession }, baseURL: string, clientIp = ''): Promise<RefreshResult> {
-  const id = session.id
+  // Keyed by the session's own `sid`, not h3's id: a sign-in re-seals the NEW session under the old h3
+  // id, so a refresh for it would otherwise join one still out for the session it replaced, and seal
+  // that session's tokens under the new one.
+  const id = sessionKey(session)
   // No id → don't key the map (an empty key would collapse distinct sessions).
   if (!id) return rawRefresh(session.data.refresh!, baseURL, clientIp)
   const existing = inflightRefresh.get(id)
@@ -52,15 +62,24 @@ async function rawRefresh(refreshToken: string, baseURL: string, clientIp: strin
   // itself; with it, login and the refresh that follows also key on the same identity.
   const headers: Record<string, string> = { 'Content-Type': 'application/json', 'Accept': 'application/json' }
   if (clientIp) headers['X-Forwarded-For'] = clientIp
-  const res = await fetch(target, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ refresh_token: refreshToken }),
-    // Never follow an upstream 3xx: a 307/308 preserves this POST body, which would
-    // re-send the rotating refresh token to the redirect host (CWE-918/200). An opaque
-    // redirect is not `ok`, so it falls through to the not-ok branch below.
-    redirect: 'manual',
-  })
+  let res: Response
+  try {
+    res = await fetch(target, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ refresh_token: refreshToken }),
+      // Never follow an upstream 3xx: a 307/308 preserves this POST body, which would
+      // re-send the rotating refresh token to the redirect host (CWE-918/200). An opaque
+      // redirect is not `ok`, so it falls through to the not-ok branch below.
+      redirect: 'manual',
+    })
+  }
+  catch {
+    // lukk unreachable, or the connection dropped mid-request: an outage, not a verdict on the token.
+    // It threw straight out of the handler as a 500 before. (If lukk did rotate it, the next refresh
+    // replays it inside the grace window and gets a sibling.)
+    return { pair: null, retryable: true }
+  }
 
   // Only lukk actually rejecting the token ends the session. Anything else — a throttle, an outage,
   // a redirect we refused — left it unconsumed, so report it retryable and keep the session.
@@ -68,5 +87,8 @@ async function rawRefresh(refreshToken: string, baseURL: string, clientIp: strin
 
   const pair = await res.json() as { access_token: string, refresh_token?: string, expires_in?: number }
 
-  return { pair: { access: pair.access_token, refresh: pair.refresh_token ?? refreshToken }, expiresIn: pair.expires_in, retryable: false }
+  // No fallback to the token just sent: lukk has consumed it. Kept, the next refresh would replay it
+  // past the grace window and reuse detection would revoke the family as stolen. Without a new one the
+  // session ends when this access token does.
+  return { pair: { access: pair.access_token, refresh: pair.refresh_token }, expiresIn: pair.expires_in, retryable: false }
 }
