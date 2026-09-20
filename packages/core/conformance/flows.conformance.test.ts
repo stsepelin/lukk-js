@@ -372,7 +372,9 @@ describe(`lukk conformance (algo=${ALGORITHM}, cookie_mode=${COOKIE_MODE}, feat=
       const stepped = { headers: { ...authed(token).headers, 'X-Lukk-Confirmation': confirmation.confirmation_token } }
       const exported = await (await fetch(`${ROOT}/auth/account/export`, stepped)).json() as AccountExport
 
-      expect(Object.keys(exported).sort()).toEqual(['account', 'generated_at', 'passkeys', 'sessions', 'two_factor'])
+      // `lockouts` arrives with lukk > 0.6.0 — the client type marks it optional for older servers,
+      // and the conformance fixture is built from lukk's main, so here it must be present.
+      expect(Object.keys(exported).sort()).toEqual(['account', 'generated_at', 'lockouts', 'passkeys', 'sessions', 'two_factor'])
       expect(Object.keys(exported.sessions[0]!).sort())
         .toEqual(['created_at', 'expires_at', 'last_rotated_at', 'revoked_at', 'session'])
       expect(Object.keys(exported.two_factor).sort()).toEqual(['confirmed_at', 'enabled'])
