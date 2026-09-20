@@ -3,6 +3,9 @@
 // the user endpoint) is proxied to the real lukk API with the bearer injected.
 export default defineNuxtConfig({
   modules: ['lukk-nuxt'],
+
+  // A cached page, so the suite can prove a logout's own answer never ends up in a shared copy.
+  routeRules: { '/cached': { swr: 60 } },
   compatibilityDate: '2025-01-01',
 
   lukk: {

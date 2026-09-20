@@ -1,10 +1,13 @@
 import type { H3Event } from 'h3'
-import { sealSession, useSession } from 'h3'
+import { sealSession, setResponseHeader, useSession } from 'h3'
 import { useRuntimeConfig } from '#imports'
 import { sessionCookieName } from '../shared'
 import { accessExpired } from './access-token'
 import { visitorIp } from './proxy-utils'
-import { readSealedSession } from './sealed-session'
+import { sessionEnded, sessionKey, withholdSessionCookie } from './ended-sessions'
+import { logoutNoted } from './logout-note'
+import { revokeDroppedSession } from './revoke-dropped'
+import { readSealedSessionWithId } from './sealed-session'
 import { warnIfSessionTooLarge } from './session-size'
 import { refreshOnce, type TokenSession } from './utils/refresh'
 
@@ -49,10 +52,30 @@ export async function resolveHydrationAccess(event: H3Event): Promise<string | n
   // A truthy access proves `sessionPassword` was present: readSealed only returns data when it
   // unseals, and returns {} without a password — so the rotate path can assert `sessionPassword!`
   // rather than re-check an always-false branch.
-  const sealed = await readSealedSession(event, sessionPassword, name)
+  const read = await readSealedSessionWithId(event, sessionPassword, name)
+  const sealed = read.data
   const access = sealed.access
   if (!access) return null
-  if (!accessExpired(access)) return access
+
+  // Any request carrying a real session is per-user, whether or not this render ends up hydrating it:
+  // components that fetch during SSR without gating on `ready` still render that account's data (the
+  // app-API proxy serves a still-valid token), and a shared cache must not store the page.
+  setResponseHeader(event, 'cache-control', 'no-store')
+
+  // A logout the browser noted before this request: rendered signed out, even if lukk couldn't be told yet
+  // (see `finish-logout`).
+  if (logoutNoted(event, secure, cookieNamespace)) return null
+
+  // A session a sign-in replaced or a logout ended is not rendered as signed in, even with a token still
+  // valid: the tab would show that account while every call it makes acts as the newer session. The
+  // client restores with the cookie the browser now holds. A seal from before `sid` existed is keyed by
+  // h3's id, which the read-only unseal also returns.
+  const key = sessionKey(read)
+  if (await sessionEnded(key)) return null
+  if (!accessExpired(access)) {
+    remember(event, key, name)
+    return access
+  }
   if (!sealed.refresh || !baseURL) return null
 
   try {
@@ -67,11 +90,21 @@ export async function resolveHydrationAccess(event: H3Event): Promise<string | n
       // isn't worth the two words it costs to close.
       sessionHeader: false,
     })
+    // A session a sign-in replaced or a logout ended while this render was out is not re-sealed — that
+    // would put it back in the browser. The client decides instead.
+    if (await sessionEnded(sessionKey(session))) return null
     const { pair } = await refreshOnce(session, baseURL, visitorIp(event, clientIpHeader))
+    // Stryker disable next-line OptionalChaining: equivalent — a null pair makes `.access` throw into the catch below, which returns null too.
     if (!pair?.access) return null
+    if (await sessionEnded(sessionKey(session))) {
+      revokeDroppedSession(event, pair, baseURL, visitorIp(event, clientIpHeader))
+      return null
+    }
 
     await session.update(pair)
     warnIfSessionTooLarge(session) // parity with bff.ts — the SSR reseal can cross the budget first
+    // The render takes a while, and the cookie only goes out with the page — see `withholdIfReplaced`.
+    remember(event, sessionKey(session), name, () => revokeDroppedSession(event, pair, baseURL, visitorIp(event, clientIpHeader)))
     const fresh = await sealSession(event, { password: sessionPassword!, name })
     replaceRequestCookie(event, name, fresh)
     return pair.access
@@ -80,6 +113,47 @@ export async function resolveHydrationAccess(event: H3Event): Promise<string | n
     // A throw in a plugin's setup breaks the SSR render — swallow and defer to the client restore.
     return null
   }
+}
+
+/**
+ * Called once the page has rendered, before its response is sent: if a sign-in or logout ended the
+ * session this render re-sealed, withhold that cookie so it cannot land over the newer one. The page
+ * itself was still rendered for the old session — a tab that loaded during a sign-in shows the
+ * account it loaded with until it reloads — but the browser keeps the newer session.
+ */
+export async function withholdIfReplaced(event: H3Event): Promise<void> {
+  const hydrated = hydratedSession(event)
+  if (!hydrated || !(await sessionEnded(hydrated.key))) return
+
+  // The tokens this render re-sealed are being dropped: revoke them, once — this runs both right after
+  // the user load and again from the render hooks.
+  if (hydrated.revoke) {
+    hydrated.revoke()
+    hydrated.revoke = undefined
+  }
+
+  // Too late once the headers are out — a streamed render (Nuxt's `ssrStreaming`) calls the render
+  // hooks after the response has started, and touching a sent header throws. The plugin's own check
+  // right after the user load covers that case while the headers are still open.
+  if (event.node.res.headersSent) return
+  try { withholdSessionCookie(event.node.res, hydrated.name) }
+  catch { /* the response started meanwhile; nothing left to withhold */ }
+}
+
+/** Did a sign-in or logout end the session this render hydrated, while it was rendering? */
+export function hydratedSessionEnded(event: H3Event): Promise<boolean> {
+  return sessionEnded(hydratedSession(event)?.key)
+}
+
+/** `revoke` only when this render re-sealed the session: those rotated tokens are the ones to end. */
+interface HydratedSession { key?: string, name: string, revoke?: () => void }
+
+function remember(event: H3Event, key: string | undefined, name: string, revoke?: () => void): void {
+  (event.context as { lukkHydrated?: HydratedSession }).lukkHydrated = { key, name, revoke }
+}
+
+function hydratedSession(event: H3Event): HydratedSession | undefined {
+  return (event.context as { lukkHydrated?: HydratedSession }).lukkHydrated
 }
 
 /** Swap our session cookie in the in-process request header for the freshly-rotated seal. */

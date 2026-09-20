@@ -1,6 +1,18 @@
 import { isEmailVerified } from 'lukk-core'
+import type { ComputedRef, Ref } from 'vue'
 import { computed, ref, useNuxtApp } from '#imports'
 import { useLukkAuth } from './useLukkAuth'
+
+/**
+ * Declared rather than inferred: the module build cannot resolve `#imports`, so an inferred return type
+ * shipped as `any` in the published declarations — and `verified.value = true` type-checked in a consumer app.
+ */
+export interface LukkEmailVerification {
+  verified: ComputedRef<boolean>
+  sending: Readonly<Ref<boolean>>
+  sendVerificationEmail: () => Promise<void>
+  syncAfterVerify: () => Promise<void>
+}
 
 /**
  * Email verification (pairs with lukk's `features.email_verification`).
@@ -12,7 +24,7 @@ import { useLukkAuth } from './useLukkAuth'
  * `syncAfterVerify()` there to reload the user so `verified` (and any "verify your
  * email" banner) updates.
  */
-export function useLukkEmailVerification() {
+export function useLukkEmailVerification(): LukkEmailVerification {
   const { $lukk } = useNuxtApp()
   const { user, fetchUser } = useLukkAuth()
 

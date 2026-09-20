@@ -19,6 +19,16 @@ describe('shapeUser', () => {
     expect(shapeUser(paged)).toBe(paged) // kept as-is, not unwrapped
   })
 
+  it('does NOT unwrap when only ONE of meta/links is present', () => {
+    // Either marker alone already says "collection": a hand-rolled ResourceCollection can publish
+    // `meta` without `links` (or the reverse), and unwrapping one of those hands the caller the
+    // first page of a list as if it were the signed-in user.
+    const metaOnly = { data: { id: 1 }, meta: { total: 1 } }
+    const linksOnly = { data: { id: 1 }, links: { next: null } }
+    expect(shapeUser(metaOnly)).toBe(metaOnly)
+    expect(shapeUser(linksOnly)).toBe(linksOnly)
+  })
+
   it('returns null for an error envelope (never a user), with or without data', () => {
     expect(shapeUser({ errors: { email: ['x'] } })).toBeNull()
     expect(shapeUser({ data: { id: 1 }, errors: {} })).toBeNull()
@@ -47,6 +57,14 @@ describe('shapeUser', () => {
     const wrapped = { data: { id: 1 } }
     expect(shapeUser(wrapped, false)).toBe(wrapped)
   })
+
+  it('treats `false` as the disable sentinel, never as a key to look up', () => {
+    // The guard has to short-circuit BEFORE the lookup: `raw[false]` reads the string property
+    // `'false'`, so a body carrying one would be unwrapped by the very call that asked for no
+    // unwrapping at all.
+    const body = { false: { id: 9 } }
+    expect(shapeUser(body, false)).toBe(body)
+  })
 })
 
 describe('isEmailVerified', () => {
@@ -72,4 +90,23 @@ describe('userShapeWarning', () => {
     expect(userShapeWarning({ data: { name: 'Ada' } } as never)).toContain('user.endpoint'))
   it('warns when a no-id user carries a pagination envelope', () =>
     expect(userShapeWarning({ meta: {}, links: {} } as never)).toContain('auto-unwraps'))
+
+  it('stays silent once the user has an id, even next to a `data`/`meta` field of its own', () => {
+    // An app's user resource may legitimately carry those names. The id is the evidence that
+    // unwrapping already happened, so warning here is dev-time noise on a correct response — and a
+    // diagnostic that cries wolf on working code is one developers learn to ignore.
+    expect(userShapeWarning({ id: 1, data: { x: 1 } } as never)).toBeNull()
+    expect(userShapeWarning({ id: 1, meta: {} } as never)).toBeNull()
+  })
+
+  it('warns on either envelope marker alone, not only on both together', () => {
+    // A collection wrapper that publishes just one of the pair is still an un-unwrapped envelope,
+    // and it is the harder one to spot by eye — so it is the one the diagnostic most needs to catch.
+    expect(userShapeWarning({ meta: { total: 1 } } as never)).toContain('user.endpoint')
+    expect(userShapeWarning({ links: { next: null } } as never)).toContain('user.endpoint')
+  })
+
+  it('names the remedy, which is the only reason the diagnostic is worth printing', () =>
+    // Telling a developer the shape is wrong without naming the fix just relocates the puzzle.
+    expect(userShapeWarning({ data: { name: 'Ada' } } as never)).toContain('withoutWrapping'))
 })

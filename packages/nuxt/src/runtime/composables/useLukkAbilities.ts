@@ -1,6 +1,24 @@
 import { can as coreCan, canAll as coreCanAll, canAny as coreCanAny, enforcesAbilities, LUKK_ACCOUNT, LUKK_ACCOUNT_DELETE, LUKK_SESSIONS, normalize } from 'lukk-core'
+import type { ComputedRef } from 'vue'
 import { computed } from '#imports'
 import { useLukkAuth } from './useLukkAuth'
+
+/**
+ * Declared rather than inferred: the module build cannot resolve `#imports`, so an inferred return type
+ * shipped as `any` in the published declarations — and every reactive member here with it.
+ */
+export interface LukkAbilities {
+  abilities: ComputedRef<string[] | undefined>
+  enforced: ComputedRef<boolean>
+  pinned: ComputedRef<boolean>
+  can: (ability: string) => boolean
+  cannot: (ability: string) => boolean
+  canAny: (list: string[]) => boolean
+  canAll: (list: string[]) => boolean
+  canManageSessions: ComputedRef<boolean>
+  canManageAccount: ComputedRef<boolean>
+  canDeleteAccount: ComputedRef<boolean>
+}
 
 /**
  * What the current token may do — reactive, and reads from the loaded user, so it works identically
@@ -21,7 +39,7 @@ import { useLukkAuth } from './useLukkAuth'
  * </template>
  * ```
  */
-export function useLukkAbilities() {
+export function useLukkAbilities(): LukkAbilities {
   const { user } = useLukkAuth()
 
   /**

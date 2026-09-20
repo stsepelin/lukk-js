@@ -20,6 +20,13 @@ async function doLogout() {
   await navigateTo('/login')
 }
 
+// The case the session specs are about: a logout the page does NOT await, followed at once by a
+// full navigation — within this app, or away to another origin entirely.
+function logoutAndLeave(to: string) {
+  void logout().catch(() => {})
+  window.location.href = to
+}
+
 // Passkey registration is gated by step-up confirmation: confirm the password first
 // (the BFF holds the confirmation token server-side), then run the WebAuthn ceremony.
 async function registerPasskey() {
@@ -49,6 +56,24 @@ async function resendEmail() {
 <template>
   <div>
     <h2>Dashboard (protected)</h2>
+    <button
+      data-testid="logout-navigate"
+      @click="logoutAndLeave('/')"
+    >
+      Log out and go home
+    </button>
+    <button
+      data-testid="logout-slow"
+      @click="logoutAndLeave('/slow?ms=3000')"
+    >
+      Log out and go to a slow page
+    </button>
+    <button
+      data-testid="logout-leave"
+      @click="logoutAndLeave(String($route.query.away ?? '/'))"
+    >
+      Log out and leave
+    </button>
     <p data-testid="user-email">
       {{ user?.email }}
     </p>

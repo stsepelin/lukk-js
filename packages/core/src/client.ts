@@ -92,6 +92,8 @@ export function createLukkClient(hooks: LukkClientHooks) {
       let pair: TokenPair | null
       // A throwing refresh hook means "not refreshable" — honor the documented contract.
       try { pair = await refreshOnce() }
+      // Stryker disable next-line BlockStatement: emptying this catch leaves `pair` undefined instead
+      // of null, and `isTokenPair` rejects both identically — no input can distinguish the two.
       catch { pair = null }
       // Gated on the shape, like every other sink (`commit`). The refresh path checked only for
       // truthiness, so any 2xx body from /refresh reached the binding's storage hook unvalidated —
@@ -119,15 +121,47 @@ export function createLukkClient(hooks: LukkClientHooks) {
     request,
 
     // --- session ---
+    // The sign-in calls never refresh-and-retry (`false`). They don't authenticate with the current
+    // session, so a 401 from one — lukk answers an unknown passkey that way — is the answer, not an
+    // expired token. Retrying rotated the refresh token of the session being REPLACED, and a binding
+    // that holds refreshes back while a sign-in is on the wire would wait on itself.
     /** Create an account and (unless verification blocks it) start a session — like login. */
-    register: (input: RegisterInput) => request<RegisterResult>('/register', json(input)).then(commit),
-    login: (c: LoginInput) => request<LoginResult>('/login', json(c)).then(commit),
-    twoFactorChallenge: (i: TwoFactorInput) => request<TokenPair>('/two-factor-challenge', json(i)).then(commit),
+    register: (input: RegisterInput) => request<RegisterResult>('/register', json(input), false).then(commit),
+    login: (c: LoginInput) => request<LoginResult>('/login', json(c), false).then(commit),
+    twoFactorChallenge: (i: TwoFactorInput) => request<TokenPair>('/two-factor-challenge', json(i), false).then(commit),
     /** Direct mode passes the refresh token; cookie/BFF mode relies on the cookie. */
     refreshTokens: (refresh_token?: string) => request<TokenPair>('/refresh', json(refresh_token ? { refresh_token } : {}), false),
     /** Silently restore a session on app load (returns null when there's no valid refresh). */
     restore: () => request<TokenPair>('/refresh', json({}), false).then(commit).catch(() => null as TokenPair | null),
-    logout: () => request<void>('/logout', { method: 'POST' }),
+    /**
+     * End the session. `retry: false` skips the refresh-and-retry on a 401, for a binding that renews
+     * the token itself: one that holds refreshes back while a logout is on the wire would otherwise
+     * have that refresh wait on the very logout waiting for it.
+     */
+    //
+    // Sent with a JSON body: lukk accepts a logout authenticated only by the refresh cookie (an expired
+    // access token otherwise left the session alive), and requires a non-simple request for that path so
+    // a cross-site form can't log anyone out. `application/json` is that signal — and it forces a CORS
+    // preflight, which a plain `POST` with no body did not.
+    //
+    // `keepalive`, so a page that navigates away right after starting it doesn't cancel it — a cancelled
+    // logout never reached lukk, and the session outlived what the user saw. A browser that refuses a
+    // keepalive request needing a CORS preflight rejects it with a TypeError; it is sent again without.
+    // Stryker disable next-line LogicalOperator: `?? true` and `&& true` differ only for `undefined`,
+    // and `request`'s own parameter default turns that back into `true` — the same call either way.
+    logout: (options: { retry?: boolean } = {}) => request<void>('/logout', { ...json({}), keepalive: true }, options.retry ?? true)
+      .catch((error: unknown) => {
+        if (!(error instanceof TypeError)) throw error
+        // Stryker disable next-line LogicalOperator: as above — `undefined` reaches `request`'s
+        // parameter default and becomes `true` regardless.
+        return request<void>('/logout', json({}), options.retry ?? true)
+      }),
+    /**
+     * Confirm this client received the session a sign-in just issued (lukk's `claim_seconds`): a session
+     * first used after that window is revoked. Any authenticated request claims too; this one exists so a
+     * client can do it straight away. Older lukk releases answer 404.
+     */
+    claimSession: () => request<void>('/session/claim', { method: 'POST' }),
     revokeAllSessions: () => request<void>('/sessions', { method: 'DELETE' }),
     revokeOtherSessions: () => request<void>('/sessions/others', { method: 'DELETE' }),
 
@@ -176,7 +210,7 @@ export function createLukkClient(hooks: LukkClientHooks) {
     passkeyRegistrationOptions: () => request<PublicKeyCredentialCreationOptionsJSON>('/passkeys/registration-options', { method: 'POST' }),
     registerPasskey: (credential: unknown, name?: string) => request<void>('/passkeys', json({ credential, name })),
     passkeyLoginOptions: () => request<PasskeyLoginOptions>('/passkeys/login-options', { method: 'POST' }),
-    loginWithPasskey: (ceremony_id: string, credential: unknown) => request<TokenPair>('/passkeys/login', json({ ceremony_id, credential })).then(commit),
+    loginWithPasskey: (ceremony_id: string, credential: unknown) => request<TokenPair>('/passkeys/login', json({ ceremony_id, credential }), false).then(commit),
     listPasskeys: () => request<{ passkeys: PasskeySummary[] }>('/passkeys'),
     deletePasskey: (id: string) => request<void>(`/passkeys/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   }
@@ -193,27 +227,60 @@ function joinURL(base: string, path: string): string {
 }
 
 /**
+ * Canonicalise a URL string the way the WHATWG URL parser will, BEFORE anything decides what it is.
+ *
+ * Three transformations, and all three have been a bypass:
+ *
+ *  1. Leading C0 controls and spaces are stripped (` https://evil.com`).
+ *  2. ASCII tab, LF and CR are removed from ANYWHERE in the input — not just the ends. This is the
+ *     one a leading-only strip misses: `ht<TAB>tps://evil.com` reads as a relative path to a naive
+ *     test, and the platform then fetches `https://evil.com`. Proven end to end against real ofetch,
+ *     which leaves such a string unjoined because ufo's `hasProtocol` matches `\s` inside the scheme.
+ *  3. `\` is treated as `/` for special schemes (`https:/\evil.com`).
+ *
+ * A relative path is exactly what callers green-light, so every one of these is a credential leak if
+ * it survives to the same-origin test.
+ */
+function canonical(path: string): string {
+  return path
+    // eslint-disable-next-line no-control-regex -- removing exactly what the URL parser removes
+    .replace(/[\u0009\u000A\u000D]/g, '')
+    // eslint-disable-next-line no-control-regex -- C0 controls are exactly what the parser strips
+    .replace(/^[\u0000-\u0020]+/, '')
+    .replace(/\\/g, '/')
+}
+
+/** Does this string carry its own origin — a scheme, or a protocol-relative `//host`? */
+export function carriesOrigin(path: string): boolean {
+  const candidate = canonical(path)
+  return candidate.startsWith('//') || /^[a-z][a-z0-9+.-]*:/i.test(candidate)
+}
+
+/**
  * Is the request target the same origin as `baseURL`? A relative `path` is always
  * same-origin (it joins onto the base). An absolute `path` only counts when its
  * origin matches an absolute base — otherwise we refuse to attach credentials.
  * Exported so lukk-nuxt's `useLukkFetch` reuses the exact same guard.
  */
 export function isSameOrigin(base: string, path: string): boolean {
-  // Canonicalise the way the WHATWG URL parser will, BEFORE deciding. A bare `^https?://` test is
-  // far stricter than the parser: the parser strips leading C0 controls and spaces, and treats `\`
-  // as `/` for special schemes. So ` https://evil.com`, `\thttps://evil.com` and `https:/\evil.com`
-  // all resolve to `https://evil.com` while reading as "relative" to the regex — and a relative
-  // path is exactly what this function green-lights for credentials.
-  // eslint-disable-next-line no-control-regex -- C0 controls are exactly what the parser strips
-  const candidate = path.replace(/^[\u0000-\u0020]+/, '').replace(/\\/g, '/')
+  const candidate = canonical(path)
 
   // No scheme, but an authority follows: protocol-relative, so always a foreign origin.
+  // Stryker disable next-line ConditionalExpression: removing this early return (`→ false`) is unobservable —
+  // `carriesOrigin` also answers true for `//host`, and the `!/^https?:/i` test below then returns
+  // false for the same input. The early return states the intent; it does not change the answer.
+  // Stryker cannot disable one variant of a node, so this also hides `→ true`, which "credential
+  // origin-scoping > attaches credentials to a same-origin absolute target" kills.
   if (candidate.startsWith('//')) return false
 
   // Anything else carrying a scheme must be http(s) AND match the base's origin. A non-http scheme
   // (`javascript:`, `data:`, `blob:`) is never same-origin, whatever the base.
-  if (/^[a-z][a-z0-9+.-]*:/i.test(candidate)) {
-    if (!/^https?:/i.test(candidate) || !/^https?:\/\//i.test(base)) return false
+  if (carriesOrigin(candidate)) {
+    if (!/^https?:/i.test(candidate)) return false
+    // Anchored, and it matters: the URL parser strips leading spaces and C0 controls, so an unanchored
+    // test let `' https://api.example'` through to `new URL(base)`, which then parses it — a base that
+    // should have been refused as malformed matched the target's origin instead.
+    if (!/^https?:\/\//i.test(base)) return false
     try { return new URL(candidate).origin === new URL(base).origin }
     catch { return false }
   }

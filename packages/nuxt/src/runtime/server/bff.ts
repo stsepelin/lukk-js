@@ -1,14 +1,24 @@
 import type { H3Event } from 'h3'
 import { isTokenPair } from 'lukk-core'
-import { defineEventHandler, getCookie, getRequestHeader, readRawBody, setResponseHeader, setResponseStatus, useSession } from 'h3'
+import { defineEventHandler, deleteCookie, getCookie, getRequestHeader, readRawBody, setResponseHeader, setResponseStatus, useSession } from 'h3'
 import { useRuntimeConfig } from '#imports'
-import { LUKK_BFF_PREFIX, confirmationHeaderName, sessionCookieName } from '../shared'
-import { isForeignOrigin, rejectUnresolvedTarget, resolveTarget, viaHeader, visitorIp } from './proxy-utils'
+import { LUKK_BFF_PREFIX, confirmationHeaderName, logoutCookieName, sessionCookieName, signedOutCookieName } from '../shared'
+import { isForeignOrigin, rejectUnresolvedTarget, reportProxyFailure, resolveTarget, viaHeader, visitorIp } from './proxy-utils'
+import { endSession, newSessionId, sessionEnded, sessionKey, sessionReplaced, withholdSessionCookie } from './ended-sessions'
+import { revokeDroppedSession } from './revoke-dropped'
 import { readSealedSession } from './sealed-session'
 import { warnIfSessionTooLarge } from './session-size'
 import { refreshOnce, type TokenSession } from './utils/refresh'
 
 type SessionCookieOptions = { sameSite: 'strict', secure: boolean, httpOnly: true, path: '/' }
+
+/**
+ * Sign-in routes never refresh and retry. They don't authenticate with the session they would replace,
+ * so a 401 from one is the answer — lukk gives it for a passkey whose user no longer exists — not an
+ * expired token. Retrying rotated the session being replaced and replayed an already-spent ceremony.
+ * The same rule lukk-core applies in the browser.
+ */
+const SIGN_IN_PATHS = new Set(['/login', '/register', '/two-factor-challenge', '/passkeys/login'])
 
 /**
  * The BFF proxy. The browser calls `/api/_lukk/*`; this handler attaches the
@@ -27,6 +37,13 @@ export default defineEventHandler(async (event) => {
   const secure = cookieSecure !== false
   const sessionName = sessionCookieName(secure, cookieNamespace)
   const cookieOptions: SessionCookieOptions = { sameSite: 'strict', secure, httpOnly: true, path: '/' }
+  // The browser's logout note (see `logoutCookieName`): cleared once the logout is done, and by any new session.
+  const clearLogoutNote = () => {
+    const options = { path: '/', secure, sameSite: 'strict' as const }
+    deleteCookie(event, logoutCookieName(secure, cookieNamespace), options)
+    // And the server's answer to it: left standing, the next page load reads this browser as signed out.
+    deleteCookie(event, signedOutCookieName(secure, cookieNamespace), options)
+  }
 
   // CSRF: reject a state-changing request riding the session cookie from a foreign origin.
   if (isForeignOrigin(event, secure)) {
@@ -45,7 +62,9 @@ export default defineEventHandler(async (event) => {
   const session = () => (rwSession ??= openSession(event, sessionPassword, sessionName, cookieOptions))
 
   // Resolve + contain the upstream URL to same-origin-under-base (defeats traversal / authority-smuggling).
-  const subpath = event.path.slice(LUKK_BFF_PREFIX.length).split('?')[0] || '/'
+  const path = event.path.slice(LUKK_BFF_PREFIX.length).split('?')[0]
+  // Stryker disable next-line StringLiteral: equivalent — `resolveTarget` resolves '' and '/' to the same URL, and neither is a subpath branched on below. Kept so the log names a path.
+  const subpath = path || '/'
   const target = resolveTarget(baseURL, subpath)
   if (!target) return rejectUnresolvedTarget(event, baseURL, 'lukk `baseURL`', subpath)
 
@@ -64,12 +83,18 @@ export default defineEventHandler(async (event) => {
   const confirmationHeader = confirmationHeaderName((useRuntimeConfig(event).public.lukk as { confirmationHeader?: string }).confirmationHeader)
   const rawBody = method === 'GET' || method === 'HEAD' ? undefined : await readRawBody(event)
 
+  // A logout also presents the session's refresh token. lukk releases that accept one end the session
+  // with it even when the access token has expired and a refresh is throttled or failing — and without
+  // spending a rotation first. Older releases ignore the field and use the bearer, as before.
+  const endsSession = subpath === '/logout'
+  let logoutRefresh = sealed.refresh
+
   function callLukk(access: string | undefined): Promise<Response> {
     // This path builds its headers from scratch rather than forwarding the client's, so there is
     // nothing to strip — no hop-by-hop or spoofed forwarding header can reach the upstream. Via is
     // still owed: RFC 9110 §7.6.3 asks every forwarding intermediary to identify itself.
     const headers: Record<string, string> = { Accept: 'application/json', Via: viaHeader(event) }
-    const contentType = getRequestHeader(event, 'content-type')
+    const contentType = endsSession ? 'application/json' : getRequestHeader(event, 'content-type')
     if (contentType) headers['Content-Type'] = contentType
     // Confirmation token is held server-side too — never trust one from the browser.
     if (sealed.confirmation) headers[confirmationHeader] = sealed.confirmation
@@ -82,7 +107,14 @@ export default defineEventHandler(async (event) => {
     // Never follow an upstream 3xx: a cross-origin redirect would re-emit the custom
     // X-Lukk-Confirmation header (undici keeps custom headers across redirects) and, on a
     // 307/308, the request body to the redirect host (CWE-918/200). Handled below.
-    return fetch(target!, { method, headers, body: rawBody, redirect: 'manual' })
+    const body = endsSession ? JSON.stringify(logoutRefresh ? { refresh_token: logoutRefresh } : {}) : rawBody
+    // lukk unreachable, or the connection dropped: answer 502 like any other upstream failure, rather
+    // than letting the fetch error escape as a 500 with a stack trace in the log on every attempt.
+    return fetch(target!, { method, headers, body, redirect: 'manual' }).catch((error: unknown) => {
+      reportProxyFailure(target!, error)
+      // No headers: only the status and body of this Response are read below.
+      return new Response(JSON.stringify({ message: 'lukk could not be reached.' }), { status: 502 })
+    })
   }
 
   // `/refresh` is SERVED here, never proxied. The browser holds an opaque cookie, not a refresh
@@ -100,7 +132,20 @@ export default defineEventHandler(async (event) => {
     }
 
     const s = await session()
+    // Replaced by a sign-in, or ended by a logout, while this request was out. Neither rotate nor
+    // write: the browser already holds the newer cookie. 409 rather than 401 — the visitor may well be
+    // signed in, and the client reports it as "couldn't tell", whose retry carries the new cookie.
+    const replaced = () => {
+      setResponseStatus(event, 409)
+      return { message: 'The session was replaced.' }
+    }
+    if (await sessionEnded(sessionKey(s))) return replaced()
+
     const { pair, expiresIn, retryable } = await refreshOnce(s, baseURL, clientIp)
+    if (await sessionEnded(sessionKey(s))) {
+      revokeDroppedSession(event, { access: pair?.access, refresh: pair?.refresh }, baseURL, clientIp)
+      return replaced()
+    }
 
     if (!pair) {
       if (!retryable) await s.clear()
@@ -110,28 +155,62 @@ export default defineEventHandler(async (event) => {
 
     await s.update(pair)
     warnIfSessionTooLarge(s)
+    if (await sessionEnded(sessionKey(s))) {
+      withholdSessionCookie(event.node.res, sessionName)
+      revokeDroppedSession(event, pair, baseURL, clientIp)
+      return replaced()
+    }
 
     // The same shape the proxied token-pair capture returns — the browser never sees a token.
     return { ok: true, expires_in: expiresIn }
   }
 
-  // The live refresh token: `sealed.refresh` until an in-request refresh rotates it.
-  let currentRefresh = sealed.refresh
   let res = await callLukk(sealed.access)
+  // Rotated tokens this request re-sealed, if any — revoked should the session turn out to be replaced.
+  let resealedTokens: TokenSession | undefined
+  // A refresh that failed without lukk rejecting the token (a throttle, an outage): the session is live.
+  let stillRefreshable = false
 
-  if (res.status === 401 && sealed.refresh) {
+  if (res.status === 401 && sealed.refresh && !SIGN_IN_PATHS.has(subpath)) {
     const s = await session()
-    const { pair, retryable } = await refreshOnce(s, baseURL, clientIp)
-    if (pair) {
-      await s.update(pair)
-      warnIfSessionTooLarge(s)
-      currentRefresh = pair.refresh
-      res = await callLukk(pair.access)
-    }
-    // Clear ONLY on a definitive rejection. A throttled or failed refresh leaves the token valid, and
-    // discarding the session there turns a transient 429 into an unrecoverable logout.
-    else if (!retryable) {
-      await s.clear()
+    // A session a sign-in replaced or a logout ended is neither rotated nor written — before the
+    // refresh or after it — and the 401 goes back as it came. See the `/refresh` branch above.
+    const ended = () => sessionEnded(sessionKey(s))
+    // Except for a logout: it still renews an ended session's token — never writing it back — so that
+    // lukk actually revokes it. Skipping it left a replaced session's family alive after the logout.
+    const endingIt = subpath === '/logout'
+
+    if (endingIt || !(await ended())) {
+      const { pair, retryable } = await refreshOnce(s, baseURL, clientIp)
+      if (pair && (endingIt || !(await ended()))) {
+        logoutRefresh = pair.refresh
+        // Seal AFTER the retried call, so a sign-in or logout during it is still seen — the response
+        // carries this cookie only once that call is done. In `finally`: the refresh token has been
+        // rotated either way, and a throw that skipped the write would strand the session on a consumed one.
+        try { res = await callLukk(pair.access) }
+        finally {
+          if (!(await ended())) {
+            await s.update(pair)
+            warnIfSessionTooLarge(s)
+            resealedTokens = pair
+          }
+          // The logout is about to revoke it itself.
+          else if (!endingIt) {
+            revokeDroppedSession(event, pair, baseURL, clientIp)
+          }
+        }
+      }
+      else if (pair) {
+        revokeDroppedSession(event, pair, baseURL, clientIp)
+      }
+      // Clear ONLY on a definitive rejection. A throttled or failed refresh leaves the token valid, and
+      // discarding the session there turns a transient 429 into an unrecoverable logout.
+      else if (!pair && !retryable && !(await ended())) {
+        await s.clear()
+      }
+      else if (!pair && retryable) {
+        stillRefreshable = true
+      }
     }
   }
 
@@ -145,32 +224,81 @@ export default defineEventHandler(async (event) => {
   const text = await res.text()
   const data: unknown = text ? safeParse(text) : undefined
 
+  // Reading the body can take as long as the upstream likes. A session re-sealed above that a sign-in or
+  // logout ended meanwhile must not leave with this response — the last point before it does.
+  if (rwSession && await sessionEnded(sessionKey(await rwSession))) {
+    withholdSessionCookie(event.node.res, sessionName)
+    revokeDroppedSession(event, resealedTokens ?? {}, baseURL, clientIp)
+  }
+
   // Capture + strip minted tokens. Login / 2FA / passkey login / register only — `/refresh` is
   // served above and returns before reaching here, which is why wiping `confirmation` below is safe:
   // every pair that gets this far starts a NEW family, whereas a rotation keeps the old one and
   // `refreshOnce`'s merge-update deliberately preserves the step-up across it.
   if (res.ok && isTokenPair(data)) {
     const s = await session()
+    // The session this request arrived with is over: a refresh still out for it must not write it back,
+    // and lukk is told to end it now. Its cookie is about to be overwritten, so nothing could reach it
+    // again — but it stayed live on lukk until it expired, and if this response never reaches the
+    // browser (a dropped connection, an aborted fetch), the browser kept using it for as long.
+    if (sealed.access || sealed.refresh) {
+      await endSession(sessionKey(s), { replaced: true })
+      revokeDroppedSession(event, sealed, baseURL, clientIp)
+    }
     // `confirmation: undefined` too: a fresh token pair means a new SESSION, and a step-up earned by
     // the previous one must not carry over. Before confirmations were bound to the earning session
     // that was a silent no-op for the same subject; now it is a hard 423 on every step-up-gated
     // route, and the browser cannot clear the proxy's copy — `useLukkConfirmation.clear()` only
     // touches client state — so it would stick until `confirm.ttl` expired it.
-    await s.update({ access: data.access_token, refresh: data.refresh_token ?? currentRefresh, confirmation: undefined })
+    // No fallback to the refresh token the request arrived with: that belongs to the session being
+    // REPLACED. Sealed under the new access token, the next refresh turned the browser back into the
+    // previous account — and replayed a token lukk had already rotated, which reuse detection then
+    // reported as theft. Without one, the new session simply ends when its access token does.
+    await s.update({ access: data.access_token, refresh: data.refresh_token, confirmation: undefined, sid: newSessionId() })
     warnIfSessionTooLarge(s)
+    // A logout noted before this sign-in was for the session it replaced — which is ended above. Left
+    // standing, the next page load would end THIS one.
+    clearLogoutNote()
     return { ok: true, expires_in: data.expires_in }
   }
 
   // Capture + strip a step-up confirmation token — keep it server-side as well.
   if (res.ok && isConfirmation(data)) {
     const s = await session()
+    // h3 re-seals the WHOLE session on any update — a confirmation answering after a sign-in or logout
+    // would write the replaced session back. It also belongs to that session, so it is not recorded.
+    if (await sessionEnded(sessionKey(s))) {
+      setResponseStatus(event, 409)
+      return { message: 'The session was replaced.' }
+    }
     await s.update({ confirmation: data.confirmation_token })
     warnIfSessionTooLarge(s)
     return { ok: true }
   }
 
+  // Clear only once the session is actually over: lukk ended it (2xx), or rejected credentials that can
+  // no longer be renewed. A throttled logout (`429`), an outage, or a 401 whose refresh merely failed
+  // leaves the session live on lukk — clearing the cookie then left it running with nothing pointing
+  // at it, while the visitor believed they had logged out. The client is told, and can retry.
+  const sessionOver = res.ok || ((res.status === 401 || res.status === 403) && !stillRefreshable)
+
   // Only clear an existing cookie — never mint one just to expire it.
-  if (subpath === '/logout' && hasCookie) await (await session()).clear()
+  if (subpath === '/logout' && hasCookie && sessionOver) {
+    const s = await session()
+    const unsealed = Boolean(sealed.access || sealed.refresh)
+    // Not for a session a sign-in has ALREADY replaced: the browser holds the newer cookie, and clearing
+    // here would land after it and sign that newer session out — leaving it alive on lukk with nothing
+    // pointing at it. The logout above still revoked this one upstream. (One a LOGOUT ended is cleared
+    // again: a logout resent after its first response was lost carries the same, now dead, cookie.)
+    if (!unsealed || !(await sessionReplaced(sessionKey(s)))) {
+      // Only a session that unsealed: a forged or expired cookie still gets an h3 id, and recording
+      // those let anyone flood the record past its bound and evict the entries that matter.
+      if (unsealed) await endSession(sessionKey(s))
+      await s.clear()
+      // Only with the session it was for: a note beside a newer session's cookie belongs to that one.
+      clearLogoutNote()
+    }
+  }
 
   setResponseStatus(event, res.status)
 
@@ -197,6 +325,7 @@ function isConfirmation(value: unknown): value is { confirmation_token: string }
 
 function safeParse(text: string): unknown {
   try { return JSON.parse(text) }
+  // Stryker disable next-line BlockStatement: equivalent — an emptied catch yields undefined, which no capture matches and the handler's final `?? text` turns back into the text.
   catch { return text }
 }
 
@@ -207,12 +336,17 @@ function safeParse(text: string): unknown {
  * before it stores something, but a REMOVAL must not depend on the shape being what we expected.
  */
 function redactCredentials(data: unknown): unknown {
-  if (typeof data !== 'object' || data === null || Array.isArray(data)) return data
+  // Arrays and nested objects too, to the docblock's promise rather than the shape lukk happens to
+  // send today: a list of sessions, or a `{ data: { ... } }` envelope from a rebound response, carried
+  // a token straight through.
+  //
+  // To any depth. It was capped at four levels "so a deep or cyclic body cannot spend the request",
+  // which made a token five levels down pass through untouched — the opposite of failing closed. A
+  // `JSON.parse` result cannot be cyclic, the work is linear in a body lukk already sent, and a body
+  // nested deeply enough to exhaust the stack fails the request rather than leaking anything.
+  if (typeof data !== 'object' || data === null) return data
+  if (Array.isArray(data)) return data.map(item => redactCredentials(item))
 
-  const body = data as Record<string, unknown>
-  if (!('refresh_token' in body) && !('confirmation_token' in body)) return data
-
-  const { refresh_token: _r, confirmation_token: _c, ...rest } = body
-
-  return rest
+  const { access_token: _a, refresh_token: _r, confirmation_token: _c, ...rest } = data as Record<string, unknown>
+  return Object.fromEntries(Object.entries(rest).map(([key, value]) => [key, redactCredentials(value)]))
 }

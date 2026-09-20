@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { __test } from './mocks/imports'
 
-const auth = { loggedIn: { value: false } }
+const auth = { loggedIn: { value: false }, ready: { value: true }, restoreFailed: { value: false } }
 vi.mock('../src/runtime/composables/useLukkAuth', () => ({ useLukkAuth: () => auth }))
 const emailVer = { verified: { value: false } }
 vi.mock('../src/runtime/composables/useLukkEmailVerification', () => ({ useLukkEmailVerification: () => emailVer }))
@@ -17,7 +17,7 @@ import verified from '../src/runtime/middleware/verified'
 // eslint-disable-next-line import/first
 import confirmed from '../src/runtime/middleware/confirmed'
 
-afterEach(() => { __test.reset(); auth.loggedIn.value = false; emailVer.verified.value = false; confirm.confirmed.value = false })
+afterEach(() => { __test.reset(); auth.loggedIn.value = false; auth.ready.value = true; auth.restoreFailed.value = false; emailVer.verified.value = false; confirm.confirmed.value = false })
 
 const run = (path: string) => (middleware as unknown as (to: { path: string }) => unknown)({ path })
 const runGuest = (path: string) => (guest as unknown as (to: { path: string }) => unknown)({ path })
@@ -40,6 +40,19 @@ describe('lukk-auth middleware', () => {
   it('does not redirect on the login page itself', () => {
     auth.loggedIn.value = false
     expect(run('/login')).toBeUndefined()
+    expect(__test.navigated).toBeUndefined()
+  })
+
+  it('defers while the session is unresolved — a server render that could not tell is not "signed out"', () => {
+    // Redirecting there sent a signed-in visitor to /login before the client restored them.
+    auth.ready.value = false
+    expect(run('/dashboard')).toBeUndefined()
+    expect(__test.navigated).toBeUndefined()
+  })
+
+  it('does not redirect when the restore could not reach an answer', () => {
+    auth.restoreFailed.value = true
+    expect(run('/dashboard')).toBeUndefined()
     expect(__test.navigated).toBeUndefined()
   })
 })

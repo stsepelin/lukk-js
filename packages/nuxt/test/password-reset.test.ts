@@ -10,6 +10,8 @@ describe('useLukkPasswordReset', () => {
     const forgotPassword = vi.fn(() => new Promise<void>((r) => { release = r }))
     __test.nuxtApp = { $lukk: { forgotPassword } }
     const pr = useLukkPasswordReset()
+    expect(pr.sending.value).toBe(false) // idle until asked — bound buttons start enabled
+    expect(pr.resetting.value).toBe(false)
 
     const pending = pr.sendResetLink('a@b.c')
     expect(pr.sending.value).toBe(true)

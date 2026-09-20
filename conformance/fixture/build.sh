@@ -16,10 +16,20 @@ COOKIE_MODE="${LUKK_COOKIE_MODE:-false}"
 
 # Pin Laravel 12 (Symfony 7): web-auth/webauthn-lib doesn't support Symfony 8 yet,
 # and lukk supports ^12|^13 — so 12 gives us the passkey feature in conformance.
+# Only ever a throwaway app. This script overwrites .env, the User model, config and seeders, and runs
+# `migrate:fresh` — pointed at a real application (LUKK_APP_DIR comes from the environment) it would drop
+# every table. An app we built carries the sentinel below; anything else with an artisan in it is refused.
+if [ -f "$APP_DIR/artisan" ] && [ ! -f "$APP_DIR/.lukk-conformance-fixture" ]; then
+  echo "✗ $APP_DIR looks like a real Laravel app (no .lukk-conformance-fixture sentinel) — refusing to rebuild it."
+  exit 1
+fi
+
 if [ ! -f "$APP_DIR/artisan" ]; then
   composer create-project 'laravel/laravel:^12' "$APP_DIR" --no-interaction --prefer-dist
 fi
 cd "$APP_DIR"
+# Ours from here on — marked before anything is overwritten, so even a half-built app is rebuildable.
+touch .lukk-conformance-fixture
 
 # Install lukk from the local working copy (LUKK_PATH) or Packagist. The path repo
 # is symlinked, so edits to your lukk checkout are picked up on the next boot.
@@ -153,6 +163,21 @@ if (app()->environment() !== 'production') {
         ]);
 
         return response()->json(['id' => $user->id, 'email' => $user->email, 'password' => 'password']);
+    });
+
+    // How many sessions a user has that are still usable — the browser suites assert on this
+    // rather than on what a page happens to render, so "logged out everywhere" is checked where
+    // it is actually decided.
+    Route::get('/conformance/live-sessions', function (\Illuminate\Http\Request $request) {
+        $user = \App\Models\User::where('email', (string) $request->query('email'))->first();
+
+        return response()->json([
+            'live' => $user === null ? 0 : \Lukk\Models\RefreshToken::query()
+                ->where('user_id', $user->id)
+                ->whereNull('revoked_at')
+                ->where('expires_at', '>', now())
+                ->count(),
+        ]);
     });
 
     // GET, like the other two helpers: these live in `routes/web.php`, so a POST would be
