@@ -115,7 +115,7 @@ jobs:
           extensions: pdo_sqlite, mbstring, bcmath
           tools: composer
 
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
@@ -134,7 +134,7 @@ jobs:
 
       # Playwright traces carry full request bodies and `Set-Cookie` — fixture credentials only. Never
       # point this runner at a real lukk instance or seed a real account.
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure()
         with:
           name: playwright-report-nuxt-${{ matrix.nuxt }}
@@ -172,7 +172,7 @@ jobs:
           extensions: pdo_sqlite, mbstring, bcmath
           tools: composer
 
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
@@ -188,7 +188,7 @@ jobs:
 
       # Playwright traces carry full request bodies and `Set-Cookie` — fixture credentials only. Never
       # point this runner at a real lukk instance or seed a real account.
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure()
         with:
           name: playwright-report-direct-nuxt-${{ matrix.nuxt }}
