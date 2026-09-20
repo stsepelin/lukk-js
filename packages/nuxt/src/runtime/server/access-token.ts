@@ -10,7 +10,10 @@ export function accessExpired(jwt: string): boolean {
   try {
     // Decode base64url via `base64` (universally-typed `BufferEncoding`; this file is pulled
     // into the app/plugin compile context where `base64url` isn't in the encoding union).
-    const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/')
+    // `!` because Nuxt 4's tsconfig turns on `noUncheckedIndexedAccess`, which does not narrow an
+    // index from the length check above. A default would be a branch no input can reach, and this
+    // package holds 100% branch coverage.
+    const b64 = parts[1]!.replace(/-/g, '+').replace(/_/g, '/')
     const payload = JSON.parse(Buffer.from(b64, 'base64').toString()) as { exp?: number }
     return typeof payload.exp !== 'number' || payload.exp * 1000 <= Date.now() + 10_000
   }

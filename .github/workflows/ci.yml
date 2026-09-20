@@ -46,10 +46,10 @@ jobs:
   nuxt-floor:
     runs-on: ubuntu-latest
     name: oldest supported Nuxt
-    # The module declares `@nuxt/kit: ^3.13.0`, but a caret range always resolves to the newest
-    # 3.x — so the main job has only ever exercised the latest release, and a regression against
-    # 3.13-3.20 could pass every check and ship. This installs the FLOOR and proves the module
-    # still compiles and type-checks against it.
+    # The module supports Nuxt 3 and 4 (`@nuxt/kit: ^3.13.0 || ^4.0.0`) and DEVELOPS against 4, so
+    # every other job exercises 4 only — a regression against 3.13-3.21 could pass every check and
+    # ship. This installs the declared FLOOR and proves the module still compiles and type-checks
+    # against it.
     #
     # The version is derived from package.json rather than written here, so raising the declared
     # floor moves this test with it instead of leaving a stale number behind.
@@ -68,7 +68,9 @@ jobs:
       - name: Resolve the declared Nuxt floor
         id: floor
         run: |
-          floor=$(node -p "require('./packages/nuxt/package.json').dependencies['@nuxt/kit'].replace(/^[^0-9]*/, '')")
+          # The first version in the range — `^3.13.0 || ^4.0.0` is the 3.x floor, which is the one
+          # nothing else tests.
+          floor=$(node -p "require('./packages/nuxt/package.json').dependencies['@nuxt/kit'].split('||')[0].replace(/^[^0-9]*/, '').trim()")
           echo "version=$floor" >> "$GITHUB_OUTPUT"
           echo "Declared floor: $floor"
 
@@ -79,6 +81,9 @@ jobs:
             "nuxt@${{ steps.floor.outputs.version }}" \
             "@nuxt/schema@${{ steps.floor.outputs.version }}" \
             "@nuxt/kit@${{ steps.floor.outputs.version }}"
+          # The playground is its own workspace package and now develops against Nuxt 4; left alone,
+          # this job would typecheck the module's floor against a Nuxt 4 app.
+          pnpm --filter lukk-nuxt-playground add -D "nuxt@${{ steps.floor.outputs.version }}"
           node -p "'kit resolved to ' + require('./packages/nuxt/node_modules/@nuxt/kit/package.json').version"
 
       - run: pnpm --filter lukk-core build
