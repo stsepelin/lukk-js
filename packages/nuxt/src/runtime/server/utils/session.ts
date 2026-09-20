@@ -1,6 +1,7 @@
 import type { H3Event } from 'h3'
 import { useRuntimeConfig } from '#imports'
 import { sessionCookieName } from '../../shared'
+import { logoutNoted } from '../logout-note'
 import { readSealedSession } from '../sealed-session'
 
 /**
@@ -21,6 +22,8 @@ export async function useLukkSession(event: H3Event): Promise<{ access: string |
 /** The current user's lukk access token from the sealed BFF session, or null. */
 export async function getLukkAccessToken(event: H3Event): Promise<string | null> {
   const { sessionPassword, cookieSecure, cookieNamespace } = useRuntimeConfig(event).lukk as { sessionPassword?: string, cookieSecure?: boolean, cookieNamespace?: string }
+  // Being logged out: the visitor asked, even if lukk hasn't been told yet (see `finish-logout`).
+  if (logoutNoted(event, cookieSecure !== false, cookieNamespace)) return null
   const name = sessionCookieName(cookieSecure !== false, cookieNamespace)
   const { access } = await readSealedSession(event, sessionPassword, name)
   return typeof access === 'string' ? access : null

@@ -12,6 +12,7 @@ function json(body: unknown, status = 200): Response {
 describe('endpoint methods → route + verb', () => {
   const cases: Array<[string, (c: LukkClient) => Promise<unknown>, string, string | undefined]> = [
     ['logout', c => c.logout(), 'https://x/auth/logout', 'POST'],
+    ['claimSession', c => c.claimSession(), 'https://x/auth/session/claim', 'POST'],
     ['revokeAllSessions', c => c.revokeAllSessions(), 'https://x/auth/sessions', 'DELETE'],
     ['revokeOtherSessions', c => c.revokeOtherSessions(), 'https://x/auth/sessions/others', 'DELETE'],
     ['deleteAccount', c => c.deleteAccount(), 'https://x/auth/account', 'DELETE'],

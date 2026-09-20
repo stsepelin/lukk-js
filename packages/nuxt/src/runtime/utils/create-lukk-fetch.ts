@@ -1,7 +1,7 @@
 import type { $Fetch, FetchContext, FetchOptions } from 'ofetch'
 // Reuse core's guard + error builder so the same-origin check and the LukkError shape
 // stay identical across the two transports (no drift on a security-critical path).
-import { isSameOrigin, lukkError } from 'lukk-core'
+import { carriesOrigin, isSameOrigin, lukkError } from 'lukk-core'
 
 export interface LukkFetchDeps {
   /** App-API base — the same-origin proxy mount (BFF) or the API URL (direct). */
@@ -16,6 +16,8 @@ export interface LukkFetchDeps {
   getBearer: () => string | null
   /** Single-flight token refresh (shared with `$lukk`); resolves truthy on success. */
   refresh: () => Promise<unknown>
+  /** This app's own origin, where it is known — for judging an absolute URL against a relative base. */
+  origin?: string
   /** Surface an upstream redirect instead of silently following it. */
   onRedirect: (location: string) => void
   /** The ofetch base (injectable for tests). */
@@ -40,7 +42,11 @@ function redirectLocation(response: Response): string | null {
 export function lukkFetchOptions(deps: LukkFetchDeps): FetchOptions {
   return {
     baseURL: deps.baseURL,
-    credentials: 'include',
+    // `same-origin`, upgraded to `include` by the hook below once the target is known to be same-origin as
+    // the API base. The other way round fails OPEN: ofetch merges per-call options by spreading, so a
+    // caller's own `onRequest` replaces ours — and a cross-origin URL would then keep `include` and carry
+    // that origin's cookies.
+    credentials: 'same-origin',
     redirect: 'manual',
     // Direct mode: let ofetch retry a 401 once — the refresh runs in onResponseError
     // first, so the retry's onRequest reads the fresh token. BFF refreshes in the proxy.
@@ -54,7 +60,32 @@ export function lukkFetchOptions(deps: LukkFetchDeps): FetchOptions {
       // Never attach the sealed session cookie / bearer to a cross-origin target a
       // caller may have passed — and drop `credentials` there too.
       const url = typeof ctx.request === 'string' ? ctx.request : ctx.request.url
-      const sameOrigin = isSameOrigin(deps.baseURL, url)
+      // The per-call `baseURL` counts too: ofetch applies it AFTER this hook, so checking the request alone
+      // would clear a relative path as same-origin and then send the bearer to the caller's own origin.
+      //
+      // An EMPTY base is not a relative one. It is ofetch's idiom for "take this path exactly as given",
+      // which `loadUser` passes so a configured absolute `user.endpoint` survives. Reading it as relative
+      // refused the bearer on every direct-mode app whose API base is absolute — which is every ordinary
+      // one — so login succeeded and the user then never loaded, burning a rotation per retry.
+      const declared = typeof options.baseURL === 'string' ? options.baseURL : undefined
+      const perCall = declared === '' ? undefined : declared
+      const known = (base: string | undefined, target: string) => base !== undefined && isSameOrigin(base, target)
+      const apiIsRelative = !/^https?:\/\//i.test(deps.baseURL)
+      // This app's own origin stands in for the API's ONLY where the API base is the relative proxy mount:
+      // there `isSameOrigin` refuses every absolute URL, and same-origin is exactly what the mount means.
+      // With an ABSOLUTE API base the app's origin is a different host that the bearer was never scoped
+      // to — and on the server this origin comes from the `Host` header, so it is not ours to trust.
+      const appOrigin = apiIsRelative ? deps.origin : undefined
+      const perCallOk = perCall === undefined
+        ? true
+        : carriesOrigin(perCall)
+          // Absolute: the API's own origin, or this app's under the proxy mount. Unknown origin (SSR
+          // without a request URL) stays refused.
+          ? isSameOrigin(deps.baseURL, perCall) || known(appOrigin, perCall)
+          // Relative: it resolves against the DOCUMENT, so it only stays on the API when the API is this
+          // app (a relative base). With an absolute API base it points somewhere else entirely.
+          : apiIsRelative
+      const sameOrigin = (isSameOrigin(deps.baseURL, url) || known(appOrigin, url)) && perCallOk
       options.credentials = sameOrigin ? 'include' : 'same-origin'
       if (sameOrigin) {
         if (deps.isServer) {

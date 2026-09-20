@@ -1,6 +1,6 @@
 import { isSameOrigin } from 'lukk-core'
 import { type $Fetch, ofetch } from 'ofetch'
-import { navigateTo, useNuxtApp, useRequestFetch, useRequestHeaders, useRuntimeConfig, useState } from '#imports'
+import { navigateTo, useNuxtApp, useRequestFetch, useRequestHeaders, useRequestURL, useRuntimeConfig, useState } from '#imports'
 import { ACCESS_KEY } from '../keys'
 import { createLukkFetch, createRequestFetch, type LukkFetchDeps, type RequestFetch } from '../utils/create-lukk-fetch'
 
@@ -31,6 +31,11 @@ export function useLukkFetch(): $Fetch {
   // Capture the request cookie eagerly, in valid Nuxt context — reading it lazily inside
   // ofetch's interceptor can lose the SSR async context (empty on the client).
   const cookie = useRequestHeaders(['cookie']).cookie
+  // Read here, in valid Nuxt context, for the same reason the cookie is.
+  const requestOrigin = (): string | undefined => {
+    try { return useRequestURL().origin }
+    catch { return undefined }
+  }
 
   const deps: LukkFetchDeps = {
     baseURL: cfg.apiBaseURL,
@@ -38,6 +43,7 @@ export function useLukkFetch(): $Fetch {
     // Direct mode holds the token in client memory; SSR has none, so nothing to refresh.
     canRefresh: isDirect && import.meta.client === true,
     getCookieHeader: () => cookie,
+    origin: requestOrigin(),
     getBearer: () => (isDirect ? access.value : null),
     refresh: () => nuxtApp.$lukkRefresh?.() ?? Promise.resolve(null),
     // `external: true` opts out of Nuxt's absolute-URL block, so contain it ourselves: only follow

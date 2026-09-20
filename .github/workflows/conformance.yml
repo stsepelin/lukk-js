@@ -19,6 +19,13 @@ env:
   LUKK_REPO: stsepelin/lukk
   LUKK_REF: main
 
+# These jobs run code from the PR head (the runner scripts themselves) and install a large third-party
+# supply chain — composer, pnpm, apt, and Nuxt versions resolved outside the lockfile. So: a read-only
+# token, no `secrets.*` anywhere in this file, and `pull_request`, never `pull_request_target`. A fork PR
+# may point `LUKK_REPO`/`LUKK_REF` at its own repo; that is harmless only while those three hold.
+permissions:
+  contents: read
+
 jobs:
   conformance:
     runs-on: ubuntu-latest
@@ -29,6 +36,8 @@ jobs:
     name: lukk-core vs real lukk (cookie_mode=${{ matrix.cookie_mode }})
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # The PHP package, so the fixture is built from source rather than from the last release.
       # A fork PR gets this too (the repo is public); a contributor testing their own lukk fork
@@ -38,6 +47,7 @@ jobs:
           repository: ${{ env.LUKK_REPO }}
           ref: ${{ env.LUKK_REF }}
           path: lukk-php
+          persist-credentials: false
 
       - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
         with:
@@ -70,3 +80,113 @@ jobs:
           (cd "$RUNNER_TEMP/lukk-fixture" && php artisan serve --host=127.0.0.1 --port=8000 &)
           for i in $(seq 1 20); do curl -fsS http://127.0.0.1:8000/up >/dev/null 2>&1 && break; sleep 1; done
           pnpm --filter lukk-core test:conformance
+
+  browser:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # The module supports Nuxt 3.13 through 4.x, but one app can only pin one of them — so the
+      # browser suite used to prove the flows against whatever that pin happened to be. `floor` is
+      # the declared `@nuxt/kit` floor (raising it moves this with it); `3`/`4` are the newest of
+      # each major. The same specs run against each — see conformance/lib/nuxt-matrix.sh.
+      matrix:
+        nuxt: [floor, '3', '4']
+    name: browser E2E, BFF + SSR (nuxt ${{ matrix.nuxt }})
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.LUKK_REPO }}
+          ref: ${{ env.LUKK_REF }}
+          path: lukk-php
+          persist-credentials: false
+
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite, mbstring, bcmath
+          tools: composer
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # The system libraries Chromium needs on a bare runner; the browser itself is installed per
+      # prepared app (pinned to the Playwright the workspace resolved).
+      - run: pnpm -C conformance/apps/nuxt-bff exec playwright install --with-deps chromium
+
+      - name: Run the browser E2E
+        env:
+          LUKK_PATH: ${{ github.workspace }}/lukk-php
+        run: bash conformance/browser.sh --nuxt ${{ matrix.nuxt }}
+
+      # Playwright traces carry full request bodies and `Set-Cookie` — fixture credentials only. Never
+      # point this runner at a real lukk instance or seed a real account.
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        if: failure()
+        with:
+          name: playwright-report-nuxt-${{ matrix.nuxt }}
+          path: |
+            conformance/.matrix/*/test-results
+            conformance/apps/nuxt-bff/test-results
+          retention-days: 7
+
+  browser-direct:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # The direct transport (no proxy: token in memory, refresh on the `__Host-` cookie) across the
+      # supported Nuxt majors. SPA only here — `ssg` adds a second build of the same flows, which the
+      # local runner covers (`conformance/browser-direct.sh both`).
+      matrix:
+        nuxt: [floor, '4']
+    name: browser E2E, direct SPA (nuxt ${{ matrix.nuxt }})
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.LUKK_REPO }}
+          ref: ${{ env.LUKK_REF }}
+          path: lukk-php
+          persist-credentials: false
+
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite, mbstring, bcmath
+          tools: composer
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -C conformance/apps/nuxt-direct exec playwright install --with-deps chromium
+
+      - name: Run the browser E2E
+        env:
+          LUKK_PATH: ${{ github.workspace }}/lukk-php
+        run: bash conformance/browser-direct.sh spa --nuxt ${{ matrix.nuxt }}
+
+      # Playwright traces carry full request bodies and `Set-Cookie` — fixture credentials only. Never
+      # point this runner at a real lukk instance or seed a real account.
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        if: failure()
+        with:
+          name: playwright-report-direct-nuxt-${{ matrix.nuxt }}
+          path: |
+            conformance/.matrix/*/test-results
+            conformance/apps/nuxt-direct/test-results
+          retention-days: 7

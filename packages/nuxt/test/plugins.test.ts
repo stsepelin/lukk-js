@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { READY_KEY } from '../src/runtime/keys'
+import { ACCESS_KEY, READY_KEY } from '../src/runtime/keys'
 import { restoreState } from '../src/runtime/utils/restore-state'
 import { __test, useState } from './mocks/imports'
 
@@ -17,17 +17,19 @@ vi.mock('lukk-core', async importActual => ({
 }))
 
 const initSession = vi.fn()
+const logout = vi.fn(async () => {})
 const loggedIn = { value: false }
 const fetchUser = vi.fn()
 const user: { value: { abilities?: string[] } | null } = { value: null }
-vi.mock('../src/runtime/composables/useLukkAuth', () => ({ useLukkAuth: () => ({ initSession, loggedIn, fetchUser, user }) }))
+const restoreFailed = { value: false }
+vi.mock('../src/runtime/composables/useLukkAuth', () => ({ useLukkAuth: () => ({ initSession, loggedIn, fetchUser, user, logout, restoreFailed }) }))
 
 // eslint-disable-next-line import/first
 import clientPlugin, { REPLACED_SESSION_RETRY_DELAY_MS } from '../src/runtime/plugins/client'
 // eslint-disable-next-line import/first
 import sessionPlugin from '../src/runtime/plugins/session.client'
 
-afterEach(() => { __test.reset(); captured.hooks = undefined; loggedIn.value = false; user.value = null; vi.clearAllMocks(); vi.useRealTimers() })
+afterEach(() => { __test.reset(); captured.hooks = undefined; loggedIn.value = false; restoreFailed.value = false; user.value = null; vi.clearAllMocks(); vi.useRealTimers() })
 
 describe('client plugin', () => {
   it('targets the lukk URL in direct mode and wires the token hooks', async () => {
@@ -182,6 +184,259 @@ describe('session.client plugin', () => {
     loggedIn.value = true
     await (sessionPlugin as unknown as () => Promise<void>)()
     expect(initSession).not.toHaveBeenCalled()
+  })
+})
+
+describe('session.client plugin — a logout the previous page never finished', () => {
+  // A page that navigated away right after logout() sent it on pagehide, which a browser fires only once
+  // the next page's response is in — so this page (and a BFF server render) could still carry the session.
+  const store = new Map<string, string>()
+  const fakeStorage = {
+    getItem: (k: string) => store.get(k) ?? null,
+    setItem: (k: string, v: string) => { store.set(k, v) },
+    removeItem: (k: string) => { store.delete(k) },
+  }
+
+  it('finishes it before restoring anything — reading this app\'s note, not another on the origin', async () => {
+    vi.stubGlobal('sessionStorage', fakeStorage)
+    restoreState(__test.nuxtApp).scope = '/admin/'
+    store.set('lukk:logging-out:/admin/', JSON.stringify({ at: Date.now() }))
+    loggedIn.value = true // the server rendered the old session
+
+    let finishing: number | undefined
+    logout.mockImplementationOnce(async () => { finishing = restoreState(__test.nuxtApp).finishingLogout })
+
+    await (sessionPlugin as unknown as () => Promise<void>)()
+
+    expect(logout).toHaveBeenCalledOnce()
+    expect(finishing).toBe(JSON.parse(store.get('lukk:logging-out:/admin/')!).at) // finishing THAT logout, not a new one
+    expect(initSession).not.toHaveBeenCalled()
+    expect(useState<boolean>(READY_KEY, () => false).value).toBe(true)
+    vi.unstubAllGlobals()
+    store.clear()
+  })
+
+  it('restores instead when a sign-in sent meanwhile in another tab made that logout moot', async () => {
+    vi.stubGlobal('sessionStorage', fakeStorage)
+    const shared = new Map<string, string>()
+    vi.stubGlobal('localStorage', { getItem: (k: string) => shared.get(k) ?? null, setItem: (k: string, v: string) => { shared.set(k, v) } })
+    const noted = Date.now()
+    store.set('lukk:logging-out:/', JSON.stringify({ at: noted }))
+    logout.mockImplementationOnce(async () => {
+      shared.set('lukk:signed-in-at:/', String(noted)) // while it waited for the lock
+      restoreState(__test.nuxtApp).logoutStoodDown = true
+    })
+
+    await (sessionPlugin as unknown as () => Promise<void>)()
+
+    expect(logout).toHaveBeenCalledOnce()
+    expect(initSession).toHaveBeenCalledOnce()
+    expect(restoreState(__test.nuxtApp).logoutStoodDown).toBe(false) // not left for a later logout on this page
+    vi.unstubAllGlobals()
+    store.clear()
+  })
+
+  it('still resolves the session when that logout fails', async () => {
+    vi.stubGlobal('sessionStorage', fakeStorage)
+    store.set('lukk:logging-out:/', JSON.stringify({ at: Date.now() }))
+    logout.mockRejectedValueOnce({ status: 503 })
+
+    await expect((sessionPlugin as unknown as () => Promise<void>)()).resolves.toBeUndefined()
+    expect(useState<boolean>(READY_KEY, () => false).value).toBe(true)
+    vi.unstubAllGlobals()
+    store.clear()
+  })
+
+  describe('direct mode, for a known session', () => {
+    const run = () => (sessionPlugin as unknown as () => Promise<void>)()
+    const jwt = (claims: object) => `h.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.s`
+    const restoresAs = (fid: string | undefined) => initSession.mockImplementationOnce(async () => {
+      loggedIn.value = fid !== undefined
+      useState<string | null>(ACCESS_KEY, () => null).value = fid === undefined ? null : jwt({ sub: 1, fid })
+    })
+    afterEach(() => { vi.unstubAllGlobals(); store.clear() })
+
+    it('restores, and ends what it restored when it is the session the logout was for', async () => {
+      vi.stubGlobal('sessionStorage', fakeStorage)
+      store.set('lukk:logging-out:/', JSON.stringify({ at: Date.now(), fid: 'F1' }))
+      restoresAs('F1')
+      logout.mockRejectedValueOnce({ status: 503 }) // swallowed like the others
+
+      await run()
+
+      expect(initSession).toHaveBeenCalledOnce()
+      expect(logout).toHaveBeenCalledOnce()
+      expect(restoreState(__test.nuxtApp).finishingLogout).toBeUndefined() // a plain logout: that session, confirmed
+    })
+
+    it('clears the stood-down flag when the logout it finished stood down, so the page does not read as signed out', async () => {
+      // The one restore branch that never reset the flag. Its logout CAN stand down — another tab records
+      // a sign-in while this one waits on the cross-tab lock — and the session is then live and already
+      // restored here, so a flag left set renders this page signed out until the next load.
+      vi.stubGlobal('sessionStorage', fakeStorage)
+      store.set('lukk:logging-out:/', JSON.stringify({ at: Date.now(), fid: 'F1' }))
+      restoresAs('F1')
+      logout.mockImplementationOnce(async () => { restoreState(__test.nuxtApp).logoutStoodDown = true })
+
+      await run()
+
+      expect(logout).toHaveBeenCalledOnce()
+      expect(restoreState(__test.nuxtApp).logoutStoodDown).toBe(false)
+    })
+
+    it('finishes the logout for an app with no user endpoint, where nothing ever reads as logged in', async () => {
+      vi.stubGlobal('sessionStorage', fakeStorage)
+      store.set('lukk:logging-out:/', JSON.stringify({ at: Date.now(), fid: 'F1' }))
+      // `loadUser` skips without an endpoint, so `loggedIn` stays false even though the restore rotated
+      // and produced a token for exactly the session the note names.
+      initSession.mockImplementationOnce(async () => {
+        useState<string | null>(ACCESS_KEY, () => null).value = `h.${Buffer.from(JSON.stringify({ sub: 1, fid: 'F1' })).toString('base64url')}.s`
+      })
+
+      await run()
+
+      expect(logout).toHaveBeenCalledOnce()
+    })
+
+    it('keeps a newer session the cookie holds by now — from another tab, an SSO callback, anywhere — and drops the note', async () => {
+      vi.stubGlobal('sessionStorage', fakeStorage)
+      store.set('lukk:logging-out:/', JSON.stringify({ at: Date.now(), fid: 'F1' }))
+      restoresAs('F2')
+      const announce = vi.fn()
+      restoreState(__test.nuxtApp).announce = announce
+
+      await run()
+
+      expect(logout).not.toHaveBeenCalled()
+      expect(store.has('lukk:logging-out:/')).toBe(false)
+      expect(announce).not.toHaveBeenCalled() // that sign-in announced itself
+    })
+
+    it('drops the note when there was no session left to restore — and tells other tabs, which still show the account', async () => {
+      vi.stubGlobal('sessionStorage', fakeStorage)
+      store.set('lukk:logging-out:/', JSON.stringify({ at: Date.now(), fid: 'F1' }))
+      restoresAs(undefined)
+      const announce = vi.fn()
+      restoreState(__test.nuxtApp).announce = announce
+
+      await run()
+
+      expect(logout).not.toHaveBeenCalled()
+      expect(store.has('lukk:logging-out:/')).toBe(false)
+      expect(announce).toHaveBeenCalledOnce()
+    })
+
+    it('keeps the note when the restore couldn\'t tell (lukk unreachable), for the next load within its minute', async () => {
+      vi.stubGlobal('sessionStorage', fakeStorage)
+      store.set('lukk:logging-out:/', JSON.stringify({ at: Date.now(), fid: 'F1' }))
+      initSession.mockImplementationOnce(async () => { restoreFailed.value = true })
+
+      await run()
+
+      expect(logout).not.toHaveBeenCalled()
+      expect(store.has('lukk:logging-out:/')).toBe(true)
+    })
+  })
+
+  describe('BFF mode', () => {
+    const run = () => (sessionPlugin as unknown as () => Promise<void>)()
+    afterEach(() => { vi.unstubAllGlobals(); store.clear() })
+
+    /** A document whose jar keeps name=value and records every write. */
+    function jar(initial: Record<string, string>) {
+      const cookies = new Map(Object.entries(initial))
+      const writes: string[] = []
+      vi.stubGlobal('document', {
+        get cookie() { return [...cookies].map(([k, v]) => `${k}=${v}`).join('; ') },
+        set cookie(line: string) {
+          writes.push(line)
+          const [name, value] = line.split(';')[0]!.split('=') as [string, string]
+          if (line.includes('Max-Age=0')) cookies.delete(name)
+          else cookies.set(name, value)
+        },
+      })
+      return { cookies, writes }
+    }
+
+    it('finishes a logout the server couldn\'t — its note is still pending — without holding startup, renewing the note\'s minute first', async () => {
+      __test.runtimeConfig.public.lukk = { mode: 'bff', logoutCookie: '__Host-lukk-logout' }
+      const askedAt = Date.now() - 30_000 // the logout was asked for on the PREVIOUS page
+      const { writes } = jar({ 'theme': 'dark', '__Host-lukk-logout': String(askedAt) })
+      let finishing: number | undefined
+      logout.mockImplementationOnce(() => { finishing = restoreState(__test.nuxtApp).finishingLogout; return new Promise(() => {}) }) // lukk hanging
+
+      await run()
+
+      // A fresh minute, carrying the ORIGINAL time — not this page load's. `expect.any(Number)` here
+      // passed for `0`, which `askedAt = finishing ?? Date.now()` keeps (`??`, not `||`), and
+      // `signedInSince(scope, 0)` is then always true: every logout moot, never sent.
+      expect(writes).toEqual([`__Host-lukk-logout=${askedAt}; Path=/; Max-Age=60; SameSite=Strict; Secure`])
+      expect(logout).toHaveBeenCalledOnce()
+      expect(finishing).toBe(askedAt)
+      expect(initSession).not.toHaveBeenCalled()
+      expect(useState<boolean>(READY_KEY, () => false).value).toBe(true)
+    })
+
+    it('falls back to this page\'s clock for a note written before notes carried a time', async () => {
+      // A browser mid-upgrade still holds `=1`. It must not read as 1970, which would make every sign-in
+      // ever recorded count as "since this logout" and stand every logout down.
+      __test.runtimeConfig.public.lukk = { mode: 'bff', logoutCookie: '__Host-lukk-logout' }
+      const { writes } = jar({ '__Host-lukk-logout': '1' })
+      const before = Date.now()
+      let finishing: number | undefined
+      logout.mockImplementationOnce(() => { finishing = restoreState(__test.nuxtApp).finishingLogout; return new Promise(() => {}) })
+
+      await run()
+
+      expect(finishing).toBeGreaterThanOrEqual(before)
+      expect(writes).toEqual([`__Host-lukk-logout=${finishing}; Path=/; Max-Age=60; SameSite=Strict; Secure`])
+    })
+
+    it('restores the newer session once that logout stood down for it, and swallows a failure', async () => {
+      __test.runtimeConfig.public.lukk = { mode: 'bff', logoutCookie: '__Host-lukk-logout' }
+      jar({ '__Host-lukk-logout': '1' })
+      logout.mockImplementationOnce(async () => { restoreState(__test.nuxtApp).logoutStoodDown = true })
+
+      await run()
+      await vi.waitFor(() => expect(initSession).toHaveBeenCalledOnce())
+      expect(restoreState(__test.nuxtApp).logoutStoodDown).toBe(false)
+
+      initSession.mockClear()
+      logout.mockResolvedValueOnce(undefined) // sent: nothing to restore
+      await run()
+      await new Promise(resolve => setTimeout(resolve, 0))
+      expect(initSession).not.toHaveBeenCalled()
+
+      logout.mockRejectedValueOnce({ status: 503 })
+      await expect(run()).resolves.toBeUndefined()
+      await new Promise(resolve => setTimeout(resolve, 0))
+    })
+
+    it('restores nothing, and tells other tabs, when the server finished the logout for this page — then drops its answer', async () => {
+      __test.runtimeConfig.public.lukk = { mode: 'bff', logoutCookie: '__Host-lukk-logout', signedOutCookie: '__Host-lukk-signed-out' }
+      const { cookies } = jar({ 'theme': 'dark', '__Host-lukk-signed-out': '1' })
+      const announce = vi.fn()
+      restoreState(__test.nuxtApp).announce = announce
+
+      await run()
+
+      expect(initSession).not.toHaveBeenCalled()
+      expect(logout).not.toHaveBeenCalled()
+      expect(announce).toHaveBeenCalledOnce()
+      expect(cookies.has('__Host-lukk-signed-out')).toBe(false)
+    })
+
+    it('restores as usual without the note cookie — a per-tab note isn\'t read in BFF mode', async () => {
+      __test.runtimeConfig.public.lukk = { mode: 'bff', logoutCookie: '__Host-lukk-logout' }
+      vi.stubGlobal('document', { cookie: 'theme=dark' })
+      vi.stubGlobal('sessionStorage', fakeStorage)
+      store.set('lukk:logging-out:/', JSON.stringify({ at: Date.now() }))
+
+      await run()
+
+      expect(logout).not.toHaveBeenCalled()
+      expect(initSession).toHaveBeenCalledOnce()
+    })
   })
 })
 

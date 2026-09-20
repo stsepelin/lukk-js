@@ -20,7 +20,10 @@ services:
         # false = BFF/body mode (default); true = direct/cookie mode.
         LUKK_COOKIE_MODE: ${LUKK_COOKIE_MODE:-false}
     ports:
-      - '8000:8000'
+      # Loopback only: this fixture hands out live sessions (`/conformance/ephemeral-user`,
+      # `/conformance/pinned-token`) to anyone who asks, by design. On a shared network the default
+      # binding would hand them to the whole subnet.
+      - '127.0.0.1:8000:8000'
     # Waits until the /up route responds before tests start.
     healthcheck:
       test: ['CMD', 'curl', '-fsS', 'http://localhost:8000/up']

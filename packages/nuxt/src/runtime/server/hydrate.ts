@@ -5,6 +5,7 @@ import { sessionCookieName } from '../shared'
 import { accessExpired } from './access-token'
 import { visitorIp } from './proxy-utils'
 import { sessionEnded, sessionKey, withholdSessionCookie } from './ended-sessions'
+import { logoutNoted } from './logout-note'
 import { revokeDroppedSession } from './revoke-dropped'
 import { readSealedSessionWithId } from './sealed-session'
 import { warnIfSessionTooLarge } from './session-size'
@@ -60,6 +61,10 @@ export async function resolveHydrationAccess(event: H3Event): Promise<string | n
   // components that fetch during SSR without gating on `ready` still render that account's data (the
   // app-API proxy serves a still-valid token), and a shared cache must not store the page.
   setResponseHeader(event, 'cache-control', 'no-store')
+
+  // A logout the browser noted before this request: rendered signed out, even if lukk couldn't be told yet
+  // (see `finish-logout`).
+  if (logoutNoted(event, secure, cookieNamespace)) return null
 
   // A session a sign-in replaced or a logout ended is not rendered as signed in, even with a token still
   // valid: the tab would show that account while every call it makes acts as the newer session. The

@@ -1,9 +1,9 @@
 import type { H3Event } from 'h3'
 import { isTokenPair } from 'lukk-core'
-import { defineEventHandler, getCookie, getRequestHeader, readRawBody, setResponseHeader, setResponseStatus, useSession } from 'h3'
+import { defineEventHandler, deleteCookie, getCookie, getRequestHeader, readRawBody, setResponseHeader, setResponseStatus, useSession } from 'h3'
 import { useRuntimeConfig } from '#imports'
-import { LUKK_BFF_PREFIX, confirmationHeaderName, sessionCookieName } from '../shared'
-import { isForeignOrigin, rejectUnresolvedTarget, resolveTarget, viaHeader, visitorIp } from './proxy-utils'
+import { LUKK_BFF_PREFIX, confirmationHeaderName, logoutCookieName, sessionCookieName, signedOutCookieName } from '../shared'
+import { isForeignOrigin, rejectUnresolvedTarget, reportProxyFailure, resolveTarget, viaHeader, visitorIp } from './proxy-utils'
 import { endSession, newSessionId, sessionEnded, sessionKey, sessionReplaced, withholdSessionCookie } from './ended-sessions'
 import { revokeDroppedSession } from './revoke-dropped'
 import { readSealedSession } from './sealed-session'
@@ -37,6 +37,13 @@ export default defineEventHandler(async (event) => {
   const secure = cookieSecure !== false
   const sessionName = sessionCookieName(secure, cookieNamespace)
   const cookieOptions: SessionCookieOptions = { sameSite: 'strict', secure, httpOnly: true, path: '/' }
+  // The browser's logout note (see `logoutCookieName`): cleared once the logout is done, and by any new session.
+  const clearLogoutNote = () => {
+    const options = { path: '/', secure, sameSite: 'strict' as const }
+    deleteCookie(event, logoutCookieName(secure, cookieNamespace), options)
+    // And the server's answer to it: left standing, the next page load reads this browser as signed out.
+    deleteCookie(event, signedOutCookieName(secure, cookieNamespace), options)
+  }
 
   // CSRF: reject a state-changing request riding the session cookie from a foreign origin.
   if (isForeignOrigin(event, secure)) {
@@ -99,7 +106,15 @@ export default defineEventHandler(async (event) => {
     // X-Lukk-Confirmation header (undici keeps custom headers across redirects) and, on a
     // 307/308, the request body to the redirect host (CWE-918/200). Handled below.
     const body = endsSession ? JSON.stringify(logoutRefresh ? { refresh_token: logoutRefresh } : {}) : rawBody
-    return fetch(target!, { method, headers, body, redirect: 'manual' })
+    // lukk unreachable, or the connection dropped: answer 502 like any other upstream failure, rather
+    // than letting the fetch error escape as a 500 with a stack trace in the log on every attempt.
+    return fetch(target!, { method, headers, body, redirect: 'manual' }).catch((error: unknown) => {
+      reportProxyFailure(target!, error)
+      return new Response(
+        JSON.stringify({ message: 'lukk could not be reached.' }),
+        { status: 502, headers: { 'content-type': 'application/json' } },
+      )
+    })
   }
 
   // `/refresh` is SERVED here, never proxied. The browser holds an opaque cookie, not a refresh
@@ -241,6 +256,9 @@ export default defineEventHandler(async (event) => {
     // reported as theft. Without one, the new session simply ends when its access token does.
     await s.update({ access: data.access_token, refresh: data.refresh_token, confirmation: undefined, sid: newSessionId() })
     warnIfSessionTooLarge(s)
+    // A logout noted before this sign-in was for the session it replaced — which is ended above. Left
+    // standing, the next page load would end THIS one.
+    clearLogoutNote()
     return { ok: true, expires_in: data.expires_in }
   }
 
@@ -277,6 +295,8 @@ export default defineEventHandler(async (event) => {
       // those let anyone flood the record past its bound and evict the entries that matter.
       if (unsealed) await endSession(sessionKey(s))
       await s.clear()
+      // Only with the session it was for: a note beside a newer session's cookie belongs to that one.
+      clearLogoutNote()
     }
   }
 
@@ -318,9 +338,9 @@ function redactCredentials(data: unknown): unknown {
   if (typeof data !== 'object' || data === null || Array.isArray(data)) return data
 
   const body = data as Record<string, unknown>
-  if (!('refresh_token' in body) && !('confirmation_token' in body)) return data
+  if (!('refresh_token' in body) && !('confirmation_token' in body) && !('access_token' in body)) return data
 
-  const { refresh_token: _r, confirmation_token: _c, ...rest } = body
+  const { access_token: _a, refresh_token: _r, confirmation_token: _c, ...rest } = body
 
   return rest
 }

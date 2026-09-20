@@ -7,6 +7,7 @@ const kit = vi.hoisted(() => ({
   addServerHandler: vi.fn(),
   addServerImportsDir: vi.fn(),
   addServerPlugin: vi.fn(),
+  addTypeTemplate: vi.fn(),
   createResolver: () => ({ resolve: (p: string) => p }),
   defineNuxtModule: (def: unknown) => def,
 }))
@@ -34,9 +35,36 @@ afterEach(() => vi.clearAllMocks())
 describe('lukk-nuxt module', () => {
   it('registers the BFF proxy and hides the lukk URL from the client in bff mode', () => {
     const nuxt = setup({ baseURL: 'https://api/auth', mode: 'bff' })
-    expect(kit.addServerHandler).toHaveBeenCalledOnce()
+    expect(kit.addServerHandler).toHaveBeenCalledTimes(2)
+    expect(kit.addServerHandler).toHaveBeenCalledWith(expect.objectContaining({ route: '/api/_lukk/**' }))
+    // And the middleware that finishes a logout the browser noted before the page load.
+    expect(kit.addServerHandler).toHaveBeenCalledWith(expect.objectContaining({ middleware: true, handler: expect.stringContaining('finish-logout') }))
     expect((nuxt.options.runtimeConfig.public.lukk as { baseURL: string }).baseURL).toBe('')
     expect((nuxt.options.runtimeConfig.lukk as { baseURL: string }).baseURL).toBe('https://api/auth')
+  })
+
+  it('warns when a production build turns the Secure flag off — the cookies lose `__Host-` with it', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    setup({ baseURL: 'https://api/auth', mode: 'bff', session: { password: 'x'.repeat(32), cookieSecure: false } })
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('cookieSecure is false in a production build'))
+
+    warn.mockClear()
+    setup({ baseURL: 'https://api/auth', mode: 'bff', session: { password: 'x'.repeat(32), cookieSecure: false } }, { dev: true })
+    setup({ baseURL: 'https://api/auth', mode: 'bff' })
+    expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('cookieSecure is false'))
+  })
+
+  it('scopes the browser-side session bookkeeping by `session.name`, which co-hosted apps differ on', () => {
+    const scopeOf = (nuxt: ReturnType<typeof setup>) => (nuxt.options.runtimeConfig.public.lukk as { scope: string }).scope
+    expect(scopeOf(setup({ baseURL: 'https://api/auth', mode: 'bff' }))).toBe('')
+    expect(scopeOf(setup({ baseURL: 'https://api/auth', mode: 'bff', session: { password: 'x'.repeat(32), name: 'admin' } }))).toBe('admin')
+  })
+
+  it('names the logout cookies for the browser from the same Secure flag and namespace as the session', () => {
+    const pub = (nuxt: ReturnType<typeof setup>) => nuxt.options.runtimeConfig.public.lukk as { logoutCookie: string, signedOutCookie: string }
+    expect(pub(setup({ baseURL: 'https://api/auth', mode: 'bff' }))).toMatchObject({ logoutCookie: '__Host-lukk-logout', signedOutCookie: '__Host-lukk-signed-out' })
+    expect(pub(setup({ baseURL: 'https://api/auth', mode: 'bff', session: { password: 'x'.repeat(32), name: 'admin' } }, { dev: true }))).toMatchObject({ logoutCookie: 'lukk-admin-logout', signedOutCookie: 'lukk-admin-signed-out' })
+    expect(pub(setup({ baseURL: 'https://api/auth', mode: 'direct' }))).toMatchObject({ logoutCookie: '', signedOutCookie: '' })
   })
 
   it('makes the session cookie Secure by default (production build)', () => {
@@ -66,6 +94,26 @@ describe('lukk-nuxt module', () => {
     expect((unset.options.runtimeConfig.lukk as { cookieNamespace?: string }).cookieNamespace).toBeUndefined()
     const named = setup({ baseURL: 'https://api/auth', mode: 'bff', session: { password: 'x'.repeat(32), name: 'admin' } })
     expect((named.options.runtimeConfig.lukk as { cookieNamespace?: string }).cookieNamespace).toBe('admin')
+  })
+
+  it('types the client plugin\'s provides for consumers', () => {
+    setup({ baseURL: 'https://api/auth', mode: 'bff' })
+    const template = kit.addTypeTemplate.mock.calls[0]![0] as { filename: string, getContents: () => string }
+
+    expect(template.filename).toBe('types/lukk-nuxt.d.ts')
+    const contents = template.getContents()
+    expect(contents).toContain(`import type { LukkClient, TokenPair } from 'lukk-core'`)
+    expect(contents).toContain('$lukk: LukkClient')
+    expect(contents).toContain('$lukkRefresh: () => Promise<TokenPair | null>')
+  })
+
+  it('registers the streaming-render marker alongside SSR hydration, and not without it', () => {
+    setup({ baseURL: 'https://api/auth', mode: 'bff' })
+    expect(kit.addServerPlugin).toHaveBeenCalledWith('./runtime/server/plugins/streaming-render')
+
+    kit.addServerPlugin.mockClear()
+    setup({ baseURL: 'https://api/auth', mode: 'bff', ssrHydrate: false })
+    expect(kit.addServerPlugin).not.toHaveBeenCalledWith('./runtime/server/plugins/streaming-render')
   })
 
   it('passes session.sharedStore through and registers the plugin that wires it (bff only)', () => {
@@ -131,17 +179,24 @@ describe('lukk-nuxt module', () => {
     setup({ baseURL: 'https://api/auth', mode: 'bff' })
     expect(kit.addPlugin).toHaveBeenCalledTimes(3) // client + session.client + session.server
     expect(kit.addPlugin).toHaveBeenCalledWith(expect.objectContaining({ src: expect.stringContaining('session.server'), mode: 'server' }))
+    // The last check on a page whose request finished a logout — BFF, whatever ssrHydrate says.
+    expect(kit.addServerPlugin).toHaveBeenCalledWith(expect.stringContaining('finish-logout-render'))
 
     vi.clearAllMocks()
     setup({ baseURL: 'https://api/auth', mode: 'bff', ssrHydrate: false })
     expect(kit.addPlugin).toHaveBeenCalledTimes(2) // client + session.client only
     expect(kit.addPlugin).not.toHaveBeenCalledWith(expect.objectContaining({ mode: 'server' }))
+    expect(kit.addServerPlugin).toHaveBeenCalledWith(expect.stringContaining('finish-logout-render'))
+
+    vi.clearAllMocks()
+    setup({ baseURL: 'https://api/auth', mode: 'direct' })
+    expect(kit.addServerPlugin).not.toHaveBeenCalledWith(expect.stringContaining('finish-logout-render'))
   })
 
   it('registers the app-API proxy when api.{path,target} are set in bff mode', () => {
     const nuxt = setup({ baseURL: 'https://api/auth', mode: 'bff', api: { path: '/api', target: 'https://laravel.test' } })
     // bff proxy + app proxy
-    expect(kit.addServerHandler).toHaveBeenCalledTimes(2)
+    expect(kit.addServerHandler).toHaveBeenCalledTimes(3)
     expect(kit.addServerHandler).toHaveBeenCalledWith(expect.objectContaining({ route: '/api/**' }))
     const cfg = nuxt.options.runtimeConfig.lukk as { apiTarget: string, apiPath: string, apiForceJson: boolean }
     expect(cfg.apiTarget).toBe('https://laravel.test')
@@ -163,7 +218,7 @@ describe('lukk-nuxt module', () => {
 
   it('does not register the app-API proxy without api config (bff)', () => {
     setup({ baseURL: 'https://api/auth', mode: 'bff' })
-    expect(kit.addServerHandler).toHaveBeenCalledOnce() // just the bff proxy
+    expect(kit.addServerHandler).toHaveBeenCalledTimes(2) // just the bff proxy and its logout middleware
   })
 
   it('normalizes a trailing slash on api.path', () => {

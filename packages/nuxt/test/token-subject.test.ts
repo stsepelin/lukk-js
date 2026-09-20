@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { tokenSubject } from '../src/runtime/utils/token-subject'
+import { tokenFamily, tokenSubject } from '../src/runtime/utils/token-subject'
 
 const jwt = (claims: unknown) => `h.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.s`
 
@@ -13,5 +13,14 @@ describe('tokenSubject', () => {
   it('is undefined for anything that does not name a subject', () => {
     for (const value of [undefined, null, 42, '', 'not-a-jwt', 'h..s', 'h.%%%.s', jwt({}), jwt({ sub: null }), jwt({ sub: { id: 1 } })])
       expect(tokenSubject(value)).toBeUndefined()
+  })
+})
+
+describe('tokenFamily', () => {
+  it('reads the fid claim — the session a lukk access token belongs to', () => {
+    expect(tokenFamily(jwt({ sub: 1, fid: 'fam-?>~' }))).toBe('fam-?>~')
+    expect(tokenFamily(jwt({ fid: 9 }))).toBe('9')
+    expect(tokenFamily(jwt({ sub: 1 }))).toBeUndefined() // a custom TokenIssuer that leaves it out
+    expect(tokenFamily('not-a-jwt')).toBeUndefined()
   })
 })

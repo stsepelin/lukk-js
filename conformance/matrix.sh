@@ -20,6 +20,8 @@ APP_DIR="${LUKK_APP_DIR:-${TMPDIR:-/tmp}/lukk-matrix-app}"
 PORT="${LUKK_PORT:-8000}"
 ENV_FILE="$APP_DIR/.env"
 SERVE_PID=""
+# Private per-run directory: a fixed /tmp path lets another user on a shared host symlink over our log.
+RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/lukk-matrix.XXXXXX")"
 
 RSA_PRIV="@$APP_DIR/storage/lukk_rsa_private.pem"; RSA_PUB="@$APP_DIR/storage/lukk_rsa_public.pem"
 EC_PRIV="@$APP_DIR/storage/lukk_ec_private.pem";   EC_PUB="@$APP_DIR/storage/lukk_ec_public.pem"
@@ -97,10 +99,10 @@ run_combo() {
   fi
 
   wait_port_free "$PORT" || { echo "✗ [$name] port $PORT still held after killing the previous combo's server"; RESULTS+=("✗ $name (port stuck)"); FAILED=1; return; }
-  ( cd "$APP_DIR" && php artisan serve --host=127.0.0.1 --port="$PORT" >/tmp/lukk-serve.log 2>&1 ) &
+  ( cd "$APP_DIR" && php artisan serve --host=127.0.0.1 --port="$PORT" >"$RUN_DIR/serve.log" 2>&1 ) &
   SERVE_PID=$!
   if ! wait_for_up; then
-    echo "✗ [$name] server did not come up — see /tmp/lukk-serve.log"
+    echo "✗ [$name] server did not come up — see $RUN_DIR/serve.log"
     RESULTS+=("✗ $name (boot failed)"); FAILED=1
     kill_tree "$SERVE_PID"; SERVE_PID=""; return
   fi

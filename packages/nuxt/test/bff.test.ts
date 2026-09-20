@@ -22,6 +22,7 @@ vi.mock('h3', () => ({
     (event.__res ??= {})[name] = value
   },
   useSession: async (event: { __session: unknown }, config: { name?: string }) => { h3state.useSessionCalls++; h3state.lastSessionName = config?.name; return event.__session },
+  deleteCookie: (event: { __deleted?: { name: string, options: unknown }[] }, name: string, options: unknown) => { (event.__deleted ??= []).push({ name, options }) },
 }))
 
 // eslint-disable-next-line import/first
@@ -74,10 +75,13 @@ describe('BFF proxy', () => {
     const session = makeSession()
     mockFetch().fetch = vi.fn().mockResolvedValue(jsonRes({ access_token: 'a', refresh_token: 'r', expires_in: 900 }))
 
-    const result = await run(makeEvent({ path: '/api/_lukk/login', method: 'POST', body: '{"email":"e"}', headers: { ...sameOrigin, 'content-type': 'application/json' }, session }))
+    const event = makeEvent({ path: '/api/_lukk/login', method: 'POST', body: '{"email":"e"}', headers: { ...sameOrigin, 'content-type': 'application/json' }, session })
+    const result = await run(event)
 
     expect(session.update).toHaveBeenCalledWith({ access: 'a', refresh: 'r', confirmation: undefined, sid: expect.any(String) })
     expect(result).toEqual({ ok: true, expires_in: 900 })
+    // A logout noted before this sign-in was for the session it replaced — left, the next page would end this one.
+    expect((event as { __deleted?: { name: string }[] }).__deleted?.map(d => d.name)).toEqual(['__Host-lukk-logout', '__Host-lukk-signed-out'])
     const init = mockFetch().fetch.mock.calls[0]![1]!
     expect(init.headers['Content-Type']).toBe('application/json')
     expect(init.headers.Authorization).toBeUndefined()
@@ -332,11 +336,22 @@ describe('BFF proxy', () => {
     expect(JSON.parse((mockFetch().fetch.mock.calls[0]![1] as { body: string }).body)).toEqual({})
   })
 
-  it('clears the session on logout', async () => {
+  it('clears the session on logout — and the browser\'s logout note with it', async () => {
     const session = makeSession({ access: 'tok' })
     mockFetch().fetch = vi.fn().mockResolvedValue(jsonRes(null, 204))
-    await run(makeEvent({ path: '/api/_lukk/logout', method: 'POST', headers: sameOrigin, session }))
+    const event = makeEvent({ path: '/api/_lukk/logout', method: 'POST', headers: sameOrigin, session })
+    await run(event)
     expect(session.clear).toHaveBeenCalledOnce()
+    expect((event as { __deleted?: { name: string }[] }).__deleted?.map(d => d.name)).toEqual(['__Host-lukk-logout', '__Host-lukk-signed-out'])
+
+    // Named like the session cookie: relaxed and namespaced with it.
+    Object.assign(__test.runtimeConfig.lukk, { cookieSecure: false, cookieNamespace: 'admin' })
+    const dev = makeEvent({ path: '/api/_lukk/logout', method: 'POST', headers: { origin: 'http://app.example.com', host: 'app.example.com' }, session: makeSession({ access: 'tok' }) })
+    await run(dev)
+    expect((dev as { __deleted?: { name: string, options: unknown }[] }).__deleted).toEqual([
+      { name: 'lukk-admin-logout', options: { path: '/', secure: false, sameSite: 'strict' } },
+      { name: 'lukk-admin-signed-out', options: { path: '/', secure: false, sameSite: 'strict' } },
+    ])
   })
 
   it.each([
@@ -353,6 +368,8 @@ describe('BFF proxy', () => {
 
     expect(event.status).toBe(answer().status)
     expect(session.clear).not.toHaveBeenCalled()
+    // The browser's note stays too: the logout isn't done.
+    expect((event as { __deleted?: unknown[] }).__deleted).toBeUndefined()
     // Nor recorded as ended: its refreshes must keep working until the retry succeeds.
     mockFetch().fetch = vi.fn(async () => jsonRes({ access_token: 'A2', refresh_token: 'rA2', expires_in: 900 }))
     const refresh = makeEvent({ path: '/api/_lukk/refresh', method: 'POST', body: '{}', headers: sameOrigin, session: makeSession({ access: 'A', refresh: 'rA', sid: 'session-A' } as TokenSession) })
@@ -622,7 +639,7 @@ describe('a session replaced or ended while a refresh for it was out', () => {
     expect(mockFetch().fetch).toHaveBeenCalledWith('https://lukk/auth/logout', expect.objectContaining({ headers: expect.objectContaining({ Authorization: 'Bearer A2' }) }))
   })
 
-  it('still seals the rotated session when the retried call throws, so it is not stranded on a spent token', async () => {
+  it('still seals the rotated session when the retried call can\'t reach lukk, so it is not stranded on a spent token', async () => {
     const session = makeSession({ access: 'A', refresh: 'rA', sid: 'session-A' } as TokenSession)
     let calls = 0
     mockFetch().fetch = vi.fn(async (url: string) => {
@@ -630,10 +647,24 @@ describe('a session replaced or ended while a refresh for it was out', () => {
       if (++calls === 1) return jsonRes({ message: 'Unauthenticated.' }, 401)
       throw new TypeError('fetch failed')
     })
+    const event = makeEvent({ path: '/api/_lukk/passkeys', session })
 
-    await expect(run(makeEvent({ path: '/api/_lukk/passkeys', session }))).rejects.toThrow('fetch failed')
-
+    expect(await run(event)).toEqual({ message: 'lukk could not be reached.' })
+    expect(event.status).toBe(502)
     expect(session.update).toHaveBeenCalledWith({ access: 'A2', refresh: 'rA2' })
+  })
+
+  it('answers 502 when lukk can\'t be reached at all, instead of escaping as a 500', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const session = makeSession({ access: 'A', refresh: 'rA' })
+    mockFetch().fetch = vi.fn(async () => { throw new TypeError('fetch failed') })
+    const event = makeEvent({ path: '/api/_lukk/session/claim', method: 'POST', body: '{}', headers: sameOrigin, session })
+
+    expect(await run(event)).toEqual({ message: 'lukk could not be reached.' })
+    expect(event.status).toBe(502)
+    expect(session.clear).not.toHaveBeenCalled()
+    // Diagnosable: the cause is reported (once per target and cause, like the app-API proxy).
+    expect(error).toHaveBeenCalled()
   })
 
   it('does not write back a step-up confirmation that answers after a sign-in — h3 re-seals the whole session', async () => {
@@ -761,6 +792,8 @@ describe('a session replaced or ended while a refresh for it was out', () => {
     await pending
 
     expect(loggingOut.clear).not.toHaveBeenCalled()
+    // Nor a logout note beside that newer session's cookie: it would be that session's.
+    expect((event as { __deleted?: unknown[] }).__deleted).toBeUndefined()
   })
 
   it('ends the session a sign-in replaces on lukk too, not only in the browser', async () => {
@@ -908,7 +941,9 @@ describe('credential redaction fails closed', () => {
     const body = await run(makeEvent({ path: '/api/_lukk/x', method: 'POST', headers: { ...sameOrigin }, session }))
 
     expect(JSON.stringify(body)).not.toContain('rt-leak')
-    expect(body).toEqual({ access_token: null, keep: 'me' })
+    // `access_token` goes too, whatever its shape: the removal must not depend on the body being what the
+    // capture gate expected — that is the whole point of a deny-list here.
+    expect(body).toEqual({ keep: 'me' })
 
     // A non-string confirmation_token misses its capture gate the same way, and is still removed.
     mockFetch().fetch = vi.fn().mockResolvedValue(jsonRes({ confirmation_token: 12345, keep: 'me' }))

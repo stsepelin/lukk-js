@@ -40,6 +40,8 @@ export default defineNuxtPlugin({
       mode: 'bff' | 'direct'
       baseURL: string
       confirmationHeader: string
+      /** `session.name`, when set: part of what scopes this app's lock, channel and notes. */
+      scope?: string
     }
 
     const baseURL = cfg.mode === 'direct' ? cfg.baseURL : LUKK_BFF_PREFIX
@@ -209,11 +211,14 @@ export default defineNuxtPlugin({
       // Scoped to this app: channels and locks are already per origin, and two apps sharing an origin live
       // under different router bases. Unscoped, each re-checked (and queued behind) the other's tabs.
       const appBase = (useRuntimeConfig() as { app?: { baseURL?: string } }).app?.baseURL ?? '/'
+      // …plus `session.name` where one is set: co-hosted apps share a base more often than they share a name.
+      const scope = `${appBase}${cfg.scope ? `#${cfg.scope}` : ''}`
       // Tabs also queue their sign-ins, logouts and refreshes behind one Web Lock — see `acrossTabs`.
-      state.lockName = `lukk:session:${appBase}`
+      state.lockName = `lukk:session:${scope}`
+      state.scope = scope
 
       if (typeof window.BroadcastChannel === 'function') {
-        const channel = new window.BroadcastChannel(`lukk:session:${appBase}`)
+        const channel = new window.BroadcastChannel(`lukk:session:${scope}`)
         state.announce = () => channel.postMessage('changed')
         channel.onmessage = () => { void followOtherTab().catch(() => {}) }
       }

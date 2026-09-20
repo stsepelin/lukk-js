@@ -150,6 +150,12 @@ export function createLukkClient(hooks: LukkClientHooks) {
         if (!(error instanceof TypeError)) throw error
         return request<void>('/logout', json({}), options.retry ?? true)
       }),
+    /**
+     * Confirm this client received the session a sign-in just issued (lukk's `claim_seconds`): a session
+     * first used after that window is revoked. Any authenticated request claims too; this one exists so a
+     * client can do it straight away. Older lukk releases answer 404.
+     */
+    claimSession: () => request<void>('/session/claim', { method: 'POST' }),
     revokeAllSessions: () => request<void>('/sessions', { method: 'DELETE' }),
     revokeOtherSessions: () => request<void>('/sessions/others', { method: 'DELETE' }),
 
@@ -215,17 +221,26 @@ function joinURL(base: string, path: string): string {
 }
 
 /**
+ * Does this string carry its own origin — a scheme, or a protocol-relative `//host`?
+ *
+ * Canonicalised the way the WHATWG URL parser will, BEFORE deciding: the parser strips leading C0
+ * controls and spaces and treats `\` as `/` for special schemes, so ` https://evil.com`,
+ * `\thttps://evil.com` and `https:/\evil.com` all resolve to an absolute URL while reading as
+ * "relative" to a naive test — and a relative path is exactly what callers green-light.
+ */
+export function carriesOrigin(path: string): boolean {
+  // eslint-disable-next-line no-control-regex -- C0 controls are exactly what the parser strips
+  const candidate = path.replace(/^[\u0000-\u0020]+/, '').replace(/\\/g, '/')
+  return candidate.startsWith('//') || /^[a-z][a-z0-9+.-]*:/i.test(candidate)
+}
+
+/**
  * Is the request target the same origin as `baseURL`? A relative `path` is always
  * same-origin (it joins onto the base). An absolute `path` only counts when its
  * origin matches an absolute base — otherwise we refuse to attach credentials.
  * Exported so lukk-nuxt's `useLukkFetch` reuses the exact same guard.
  */
 export function isSameOrigin(base: string, path: string): boolean {
-  // Canonicalise the way the WHATWG URL parser will, BEFORE deciding. A bare `^https?://` test is
-  // far stricter than the parser: the parser strips leading C0 controls and spaces, and treats `\`
-  // as `/` for special schemes. So ` https://evil.com`, `\thttps://evil.com` and `https:/\evil.com`
-  // all resolve to `https://evil.com` while reading as "relative" to the regex — and a relative
-  // path is exactly what this function green-lights for credentials.
   // eslint-disable-next-line no-control-regex -- C0 controls are exactly what the parser strips
   const candidate = path.replace(/^[\u0000-\u0020]+/, '').replace(/\\/g, '/')
 
@@ -234,7 +249,7 @@ export function isSameOrigin(base: string, path: string): boolean {
 
   // Anything else carrying a scheme must be http(s) AND match the base's origin. A non-http scheme
   // (`javascript:`, `data:`, `blob:`) is never same-origin, whatever the base.
-  if (/^[a-z][a-z0-9+.-]*:/i.test(candidate)) {
+  if (carriesOrigin(candidate)) {
     if (!/^https?:/i.test(candidate) || !/^https?:\/\//i.test(base)) return false
     try { return new URL(candidate).origin === new URL(base).origin }
     catch { return false }

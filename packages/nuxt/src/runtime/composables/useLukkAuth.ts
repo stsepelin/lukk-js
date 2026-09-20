@@ -3,8 +3,10 @@ import type { ComputedRef, Ref } from 'vue'
 import { computed, useNuxtApp, useRuntimeConfig, useState } from '#imports'
 import { ACCESS_KEY, CHALLENGE_KEY, CONFIRMATION_KEY, CONFIRMED_KEY, READY_KEY, RESTORE_FAILED_KEY, USER_KEY } from '../keys'
 import { isAuthRejection } from '../shared'
+import { clearPendingLogout, notePendingLogout, signedInSince } from '../utils/pending-logout'
 import { acrossTabs, restoreState, settleRefresh, signIn } from '../utils/restore-state'
-import { tokenSubject } from '../utils/token-subject'
+import { clearLogoutCookie, setLogoutCookie } from '../utils/logout-cookie'
+import { tokenFamily, tokenSubject } from '../utils/token-subject'
 import { isPrematureWait, whenReady as settled } from '../utils/when-ready'
 import type { RestoreOutcome } from '../plugins/client'
 import { useLukkFetch } from './useLukkFetch'
@@ -15,6 +17,8 @@ interface PublicLukk {
   confirmationHeader: string
   userEndpoint: string
   userKey: string
+  /** BFF: the logout note cookie's name (see `logoutCookieName`). */
+  logoutCookie?: string
 }
 
 /**
@@ -194,13 +198,97 @@ export function useLukkAuth(): LukkAuth {
   }
 
   async function logout(): Promise<void> {
-    const ending = acrossTabs(nuxtApp, endAndClear)
+    // Until the logout request itself is on the wire it waits — for another tab's lock, for a refresh
+    // already out. A page that navigates away in that moment cancelled it, and the session outlived what
+    // the user saw. So if the page starts to unload first, send it right away with `keepalive` (which
+    // outlives the page) and skip the ordering: the page is leaving, and ending the session wins.
+    //
+    // `pagehide` and a `visibilitychange` to hidden both count: iOS Safari doesn't reliably fire
+    // `pagehide` for a backgrounded tab it later kills, and the user has already asked to log out.
+    // Sending early skips the cross-tab lock — in direct mode a sign-in in another tab at that very moment
+    // can lose its cookie — which is the smaller loss than a logout that never happened.
+    // And a note the next request finishes it from, should this page be gone before it completes. In BFF
+    // mode a cookie, which the next page load carries to the server, and which any new session's response
+    // clears (see `logout-cookie`); in direct mode a per-tab note naming this session's family.
+    //
+    // The restore plugin calls this to FINISH a note an earlier page left. That call doesn't note again:
+    // re-writing it after a sign-in had cleared it ended that sign-in, and re-stamping a direct-mode note
+    // moved it past sign-ins sent since. It stands down instead — see `moot` below.
+    const noteCookie = cfg.mode === 'bff' ? cfg.logoutCookie : undefined
+    const finishing = state.finishingLogout
+    state.finishingLogout = undefined
+    // Stands down on POSITIVE evidence only: a sign-in SENT after this logout was asked for, in any tab
+    // (every sign-in records its send time, both transports). Absence of the note cannot carry this — it is
+    // also what an aged-out note and a logout retried after a failure look like, and both of those still
+    // have a session to end. Applies to every logout, not only one the restore plugin is finishing: a page
+    // resumed from the back/forward cache can reach this long after the visitor signed in again.
+    // `finishing` is the time the ORIGINAL logout was asked for, carried by the note itself — not the time
+    // the finishing page loaded. A sign-in sent before that page loaded but landing after it is still a
+    // sign-in since the logout, and must survive.
+    const askedAt = finishing ?? Date.now()
+    const moot = () => signedInSince(state.scope, askedAt)
+    if (import.meta.client && finishing === undefined) {
+      if (noteCookie) setLogoutCookie(noteCookie, askedAt)
+      else notePendingLogout(state.scope, tokenFamily(access.value))
+    }
+    const clearNote = () => noteCookie ? clearLogoutCookie(noteCookie) : clearPendingLogout(state.scope)
+
+    let early: Promise<boolean> | null = null
+    let sentInOrder = false
+    let stoodDown = false
+    let renewalFailed = false
+    const leaving = () => {
+      if (early || sentInOrder || moot()) return
+      // A 401 is done too: no session left — the next page's server may well have ended it already.
+      early = $lukk.logout({ retry: false }).then(() => true, (error: { status?: number } | null) => error?.status === 401)
+    }
+    const hidden = () => {
+      if (document.visibilityState === 'hidden') leaving()
+    }
+    const page = import.meta.client && typeof window !== 'undefined' && typeof window.addEventListener === 'function' ? window : undefined
+    const doc = page && typeof document !== 'undefined' ? document : undefined
+    page?.addEventListener('pagehide', leaving)
+    doc?.addEventListener('visibilitychange', hidden)
+
+    const ending = acrossTabs(nuxtApp, () => endAndClear(async () => {
+      // Sent on the way out: send it again only if that attempt failed — a page restored from the
+      // back/forward cache resumes here, and a lost early send would otherwise leave the session live.
+      // A sign-in sent after the logout this finishes comes first, even over a failed early send: resending
+      // would end that newer session.
+      if (moot()) {
+        stoodDown = true
+        return false
+      }
+      if (early) return !(await early)
+      sentInOrder = true
+      return true
+    }, () => { renewalFailed = true }))
     state.ending = ending
-    try { await ending }
-    finally { if (state.ending === ending) state.ending = null }
+    try {
+      await ending
+      // Standing down, the note isn't this logout's to clear: a newer `logout()` may have just written it.
+      // The restore plugin restores instead — what it stood down for is a newer session.
+      if (stoodDown) state.logoutStoodDown = true
+      else clearNote()
+    }
+    catch (error) {
+      // No session left to end: done. Anything else may have left it live — keep the note, so the next
+      // page load in this tab tries again.
+      if ((error as { status?: number } | null)?.status === 401 && !renewalFailed) clearNote()
+      throw error
+    }
+    finally {
+      page?.removeEventListener('pagehide', leaving)
+      doc?.removeEventListener('visibilitychange', hidden)
+      if (state.ending === ending) state.ending = null
+    }
   }
 
-  async function endAndClear(): Promise<void> {
+  /**
+   * `claimSend` says whether this logout should still send its request — not when the page already did.
+   * `renewalFailed` reports a 401 whose renewal never landed, which is not proof the session is gone.
+   */
+  async function endAndClear(claimSend: () => Promise<boolean>, renewalFailed: () => void): Promise<void> {
     try {
       // Let a refresh already on the wire finish first, so its cookie cannot land after logout cleared
       // the session — and so the logout itself carries the token it just minted.
@@ -209,7 +297,8 @@ export function useLukkAuth(): LukkAuth {
       // not write its result after this.
       state.epoch++
       state.logouts++
-      await endSession()
+      // Unless the page already sent it on its way out.
+      if (await claimSend()) await endSession(renewalFailed)
     }
     finally {
       // Once more: the renewal inside `endSession` can itself start a user reload, which captured the
@@ -241,7 +330,7 @@ export function useLukkAuth(): LukkAuth {
    * The renewal still costs a round trip before the retry. A page that navigates away without awaiting
    * `logout()` can cancel it — then lukk never revokes the session. Await it before navigating.
    */
-  async function endSession(): Promise<void> {
+  async function endSession(renewalFailed: () => void): Promise<void> {
     try {
       await sendLogout()
     }
@@ -249,7 +338,13 @@ export function useLukkAuth(): LukkAuth {
       if ((error as { status?: number } | null)?.status !== 401) throw error
 
       const renewed = await (nuxtApp as { $lukkRefresh?: () => Promise<unknown> }).$lukkRefresh?.()
-      if (!renewed) throw error
+      if (!renewed) {
+        // The 401 says the token was rejected, not that the session is gone: the renewal that would have
+        // proved it never landed (throttled, offline). Treated as definitive, this dropped the note that is
+        // the only thing left to finish the logout — and the session outlived it.
+        renewalFailed()
+        throw error
+      }
       await sendLogout()
     }
   }

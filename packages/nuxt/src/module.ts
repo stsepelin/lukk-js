@@ -5,12 +5,13 @@ import {
   addServerHandler,
   addServerPlugin,
   addServerImportsDir,
+  addTypeTemplate,
   createResolver,
   defineNuxtModule,
 } from '@nuxt/kit'
 import { defu } from 'defu'
 import type { LukkMode } from 'lukk-core'
-import { LUKK_BFF_PREFIX, isResolvableBase, isUsableConfirmationHeader, redactCredentials } from './runtime/shared'
+import { LUKK_BFF_PREFIX, isResolvableBase, isUsableConfirmationHeader, logoutCookieName, redactCredentials, signedOutCookieName } from './runtime/shared'
 
 export { LUKK_BFF_PREFIX, LUKK_SESSION_COOKIE } from './runtime/shared'
 
@@ -255,14 +256,30 @@ export default defineNuxtModule<ModuleOptions>({
       },
     )
 
-    // Server-only config (the real lukk URL + storage choice for the BFF proxy,
-    // plus the optional app-API proxy target — fixed here, never request-derived).
     // Secure session cookie in production; also under `nuxi dev --https` (detected via
     // the dev-server https config); relaxed only for `nuxi dev` over plain http, where a
     // browser would drop a Secure cookie. Decided once here — the runtime never sniffs
     // the request scheme (no x-forwarded-proto spoofing surface).
     const cookieSecure = options.session.cookieSecure
       ?? (!nuxt.options.dev || Boolean(nuxt.options.devServer?.https))
+
+    if (options.session.cookieSecure === false && !nuxt.options.dev) {
+      console.warn('[lukk-nuxt] session.cookieSecure is false in a production build — the session and logout cookies lose the `__Host-` prefix and the Secure attribute, so any host on this domain can plant or read them.')
+    }
+
+    // The logout note the browser writes and the server reads (BFF). Named from the same `cookieSecure` and
+    // namespace as the session cookie; set `runtimeConfig.public.lukk.logoutCookie` alongside any runtime
+    // override of `cookieSecure`.
+    const publicCookies = nuxt.options.runtimeConfig.public.lukk as { logoutCookie?: string, signedOutCookie?: string }
+    // What scopes this app's browser-side session bookkeeping: the cross-tab lock, the broadcast channel and
+    // the direct-mode notes. The router base alone was not enough — two apps path-routed on one origin with
+    // distinct `session.name`s (as co-hosting requires) but the same base shared all three.
+    ;(nuxt.options.runtimeConfig.public.lukk as { scope?: string }).scope ??= options.session.name ?? ''
+    publicCookies.logoutCookie ??= options.mode === 'bff' ? logoutCookieName(cookieSecure, options.session.name) : ''
+    publicCookies.signedOutCookie ??= options.mode === 'bff' ? signedOutCookieName(cookieSecure, options.session.name) : ''
+
+    // Server-only config (the real lukk URL + storage choice for the BFF proxy,
+    // plus the optional app-API proxy target — fixed here, never request-derived).
 
     nuxt.options.runtimeConfig.lukk = defu(nuxt.options.runtimeConfig.lukk,
       {
@@ -382,6 +399,24 @@ export default defineNuxtModule<ModuleOptions>({
 
     // Auto-imported composables: useLukkAuth, useLukkTwoFactor, useLukkPasskeys, ...
     addImportsDir(resolver.resolve('./runtime/composables'))
+    // The client plugin's provides, typed: the module build can't resolve `#imports`, so the plugin's own
+    // declarations are `any` and consumers saw `useNuxtApp().$lukk` as `unknown`.
+    addTypeTemplate({
+      filename: 'types/lukk-nuxt.d.ts',
+      getContents: () => [
+        `import type { LukkClient, TokenPair } from 'lukk-core'`,
+        `declare module '#app' {`,
+        `  interface NuxtApp {`,
+        `    /** The lukk-core client, wired for the configured transport. */`,
+        `    $lukk: LukkClient`,
+        `    /** The shared single-flight refresh; \`null\` when the session can't be refreshed. */`,
+        `    $lukkRefresh: () => Promise<TokenPair | null>`,
+        `  }`,
+        `}`,
+        `export {}`,
+        ``,
+      ].join('\n'),
+    })
 
     // Server-side helpers for your own routes: getLukkAccessToken(event), useLukkSession(event).
     addServerImportsDir(resolver.resolve('./runtime/server/utils'))
@@ -401,11 +436,16 @@ export default defineNuxtModule<ModuleOptions>({
     // first paint. Default on; opt out with `ssrHydrate: false`. No-op in direct mode.
     if (options.mode === 'bff' && options.ssrHydrate !== false) {
       addPlugin({ src: resolver.resolve('./runtime/plugins/session.server'), mode: 'server' })
+      // Marks streamable renders, which don't refresh on the server (Nuxt 4 `experimental.ssrStreaming`).
+      addServerPlugin(resolver.resolve('./runtime/server/plugins/streaming-render'))
     }
 
     // BFF mode: the same-origin Nitro proxy that holds tokens server-side.
     if (options.mode === 'bff') {
       addServerHandler({ route: `${LUKK_BFF_PREFIX}/**`, handler: resolver.resolve('./runtime/server/bff') })
+      // Finishes a logout the browser noted before the request, ahead of any render (see `finish-logout`).
+      addServerHandler({ middleware: true, handler: resolver.resolve('./runtime/server/finish-logout') })
+      addServerPlugin(resolver.resolve('./runtime/server/plugins/finish-logout-render'))
       // Wires `session.sharedStore`, when set, into the replaced-session record.
       addServerPlugin(resolver.resolve('./runtime/server/plugins/shared-ended-sessions'))
 

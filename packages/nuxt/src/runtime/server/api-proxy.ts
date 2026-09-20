@@ -1,9 +1,10 @@
 import { defineEventHandler, getRequestHeader, proxyRequest, setResponseStatus, useSession } from 'h3'
 import { useRuntimeConfig } from '#imports'
-import { LUKK_BFF_PREFIX, confirmationHeaderName, isSessionCookieName, sessionCookieName } from '../shared'
+import { LUKK_BFF_PREFIX, confirmationHeaderName, isSessionCookieName, sessionCookieName, signedOutCookieName } from '../shared'
 import { accessExpired } from './access-token'
 import { hopByHopHeaders, isForeignOrigin, reportProxyFailure, rejectUnresolvedTarget, resolveTarget, SPOOFABLE_FORWARDING, viaHeader, visitorIp } from './proxy-utils'
 import { sessionEnded, sessionKey } from './ended-sessions'
+import { logoutNoted, withholdSignedOut } from './logout-note'
 import { revokeDroppedSession } from './revoke-dropped'
 import { readSealedSession } from './sealed-session'
 import { refreshOnce, type TokenSession } from './utils/refresh'
@@ -69,7 +70,9 @@ export default defineEventHandler(async (event) => {
   // which then collides with the streamed response). Only when the injected access
   // token has actually lapsed do we open the read-write session to rotate — and there
   // the seal is valid, so its id is restored (no re-mint).
-  const sealed = await readSealedSession(event, sessionPassword, sessionName)
+  // Not while a logout the browser noted is being finished (see `finish-logout`): the visitor asked to be
+  // signed out, and a page rendering right now must not show that account's data.
+  const sealed = logoutNoted(event, secure, cookieNamespace) ? {} : await readSealedSession(event, sessionPassword, sessionName)
   let access = sealed.access
   // Set when this request re-seals the session, so the response can check it again at the last moment.
   let resealed: (() => Promise<boolean>) | null = null
@@ -173,7 +176,16 @@ export default defineEventHandler(async (event) => {
       // upstream was answering. This is the last point before the headers go out.
       const replaced = (await resealed?.()) === true
       if (replaced) revokeDroppedSession(event, { access, refresh: rotatedRefresh }, baseURL, clientIp)
-      const keep = replaced ? [] : toCookieArray(sessionCookie)
+      // Nor the signed-out cookie a logout this request finished queued (see `finish-logout`), if a sign-in
+      // replaced that session while the upstream was answering.
+      // Both cookies, not just the marker: the queue may also hold a session the logout's renewal
+      // re-sealed, and this response is finalised after the upstream answered — late enough to land over
+      // the sign-in that replaced it and put the browser back on the previous account.
+      const ours = [signedOutCookieName(secure, cookieNamespace), sessionName]
+      const dropLogoutCookies = await withholdSignedOut(event)
+      const keep = replaced
+        ? []
+        : toCookieArray(sessionCookie).filter(cookie => !dropLogoutCookies || !ours.includes(cookieName(cookie)))
       // Opt-in passthrough: forward only allow-listed names — and NEVER a lukk sealed session
       // cookie (this app's OR a co-hosted app's, whatever the list says); an upstream must not be
       // able to set/overwrite any lukk session.
