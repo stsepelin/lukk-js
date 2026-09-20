@@ -3,7 +3,7 @@ import { __test } from './mocks/imports'
 
 // Track read-write session opens so a test can assert the read-only path never mints a cookie,
 // plus the cookie name the writer opens the session under (to verify the per-app namespace).
-const h3state = vi.hoisted(() => ({ useSessionCalls: 0, lastSessionName: undefined as string | undefined }))
+const h3state = vi.hoisted(() => ({ useSessionCalls: 0, lastSessionName: undefined as string | undefined, lastSessionConfig: undefined as { name?: string, cookie?: Record<string, unknown>, sessionHeader?: boolean } | undefined }))
 vi.mock('h3', () => ({
   defineEventHandler: (fn: unknown) => fn,
   getRequestHeader: (event: { headers: Record<string, string> }, name: string) => event.headers[name],
@@ -21,14 +21,14 @@ vi.mock('h3', () => ({
   setResponseHeader: (event: { headers: Record<string, string>, __res?: Record<string, string> }, name: string, value: string) => {
     (event.__res ??= {})[name] = value
   },
-  useSession: async (event: { __session: unknown }, config: { name?: string }) => { h3state.useSessionCalls++; h3state.lastSessionName = config?.name; return event.__session },
+  useSession: async (event: { __session: unknown }, config: { name?: string, cookie?: Record<string, unknown>, sessionHeader?: boolean }) => { h3state.useSessionCalls++; h3state.lastSessionName = config?.name; h3state.lastSessionConfig = config; return event.__session },
   deleteCookie: (event: { __deleted?: { name: string, options: unknown }[] }, name: string, options: unknown) => { (event.__deleted ??= []).push({ name, options }) },
 }))
 
 // eslint-disable-next-line import/first
 import handler from '../src/runtime/server/bff'
 // eslint-disable-next-line import/first
-import { endSession, forgetEndedSessions, markSessionEnded, useSharedEndedSessions } from '../src/runtime/server/ended-sessions'
+import { endSession, forgetEndedSessions, markSessionEnded, sessionEnded, useSharedEndedSessions } from '../src/runtime/server/ended-sessions'
 
 interface TokenSession { access?: string, refresh?: string, confirmation?: string, sid?: string }
 
@@ -66,6 +66,7 @@ beforeEach(() => {
   ;(__test.runtimeConfig as Record<string, unknown>).public = { lukk: {} }
   h3state.useSessionCalls = 0
   h3state.lastSessionName = undefined
+  h3state.lastSessionConfig = undefined
   forgetEndedSessions()
 })
 afterEach(() => { __test.reset(); vi.restoreAllMocks() })
@@ -142,6 +143,22 @@ describe('BFF proxy', () => {
     mockFetch().fetch = vi.fn().mockResolvedValue(jsonRes({ access_token: 'a', expires_in: 900 }))
     await run(makeEvent({ path: '/api/_lukk/login', method: 'POST', headers: sameOrigin, session }))
     expect(session.update).toHaveBeenCalledWith({ access: 'a', refresh: undefined, confirmation: undefined, sid: expect.any(String) })
+  })
+
+  it('seals the session into a __Host-, Secure, HttpOnly, SameSite=Strict cookie — and no header channel', async () => {
+    // The NAME's `__Host-` prefix was pinned; its attributes were not, because the mock kept only the
+    // name. Dropping `httpOnly`, relaxing `sameSite` to `lax`, forcing `secure: false`, or letting
+    // `sessionHeader` default back on — an auth channel outside every one of these — all stayed green.
+    const session = makeSession()
+    mockFetch().fetch = vi.fn().mockResolvedValue(jsonRes({ access_token: 'a', refresh_token: 'r', expires_in: 900 }))
+
+    await run(makeEvent({ path: '/api/_lukk/login', method: 'POST', headers: sameOrigin, session }))
+
+    expect(h3state.lastSessionConfig).toMatchObject({
+      name: '__Host-lukk-session',
+      sessionHeader: false,
+      cookie: { sameSite: 'strict', secure: true, httpOnly: true, path: '/' },
+    })
   })
 
   it('writes the sealed session under the per-app namespaced cookie name', async () => {
@@ -926,6 +943,22 @@ describe('cache directives', () => {
   })
 })
 
+describe('an anonymous logout', () => {
+  it('opens no session and clears no cookie — it has none to clear', async () => {
+    // `hasCookie` guards this: without it an unauthenticated `POST /logout` calls `useSession`, which
+    // MINTS a sealed cookie so it can immediately expire one — handing a brand-new empty session to a
+    // browser that had none, on an unauthenticated route. Nothing entered that branch before.
+    h3state.useSessionCalls = 0
+    mockFetch().fetch = vi.fn().mockResolvedValue(jsonRes({}))
+
+    const event = makeEvent({ path: '/api/_lukk/logout', method: 'POST', headers: { ...sameOrigin } })
+    await run(event)
+
+    expect(h3state.useSessionCalls).toBe(0)
+    expect((event as { __deleted?: { name: string }[] }).__deleted?.map(d => d.name) ?? []).toEqual([])
+  })
+})
+
 describe('credential redaction fails closed', () => {
   it('strips refresh/confirmation tokens from a body that misses the capture gate', async () => {
     // The captures are allow-list gated (`isTokenPair` needs a STRING access_token), so a body that
@@ -950,6 +983,24 @@ describe('credential redaction fails closed', () => {
     const second = await run(makeEvent({ path: '/api/_lukk/y', method: 'POST', headers: { ...sameOrigin }, session }))
 
     expect(second).toEqual({ keep: 'me' })
+  })
+
+  it('reaches into arrays and nested objects, which the docblock promised and the code did not', async () => {
+    // "A removal must not depend on the shape being what we expected" — but an array returned early and
+    // a nested object was never looked at. A rebound response wrapping its payload (`{ data: {...} }`,
+    // the Laravel API-Resource envelope lukk-core already unwraps for `user`), or any list of sessions,
+    // carried a rotating refresh token straight through to the browser.
+    const session = makeSession({ access: 'a' })
+    mockFetch().fetch = vi.fn().mockResolvedValue(jsonRes({
+      data: { keep: 'me', refresh_token: 'rt-nested' },
+      sessions: [{ id: 1, access_token: 'at-in-array' }],
+    }))
+
+    const body = await run(makeEvent({ path: '/api/_lukk/x', method: 'POST', headers: { ...sameOrigin }, session }))
+
+    expect(JSON.stringify(body)).not.toContain('rt-nested')
+    expect(JSON.stringify(body)).not.toContain('at-in-array')
+    expect(body).toEqual({ data: { keep: 'me' }, sessions: [{ id: 1 }] })
   })
 
   it('passes a credential-free body through untouched, including arrays and scalars', async () => {
@@ -991,5 +1042,119 @@ describe('dev over plain http', () => {
 
     expect(event.status).not.toBe(403)
     expect(body).toEqual({ ok: true, expires_in: 900 })
+  })
+})
+
+describe('what the auth proxy sends, and answers', () => {
+  const big = 'a'.repeat(3000)
+
+  it('forwards the browser\'s own body on a non-logout request, and reads none for GET or HEAD', async () => {
+    // Only a logout swaps the body for the sealed refresh token; anything else presented that token
+    // to whichever lukk route was asked for.
+    mockFetch().fetch = vi.fn(async () => jsonRes({ ok: true }))
+    await run(makeEvent({ path: '/api/_lukk/forgot-password', method: 'POST', body: '{"email":"e"}', headers: { ...sameOrigin, 'content-type': 'application/json' }, session: makeSession({ refresh: 'rA' }) }))
+    expect(mockFetch().fetch.mock.calls[0]![1]!.body).toBe('{"email":"e"}')
+
+    for (const method of ['GET', 'HEAD']) {
+      mockFetch().fetch = vi.fn(async () => jsonRes({ ok: true }))
+      await run(makeEvent({ path: '/api/_lukk/user', method, body: 'should-not-be-read', session: makeSession({ access: 'A' }) }))
+      expect(mockFetch().fetch.mock.calls[0]![1]!.body, method).toBeUndefined()
+    }
+  })
+
+  it('asks for JSON, names itself in Via, and adds no header it has no value for', async () => {
+    mockFetch().fetch = vi.fn(async () => jsonRes({ ok: true }))
+    await run(makeEvent({ path: '/api/_lukk/user', session: makeSession({ access: 'A' }) }))
+
+    const headers = mockFetch().fetch.mock.calls[0]![1]!.headers as Record<string, string>
+    expect(headers.Accept).toBe('application/json')
+    expect(headers.Via).toMatch(/lukk-nuxt/)
+    expect(Object.keys(headers)).not.toContain('Content-Type')
+    expect(Object.keys(headers)).not.toContain('X-Lukk-Confirmation')
+  })
+
+  it('tells a cross-origin caller why it was refused', async () => {
+    const event = makeEvent({ path: '/api/_lukk/sessions', method: 'DELETE', headers: { origin: 'https://evil.com', host: 'app.example.com' }, session: makeSession({ access: 'A' }) })
+    expect(await run(event)).toEqual({ message: 'Cross-origin request rejected.' })
+  })
+
+  it('names the setting at fault when the base cannot be resolved', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    __test.runtimeConfig.lukk = { baseURL: `undefined/auth-${Math.random()}`, sessionPassword: 'p'.repeat(32) } as unknown as Record<string, unknown>
+    mockFetch().fetch = vi.fn()
+
+    await run(makeEvent({ path: '/api/_lukk/user', session: makeSession({ access: 'A' }) }))
+
+    expect(mockFetch().fetch).not.toHaveBeenCalled()
+    expect(String(error.mock.calls[0]![0])).toContain('lukk `baseURL`')
+  })
+
+  it('answers "Unauthenticated." on /refresh with nothing to rotate, or a token lukk rejected', async () => {
+    const none = makeEvent({ path: '/api/_lukk/refresh', method: 'POST', headers: sameOrigin, session: makeSession({ access: 'A' }) })
+    expect(await run(none)).toEqual({ message: 'Unauthenticated.' })
+
+    mockFetch().fetch = vi.fn(async () => jsonRes({ message: 'Unauthenticated.' }, 401))
+    const rejected = makeEvent({ path: '/api/_lukk/refresh', method: 'POST', headers: sameOrigin, session: makeSession({ refresh: 'rA', sid: 'R1' } as TokenSession) })
+    expect(await run(rejected)).toEqual({ message: 'Unauthenticated.' })
+  })
+
+  it.each([
+    ['a /refresh', '/api/_lukk/refresh', 'POST', () => jsonRes({ access_token: big, refresh_token: 'r2', expires_in: 900 })],
+    ['a 401 renewed mid-request', '/api/_lukk/user', 'GET', (url: string, auth?: string) =>
+      String(url).endsWith('/refresh') ? jsonRes({ access_token: big, refresh_token: 'r2', expires_in: 900 }) : (auth === `Bearer ${big}` ? jsonRes({ ok: true }) : jsonRes({}, 401))],
+    ['a step-up confirmation', '/api/_lukk/confirm-password', 'POST', () => jsonRes({ confirmation_token: big })],
+  ])('warns when %s re-seals a session near the cookie limit', async (_, path, method, answer) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    mockFetch().fetch = vi.fn(async (url: string, init?: { headers?: Record<string, string> }) => (answer as (u: string, a?: string) => Response)(url, init?.headers?.Authorization))
+
+    await run(makeEvent({ path, method, headers: sameOrigin, session: makeSession({ access: 'A', refresh: 'rA', sid: `W-${path}` } as TokenSession) }))
+
+    expect(String(warn.mock.calls[0]?.[0])).toContain('4096-octet')
+  })
+
+  it.each([[300, 502], [399, 502], [400, 400]])('treats an upstream %i as %i — only the 3xx range is a redirect', async (status, expected) => {
+    mockFetch().fetch = vi.fn(async () => jsonRes({ message: 'x' }, status))
+    const event = makeEvent({ path: '/api/_lukk/user', session: makeSession({ access: 'A' }) })
+    await run(event)
+    expect(event.status).toBe(expected)
+  })
+
+  it('ends the replaced session on sign-in even when it held only a refresh token', async () => {
+    mockFetch().fetch = vi.fn(async () => jsonRes({ access_token: 'a', refresh_token: 'r', expires_in: 900 }))
+    await run(makeEvent({ path: '/api/_lukk/login', method: 'POST', headers: sameOrigin, session: makeSession({ refresh: 'r-old', sid: 'OLD' } as TokenSession) }))
+    expect(await sessionEnded('OLD')).toBe(true)
+  })
+
+  it('clears the cookie on a logout lukk answers 403, and records a session that held only an access token', async () => {
+    mockFetch().fetch = vi.fn(async () => jsonRes({ message: 'Forbidden' }, 403))
+    const forbidden = makeSession({ access: 'A', sid: 'F1' } as TokenSession)
+    await run(makeEvent({ path: '/api/_lukk/logout', method: 'POST', headers: sameOrigin, session: forbidden }))
+    expect(forbidden.clear).toHaveBeenCalledOnce()
+    expect(await sessionEnded('F1')).toBe(true)
+  })
+
+  it('clears a logout whose renewal lukk refused outright, for a session an earlier logout ended', async () => {
+    // A definitive refusal is not "still refreshable": only a throttle or an outage is.
+    await endSession('L1')
+    mockFetch().fetch = vi.fn(async () => jsonRes({ message: 'Unauthenticated.' }, 401))
+    const session = makeSession({ access: 'A-expired', refresh: 'rA', sid: 'L1' } as TokenSession)
+
+    await run(makeEvent({ path: '/api/_lukk/logout', method: 'POST', headers: sameOrigin, session }))
+
+    expect(session.clear).toHaveBeenCalledOnce()
+  })
+
+  it('passes a JSON null body through', async () => {
+    mockFetch().fetch = vi.fn(async () => new Response('null', { status: 200 }))
+    await expect(run(makeEvent({ path: '/api/_lukk/user', session: makeSession({ access: 'A' }) }))).resolves.toBe('null')
+  })
+
+  it('strips a credential however deeply it is nested', async () => {
+    // Capped at four levels, a token five down passed through to the browser — failing open.
+    const deep = { a: { b: { c: { d: { e: { f: { refresh_token: 'rt-deep', keep: 1 } } } } } } }
+    mockFetch().fetch = vi.fn(async () => jsonRes(deep))
+    const body = await run(makeEvent({ path: '/api/_lukk/user', session: makeSession({ access: 'A' }) }))
+    expect(JSON.stringify(body)).not.toContain('rt-deep')
+    expect(body).toEqual({ a: { b: { c: { d: { e: { f: { keep: 1 } } } } } } })
   })
 })

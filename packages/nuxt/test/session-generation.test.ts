@@ -52,13 +52,14 @@ const signsIn = (account: string) => vi.fn(async () => {
   return pair
 })
 
-function boot(mode: 'direct' | 'bff' = 'direct'): void {
+function boot(mode: 'direct' | 'bff' = 'direct', overrides: Record<string, unknown> = {}): void {
   __test.runtimeConfig.public.lukk = {
     mode,
     baseURL: 'https://api/auth',
     confirmationHeader: 'X-Lukk-Confirmation',
     userEndpoint: 'https://app/me',
     userKey: '',
+    ...overrides,
   }
   const { provide } = (clientPlugin as unknown as () => { provide: Record<string, unknown> })()
   Object.assign(__test.nuxtApp, Object.fromEntries(Object.entries(provide).map(([key, value]) => [`$${key}`, value])))
@@ -609,6 +610,17 @@ describe('a sign-in or logout in another tab', () => {
     vi.stubGlobal('window', { BroadcastChannel: FakeChannel })
   })
 
+  it('moves the session generation forward when another tab changes the session', async () => {
+    // Other code moves it forward too; one that could step back would land on a generation already
+    // handed out, and a stale flight would read as current.
+    boot()
+    const before = restoreState(__test.nuxtApp).epoch
+
+    await otherTabSays()
+
+    expect(restoreState(__test.nuxtApp).epoch).toBeGreaterThan(before)
+  })
+
   it('announces a sign-in and a logout to other tabs', async () => {
     userEndpoint()
     boot()
@@ -620,6 +632,44 @@ describe('a sign-in or logout in another tab', () => {
     expect(channel.posted).toEqual(['changed'])
     await auth.logout()
     expect(channel.posted).toEqual(['changed', 'changed'])
+  })
+
+  it('BFF: tells the other tabs a logout was asked for before sending it, not only once it lands', async () => {
+    // A page that navigates away as it logs out cancels the request, and with it everything after —
+    // including the announcement. The other tabs then went on showing the account until they reloaded.
+    // Announcing first is sound here because the note is a cookie: it rides the other tabs' own requests,
+    // and the server treats a request carrying it as signed out.
+    const onTheWire = deferred<void>()
+    api.mockRejectedValue({ status: 401 })
+    boot('bff', { logoutCookie: 'lukk-logout' })
+    const auth = useLukkAuth()
+    wire.client.logout = vi.fn(() => onTheWire.promise)
+
+    const out = auth.logout()
+    await macrotask()
+    expect(FakeChannel.instances[0]!.posted).toEqual(['changed'])
+
+    onTheWire.resolve()
+    await out
+    expect(FakeChannel.instances[0]!.posted).toEqual(['changed', 'changed'])
+  })
+
+  it('direct: waits for the logout to land — its note is no evidence to another tab', async () => {
+    // The note lives in this tab's `sessionStorage`, so another tab told early would renew from the
+    // shared cookie, succeed (the session is still live) and learn nothing — having rotated the refresh
+    // token this logout still has to send.
+    const onTheWire = deferred<void>()
+    boot()
+    const auth = useLukkAuth()
+    wire.client.logout = vi.fn(() => onTheWire.promise)
+
+    const out = auth.logout()
+    await macrotask()
+    expect(FakeChannel.instances[0]!.posted).toEqual([])
+
+    onTheWire.resolve()
+    await out
+    expect(FakeChannel.instances[0]!.posted).toEqual(['changed'])
   })
 
   it('BFF: reloads the user, so the tab stops showing the account it loaded', async () => {
@@ -805,12 +855,15 @@ describe('a refresh that answers after its session was replaced (past the caps)'
     flight.resolve(pairFor('A2'))
 
     expect(await refreshing).toBeNull()
-    expect(revocations).toHaveBeenCalledWith('https://api/auth/logout', expect.objectContaining({
+    expect(revocations).toHaveBeenCalledWith('https://api/auth/logout', {
       method: 'POST',
       // Bearer only: the cookie may already be the newer session's.
       credentials: 'omit',
-      headers: expect.objectContaining({ 'Authorization': 'Bearer A2', 'Content-Type': 'application/json' }),
-    }))
+      // Never followed: a 307/308 would carry the bearer to wherever it pointed.
+      redirect: 'manual',
+      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json', 'Authorization': 'Bearer A2' },
+      body: '{}',
+    })
     expect(announce).toHaveBeenCalledOnce()
     expect(access()).not.toBe('A2')
   })
@@ -1165,5 +1218,63 @@ describe('a refresh that starts while logout() is on the wire', () => {
     expect(await refreshing).toBeNull()
     expect(wire.client.refreshTokens).toHaveBeenCalledOnce()
     expect(access()).toBeNull()
+  })
+})
+
+describe('client plugin — gaps found by mutation testing', () => {
+  const restore = () => (__test.nuxtApp as { $lukkRestore: () => Promise<unknown> }).$lukkRestore()
+
+  it('ends a stale rotation at the right URL when the base ends in a slash', async () => {
+    const flight = deferred<{ access_token: string }>()
+    wire.client.refreshTokens!.mockReturnValueOnce(flight.promise)
+    const revocations = vi.fn(async () => new Response(null, { status: 204 }))
+    vi.stubGlobal('fetch', revocations)
+    boot('direct', { baseURL: 'https://api/auth/' })
+    const refreshing = (__test.nuxtApp as { $lukkRefresh: () => Promise<unknown> }).$lukkRefresh()
+    restoreState(__test.nuxtApp).epoch++
+    flight.resolve(pairFor('A2'))
+    await refreshing
+
+    expect((revocations.mock.calls[0] as unknown[])[0]).toBe('https://api/auth/logout')
+  })
+
+  it('reports a restore that a newer session decided as superseded — not as a failure', async () => {
+    const flight = deferred<{ access_token: string }>()
+    wire.client.refreshTokens!.mockReturnValueOnce(flight.promise)
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status: 204 })))
+    boot()
+
+    const restoring = restore()
+    restoreState(__test.nuxtApp).epoch++
+    flight.resolve(pairFor('A2'))
+
+    expect(await restoring).toEqual({ pair: null, unavailable: false, superseded: true })
+  })
+
+  it('reads a refresh rejected with nothing at all as a restore that could not tell', async () => {
+    wire.client.refreshTokens!.mockRejectedValueOnce(null)
+    boot()
+    await expect(restore()).resolves.toEqual({ pair: null, unavailable: true })
+  })
+
+  it('loads no user after a refresh when nobody is on screen, even for a different account', async () => {
+    // `clearNuxtState()` drops the user but not the remembered subject; a refresh for another account then
+    // reads as "switched" — and must still not sign a user in on a page that shows nobody.
+    const jwt = (sub: string) => `h.${Buffer.from(JSON.stringify({ sub })).toString('base64url')}.s`
+    wire.client.refreshTokens!.mockResolvedValueOnce({ access_token: jwt('B'), expires_in: 900 })
+    userEndpoint()
+    boot()
+    restoreState(__test.nuxtApp).subject = 'A'
+
+    await (__test.nuxtApp as { $lukkRefresh: () => Promise<unknown> }).$lukkRefresh()
+    await macrotask()
+
+    expect(api).not.toHaveBeenCalled()
+  })
+
+  it('stops publishing the refresh once it has answered', async () => {
+    boot()
+    await restore()
+    expect(restoreState(__test.nuxtApp).refreshing).toBeNull()
   })
 })

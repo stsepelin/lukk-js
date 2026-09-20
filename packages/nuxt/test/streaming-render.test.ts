@@ -8,6 +8,8 @@ vi.mock('../src/runtime/server/sealed-session', () => ({ readSealedSession: vi.f
 import plugin from '../src/runtime/server/plugins/streaming-render'
 // eslint-disable-next-line import/first
 import { readSealedSession } from '../src/runtime/server/sealed-session'
+// eslint-disable-next-line import/first
+import { sessionCookieName } from '../src/runtime/shared'
 
 type Context = { canStream?: boolean, prefersStream?: boolean }
 type Hook = (context: Context, meta: { event: unknown }) => Promise<void>
@@ -47,6 +49,18 @@ describe('streaming-render plugin', () => {
     await renderRoute()(context, { event: {} })
 
     expect(context.prefersStream).toBe(true)
+  })
+
+  it('reads the session from the cookie the app actually sets', async () => {
+    // With `cookieSecure: false` (local http) the cookie drops its `__Host-` prefix. Reading the prefixed
+    // name there finds nothing, so an expired session streamed and its re-seal could not be withheld.
+    const hook = renderRoute()
+    __test.runtimeConfig.lukk = { sessionPassword: 'p'.repeat(32), cookieSecure: false } as unknown as Record<string, unknown>
+
+    await hook({ canStream: true, prefersStream: true }, { event: {} })
+
+    expect(vi.mocked(readSealedSession).mock.calls[0]![2]).toBe(sessionCookieName(false))
+    expect(sessionCookieName(false)).not.toBe(sessionCookieName(true))
   })
 
   it('reads nothing for a page that would not stream anyway', async () => {

@@ -90,7 +90,11 @@ set_env LUKK_VERIFY_URL "https://localhost:$APP_PORT/verified"
 ( cd "$APP_DIR" && php artisan optimize:clear >/dev/null && php artisan migrate:fresh --force >/dev/null && php artisan db:seed --force >/dev/null )
 
 echo "▶ booting the lukk API on 127.0.0.1:8000 ..."
-( cd "$APP_DIR" && php artisan serve --host=127.0.0.1 --port=8000 >"$RUN_DIR/api.log" 2>&1 ) &
+# `PHP_CLI_SERVER_WORKERS`: the built-in server is single-threaded, and these suites hold two
+# tabs open at once — a second request while one is in flight gets its socket closed, which the
+# proxy reports as "other side closed" and the test reads as a logout that never happened.
+# `--no-reload` is REQUIRED with it: without the flag Laravel warns and starts a single server.
+( cd "$APP_DIR" && PHP_CLI_SERVER_WORKERS=4 php artisan serve --no-reload --host=127.0.0.1 --port=8000 >"$RUN_DIR/api.log" 2>&1 ) &
 API_PID=$!
 up=""; for _ in $(seq 1 40); do curl -fsS http://127.0.0.1:8000/up >/dev/null 2>&1 && { up=1; break; }; sleep 0.25; done
 [ -n "$up" ] || { echo "✗ API did not come up — see $RUN_DIR/api.log"; exit 1; }
@@ -131,7 +135,18 @@ run_suite() {
   echo "▶ building the E2E app ($label) ..."
   pnpm -C "$dir" build || { SUMMARY="$SUMMARY\n  ✗ $label (build failed)"; RC=1; return; }
   echo "▶ running Playwright (BFF + SSR, same-origin, HTTPS) — $label ..."
-  if pnpm -C "$dir" exec playwright test; then SUMMARY="$SUMMARY\n  ✓ $label"; else SUMMARY="$SUMMARY\n  ✗ $label"; RC=1; fi
+  if pnpm -C "$dir" exec playwright test; then
+    SUMMARY="$SUMMARY\n  ✓ $label"
+  else
+    SUMMARY="$SUMMARY\n  ✗ $label"; RC=1
+    # What the API actually answered. Without this a CI-only failure is guesswork: the proxy logs
+    # "other side closed" for any dropped hop, which says nothing about lukk's own reply.
+    echo "── lukk API log (last 60 lines) ──"; tail -60 "$RUN_DIR/api.log" 2>/dev/null || echo "(none)"
+    for ctx in "$dir"/test-results/*/error-context.md; do
+      [ -f "$ctx" ] || continue
+      echo "── $(basename "$(dirname "$ctx")") ──"; head -40 "$ctx"
+    done
+  fi
 }
 
 if [ -z "$NUXT_VERSIONS" ]; then

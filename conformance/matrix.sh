@@ -99,7 +99,11 @@ run_combo() {
   fi
 
   wait_port_free "$PORT" || { echo "✗ [$name] port $PORT still held after killing the previous combo's server"; RESULTS+=("✗ $name (port stuck)"); FAILED=1; return; }
-  ( cd "$APP_DIR" && php artisan serve --host=127.0.0.1 --port="$PORT" >"$RUN_DIR/serve.log" 2>&1 ) &
+  # `PHP_CLI_SERVER_WORKERS`: the built-in server is single-threaded, and these suites hold two
+  # tabs open at once — a second request while one is in flight gets its socket closed, which the
+  # proxy reports as "other side closed" and the test reads as a logout that never happened.
+# `--no-reload` is REQUIRED with it: without the flag Laravel warns and starts a single server.
+  ( cd "$APP_DIR" && PHP_CLI_SERVER_WORKERS=4 php artisan serve --no-reload --host=127.0.0.1 --port="$PORT" >"$RUN_DIR/serve.log" 2>&1 ) &
   SERVE_PID=$!
   if ! wait_for_up; then
     echo "✗ [$name] server did not come up — see $RUN_DIR/serve.log"

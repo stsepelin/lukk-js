@@ -1,0 +1,100 @@
+name: mutation
+
+# Does the suite NOTICE when the code changes?
+#
+# Both packages gate on 100% coverage, which says every line ran — not that any test would fail if a
+# line behaved differently. The first mutation run put real numbers on the difference: lukk-core 86%,
+# and inside lukk-nuxt the proxy and module surfaces in the seventies, all at 100% coverage. The rule
+# a whole release depended on was reverted to the naive version it had been written to replace, and
+# 697 tests stayed green.
+#
+# The full run is NIGHTLY, and that is the gate. A PR can ask for the same check on the files it
+# touches by carrying the `mutation` label — minutes, not seconds, so it is opt-in rather than a toll
+# on every push.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  schedule:
+    # 03:40 UTC, off the hour and after the PHP package's run, which uses the same shared runners.
+    - cron: '40 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  changed:
+    if: github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'mutation')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    name: Mutation score (changed files, label `mutation`)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The merge base has to exist locally for the diff below to name anything.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # lukk-nuxt imports the built lukk-core.
+      - run: pnpm --filter lukk-core build
+
+      # Mutates only the source files this branch changed, against the SAME floor the nightly run uses
+      # (each package's `stryker.conf.json`, now 100 for both). Stryker 10 has no `--since`, so the list
+      # is computed here and handed to `--mutate`; a branch that touches no source in a package skips it.
+      # `base_ref` goes through the environment, never spliced into the script.
+      - name: Mutate the changed source files
+        env:
+          BASE: origin/${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          base="$(git merge-base "$BASE" HEAD)"
+          for pkg in core nuxt; do
+            files="$(git diff --name-only --diff-filter=ACMR "$base" HEAD -- "packages/$pkg/src" \
+              | grep -E '\.ts$' | grep -vE '\.d\.ts$' | sed "s#^packages/$pkg/##" | paste -sd, - || true)"
+            if [ -z "$files" ]; then
+              echo "lukk-$pkg: no source changes"
+              continue
+            fi
+            echo "lukk-$pkg: $files"
+            (cd "packages/$pkg" && pnpm exec stryker run --mutate "$files")
+          done
+
+  full:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [lukk-core, lukk-nuxt]
+    name: Mutation score (${{ matrix.package }})
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm --filter lukk-core build
+
+      # The break threshold lives in each package's stryker.conf.json: 100 for both, reached on
+      # 2026-09-19. A survivor is killed by a test, or — only when genuinely unobservable — disabled on a
+      # line of its own with the proof beside it. Never lower the floor to turn a red build green.
+      - run: pnpm --filter ${{ matrix.package }} test:mutation

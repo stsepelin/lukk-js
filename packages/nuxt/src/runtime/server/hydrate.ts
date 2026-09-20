@@ -94,6 +94,7 @@ export async function resolveHydrationAccess(event: H3Event): Promise<string | n
     // would put it back in the browser. The client decides instead.
     if (await sessionEnded(sessionKey(session))) return null
     const { pair } = await refreshOnce(session, baseURL, visitorIp(event, clientIpHeader))
+    // Stryker disable next-line OptionalChaining: equivalent — a null pair makes `.access` throw into the catch below, which returns null too.
     if (!pair?.access) return null
     if (await sessionEnded(sessionKey(session))) {
       revokeDroppedSession(event, pair, baseURL, visitorIp(event, clientIpHeader))

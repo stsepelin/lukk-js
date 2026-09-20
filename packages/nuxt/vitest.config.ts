@@ -21,7 +21,13 @@ export default defineConfig({
         test: {
           name: 'client',
           // Integration specs boot real sockets — run them via `test:integration`, not the coverage gate.
-          exclude: [...configDefaults.exclude, 'test/integration/**', 'test/server-env/**'],
+          exclude: [
+            ...configDefaults.exclude,
+            // Never the Stryker sandbox: it holds an instrumented COPY of these very files, so a stale
+            // one makes the suite run a mutated duplicate of itself.
+            '**/.stryker-tmp/**',
+            'test/integration/**', 'test/server-env/**',
+          ],
         },
       },
       {

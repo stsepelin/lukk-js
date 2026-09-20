@@ -26,6 +26,7 @@ export interface LukkFetchDeps {
 
 /** A 3xx that `redirect: 'manual'` left unfollowed (or a browser opaque redirect). */
 function redirectLocation(response: Response): string | null {
+  // Stryker disable next-line ConditionalExpression,StringLiteral: equivalent — an opaque-redirect filtered response has status 0 and an empty header list (Fetch §2.2.6), so the range test below already returns null. Kept to name the case. This also hides `→ true`, which "surfaces an unfollowed 3xx via onRedirect" kills.
   if (response.type === 'opaqueredirect') return null // browser hides the target
   if (response.status >= 300 && response.status < 400) return response.headers.get('location')
   return null
@@ -54,38 +55,19 @@ export function lukkFetchOptions(deps: LukkFetchDeps): FetchOptions {
     retryStatusCodes: [401],
     onRequest(ctx) {
       const { options } = ctx
+      // `redirect` pinned HERE, not only in the instance defaults, because ofetch spreads per-call
+      // options over those: a caller passing `redirect: 'follow'` re-enabled chasing a 3xx, and a
+      // 307/308 preserves the METHOD AND BODY across origins (RFC 9110 §15.4.8-9). The browser strips
+      // `Authorization` on a cross-origin redirect but not a credential in the body. Both siblings —
+      // `createRequestFetch` and lukk-core's `request()` — already pin it after the caller's options.
+      options.redirect = 'manual'
       const headers = new Headers(options.headers)
       headers.set('accept', 'application/json')
 
       // Never attach the sealed session cookie / bearer to a cross-origin target a
       // caller may have passed — and drop `credentials` there too.
       const url = typeof ctx.request === 'string' ? ctx.request : ctx.request.url
-      // The per-call `baseURL` counts too: ofetch applies it AFTER this hook, so checking the request alone
-      // would clear a relative path as same-origin and then send the bearer to the caller's own origin.
-      //
-      // An EMPTY base is not a relative one. It is ofetch's idiom for "take this path exactly as given",
-      // which `loadUser` passes so a configured absolute `user.endpoint` survives. Reading it as relative
-      // refused the bearer on every direct-mode app whose API base is absolute — which is every ordinary
-      // one — so login succeeded and the user then never loaded, burning a rotation per retry.
-      const declared = typeof options.baseURL === 'string' ? options.baseURL : undefined
-      const perCall = declared === '' ? undefined : declared
-      const known = (base: string | undefined, target: string) => base !== undefined && isSameOrigin(base, target)
-      const apiIsRelative = !/^https?:\/\//i.test(deps.baseURL)
-      // This app's own origin stands in for the API's ONLY where the API base is the relative proxy mount:
-      // there `isSameOrigin` refuses every absolute URL, and same-origin is exactly what the mount means.
-      // With an ABSOLUTE API base the app's origin is a different host that the bearer was never scoped
-      // to — and on the server this origin comes from the `Host` header, so it is not ours to trust.
-      const appOrigin = apiIsRelative ? deps.origin : undefined
-      const perCallOk = perCall === undefined
-        ? true
-        : carriesOrigin(perCall)
-          // Absolute: the API's own origin, or this app's under the proxy mount. Unknown origin (SSR
-          // without a request URL) stays refused.
-          ? isSameOrigin(deps.baseURL, perCall) || known(appOrigin, perCall)
-          // Relative: it resolves against the DOCUMENT, so it only stays on the API when the API is this
-          // app (a relative base). With an absolute API base it points somewhere else entirely.
-          : apiIsRelative
-      const sameOrigin = (isSameOrigin(deps.baseURL, url) || known(appOrigin, url)) && perCallOk
+      const sameOrigin = targetIsOurs(deps, url, options.baseURL)
       options.credentials = sameOrigin ? 'include' : 'same-origin'
       if (sameOrigin) {
         if (deps.isServer) {
@@ -124,6 +106,55 @@ export function createLukkFetch(deps: LukkFetchDeps): $Fetch {
  * resolves the relative mount in-process and forwards the session cookie), carrying the
  * shared auth-aware options.
  */
+/**
+ * Is this request staying on the API — the only place a lukk credential may go?
+ *
+ * Shared by the `onRequest` hook and by `createRequestFetch`, because the two MUST agree: the hook was
+ * the only caller once, and the request-aware transport underneath it attached the inbound cookie to a
+ * foreign host before the hook ever ran.
+ */
+function targetIsOurs(deps: LukkFetchDeps, url: string, baseURL: unknown): boolean {
+  // The per-call `baseURL` counts too: ofetch applies it AFTER the hook, so checking the request alone
+  // would clear a relative path as same-origin and then send the bearer to the caller's own origin.
+  //
+  // An EMPTY base is not a relative one. It is ofetch's idiom for "take this path exactly as given",
+  // which `loadUser` passes so a configured absolute `user.endpoint` survives. Reading it as relative
+  // refused the bearer on every direct-mode app whose API base is absolute — which is every ordinary
+  // one — so login succeeded and the user then never loaded, burning a rotation per retry.
+  //
+  // Any other truthy value is REFUSED — neither ignored nor judged by a coercion of our choosing. ofetch
+  // applies every truthy base, and ufo resolves a boxed `new String('https://evil.example')` to that
+  // host, so reading "not a string" as "no base" sent the bearer wherever the object pointed. Judging
+  // `String(baseURL)` was not enough either: ufo coerces the same object twice, with different hints
+  // (`endsWith` takes its `toString`, the `+` in `joinURL` its `valueOf`), so an object answering
+  // differently to each was cleared as the API and sent elsewhere. A falsy base (`''`, `null`) is
+  // ofetch's "none".
+  if (baseURL && typeof baseURL !== 'string') return false
+  const perCall = baseURL ? baseURL as string : undefined
+  const known = (base: string | undefined, target: string) => {
+    // Stryker disable next-line ConditionalExpression: equivalent — `isSameOrigin` refuses an absolute target against an undefined base (its `https?://` base test fails), and every relative target is already accepted by the API-base check this is OR-ed with. Its own line, so the comparison below stays under test. This also hides `→ true`, which "accepts an ABSOLUTE per-call baseURL (or URL) on this app's own origin" kills.
+    if (base === undefined) return false
+    return isSameOrigin(base, target)
+  }
+  const apiIsRelative = !/^https?:\/\//i.test(deps.baseURL)
+  // This app's own origin stands in for the API's ONLY where the API base is the relative proxy mount:
+  // there `isSameOrigin` refuses every absolute URL, and same-origin is exactly what the mount means.
+  // With an ABSOLUTE API base the app's origin is a different host that the bearer was never scoped
+  // to — and on the server this origin comes from the `Host` header, so it is not ours to trust.
+  const appOrigin = apiIsRelative ? deps.origin : undefined
+  const perCallOk = perCall === undefined
+    ? true
+    : carriesOrigin(perCall)
+      // Absolute: the API's own origin, or this app's under the proxy mount. Unknown origin (SSR
+      // without a request URL) stays refused.
+      ? isSameOrigin(deps.baseURL, perCall) || known(appOrigin, perCall)
+      // Relative: it resolves against the DOCUMENT, so it only stays on the API when the API is this
+      // app (a relative base). With an absolute API base it points somewhere else entirely.
+      : apiIsRelative
+
+  return (isSameOrigin(deps.baseURL, url) || known(appOrigin, url)) && perCallOk
+}
+
 /** Minimal callable shape of Nuxt's request-aware fetch that we drive. */
 export type RequestFetch = (request: string, opts?: FetchOptions) => Promise<unknown>
 
@@ -132,6 +163,16 @@ export function createRequestFetch(requestFetch: RequestFetch, deps: LukkFetchDe
   // `redirect` sits AFTER the caller's opts, mirroring `lukk-core`'s ordering: a caller passing
   // `redirect: 'follow'` would otherwise re-enable chasing a 3xx, and this fetch attaches the
   // sealed session cookie on the server.
-  return ((request: string, opts: FetchOptions = {}) =>
-    requestFetch(request, { ...options, ...opts, redirect: 'manual' })) as $Fetch
+  return ((request: string, opts: FetchOptions = {}) => {
+    // Nuxt's request-aware fetch is h3's `fetchWithEvent`, which merges `getProxyRequestHeaders(event)`
+    // — the visitor's whole inbound `Cookie` among them — into EVERY request, absolute targets
+    // included, and does it before ofetch runs our `onRequest`. So the hook's guard was computing the
+    // right answer over a credential the transport had already attached: on SSR, handing
+    // `useLukkFetch()` an absolute URL derived from request input sent the sealed BFF session to that
+    // host, with no CORS in the way. Blank it here, where it is still ours to blank.
+    const ours = targetIsOurs(deps, request, opts.baseURL ?? options.baseURL)
+    const headers = ours ? opts.headers : { ...(opts.headers as Record<string, string> | undefined), cookie: '' }
+
+    return requestFetch(request, { ...options, ...opts, headers, redirect: 'manual' })
+  }) as $Fetch
 }

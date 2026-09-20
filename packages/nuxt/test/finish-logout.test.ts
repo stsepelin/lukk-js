@@ -14,7 +14,8 @@ vi.mock('h3', () => ({
     if (!sealed.startsWith('sid:')) throw new Error('bad seal')
     const sid = sealed.slice(4)
     // `refresh:`-prefixed ids model a session whose access token has already gone.
-    return { id: 'h3-id', data: sid.startsWith('refresh:') ? { sid, refresh: 'r' } : { sid, access: 'tok', refresh: 'r' } }
+    // `refresh:`-prefixed ids model a session whose access token has already gone; `empty:` one with no tokens.
+    return { id: 'h3-id', data: sid.startsWith('empty:') ? { sid } : sid.startsWith('refresh:') ? { sid, refresh: 'r' } : { sid, access: 'tok', refresh: 'r' } }
   },
 }))
 
@@ -80,6 +81,64 @@ describe('finish-logout middleware (BFF)', () => {
     await run(event)
     expect(event.fetch).not.toHaveBeenCalled()
     expect(event.set).toEqual({})
+  })
+
+  it('leaves a request to the proxy mount itself alone, not only the paths below it', async () => {
+    const event = makeEvent({ path: '/api/_lukk?x=1' })
+    await run(event)
+    expect(event.fetch).not.toHaveBeenCalled()
+    expect(event.set).toEqual({})
+  })
+
+  it('marks the response per-visitor, so the render hook can restate it after a cached route rule', async () => {
+    const event = makeEvent()
+    await run(event)
+    expect((event.context as { lukkPerVisitor?: boolean }).lukkPerVisitor).toBe(true)
+  })
+
+  it('drops a note whose session unseals but holds no tokens — there is nothing upstream to end', async () => {
+    const event = makeEvent({ cookies: { '__Host-lukk-logout': '1', '__Host-lukk-session': 'sid:empty:S1' } })
+    await run(event)
+    expect(event.fetch).not.toHaveBeenCalled()
+    expect(event.deleted).toEqual([noteGone])
+  })
+
+  it('degrades on a runtime whose Headers has no getSetCookie, instead of failing every page load', async () => {
+    const headers = { getSetCookie: undefined } as unknown as Headers
+    const event = makeEvent({ fetch: vi.fn<LocalFetch>(async () => ({ status: 204, headers }) as unknown as Response) })
+
+    await expect(run(event)).resolves.toBeUndefined()
+    expect(event.appended).toEqual([])
+  })
+
+  it('never forwards a cleared session cookie, however bare the clearing', async () => {
+    // A bare `name=` is a clearing too; forwarded, it would land after a newer sign-in's cookie and wipe it.
+    const headers = new Headers()
+    headers.append('set-cookie', '__Host-lukk-session=')
+    const event = makeEvent({ fetch: vi.fn<LocalFetch>(async () => new Response(null, { status: 503, headers })) })
+
+    await run(event)
+
+    expect(event.appended).toEqual([])
+  })
+
+  it('does not evict another session when two requests share one failed logout on a full map', async () => {
+    const fetch = vi.fn<LocalFetch>(async () => cleared(503))
+    const failFor = (sealed: string) => run(makeEvent({ fetch, cookies: { '__Host-lukk-logout': '1', '__Host-lukk-session': sealed } }))
+    for (let i = 0; i < FAILURE_LIMIT - 1; i++) await failFor(`sid:S${i}`)
+
+    await Promise.all([failFor('sid:SHARED'), failFor('sid:SHARED')]) // one request upstream, two failures noted
+
+    expect(logoutFailureCount()).toBe(FAILURE_LIMIT)
+    fetch.mockClear()
+    await failFor('sid:S0') // the oldest is still held back
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it('disarms its timeout once the proxy answers', async () => {
+    vi.useFakeTimers()
+    await run(makeEvent())
+    expect(vi.getTimerCount()).toBe(0)
   })
 
   it('drops a note with no session to end', async () => {

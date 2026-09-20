@@ -72,14 +72,16 @@ export function markSessionEnded(key: string | undefined, now = Date.now()): voi
 }
 
 export function isSessionEnded(key: string | undefined, now = Date.now()): boolean {
+  // Stryker disable next-line ConditionalExpression: equivalent — `markSessionEnded` never stores an empty key, so the lookup below answers false for one anyway. Kept to name the case. This also hides `→ true`, which "remembers an ended session for the TTL, then forgets it" kills.
   if (!key) return false
   const expires = ended.get(key)
-  return expires !== undefined && expires > now
+  return (expires ?? 0) > now
 }
 
 // Flags on `globalThis` too, for the reason the record is: each server bundle has its own module copy,
 // and module-level flags reported an outage twice and backed off in one bundle only.
 interface RecordFlags { warned: boolean, storeFailureReported: boolean, storeDownUntil: number }
+// Stryker disable next-line ObjectLiteral: equivalent — every reader treats a missing flag as false and a missing time as 0.
 const flags: RecordFlags = ((globalThis as { __lukkEndedSessionFlags?: RecordFlags }).__lukkEndedSessionFlags ??= { warned: false, storeFailureReported: false, storeDownUntil: 0 })
 function warnSaturated(): void {
   if (flags.warned) return
@@ -164,6 +166,9 @@ async function viaStore<T>(operation: (store: SharedEndedSessions) => Promise<T>
 
     Promise.resolve().then(() => operation(store)).then((answer) => {
       clearTimeout(timer)
+      // Answered: arm the report again, so a LATER outage is not silent for the life of the process.
+      // Only the flag resets, never the backoff — this only runs once the backoff has already elapsed.
+      flags.storeFailureReported = false
       resolve(answer)
     }, fail)
   })

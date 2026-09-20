@@ -99,7 +99,7 @@ function cloneData<V>(value: V): V {
 /** Whether a value tree contains a `File`/`Blob` (so the submit must use `multipart/form-data`). */
 function hasFiles(value: unknown): boolean {
   if (value instanceof Blob) return true
-  if (Array.isArray(value)) return value.some(hasFiles)
+  // Arrays included: `Object.values` of an array is its items.
   if (value !== null && typeof value === 'object') return Object.values(value).some(hasFiles)
   return false
 }
@@ -110,10 +110,10 @@ function toFormData(source: Record<string, unknown>): FormData {
   for (const [key, value] of Object.entries(source)) appendFormData(form, key, value)
   return form
 }
+// Arrays take the object branch: `Object.entries` of an array keys its items `0`, `1`, … — `a[0]`, as Laravel
+// expects. A `File` keeps its own name when appended as a Blob (XHR/Fetch `FormData.append`).
 function appendFormData(form: FormData, key: string, value: unknown): void {
-  if (Array.isArray(value)) value.forEach((item, i) => appendFormData(form, `${key}[${i}]`, item))
-  else if (value instanceof File) form.append(key, value, value.name)
-  else if (value instanceof Blob) form.append(key, value)
+  if (value instanceof Blob) form.append(key, value)
   else if (value instanceof Date) form.append(key, value.toISOString())
   else if (typeof value === 'boolean') form.append(key, value ? '1' : '0') // Laravel truthiness
   else if (value === null || value === undefined) form.append(key, '')
@@ -277,15 +277,14 @@ export function useLukkForm<T extends FormFields>(initial: T, options: UseLukkFo
     processing.value = true
     wasSuccessful.value = false
     recentlySuccessful.value = false
-    if (recentlyTimer) clearTimeout(recentlyTimer)
+    clearTimeout(recentlyTimer)
     clearErrors()
     // A plain snapshot — don't hand the reactive proxy to the serializer.
     const source = { ...data } as T
     const payload = transformFn ? transformFn(source) : source
-    const asFormData = method !== 'get' && (forceFormData === true || hasFiles(payload))
     const carrier = method === 'get'
       ? { query: payload }
-      : { body: asFormData ? toFormData(payload as Record<string, unknown>) : payload }
+      : { body: forceFormData === true || hasFiles(payload) ? toFormData(payload as Record<string, unknown>) : payload }
     // Our own controller powers `cancel()`; a caller's own `signal` (in fetchOptions) wins.
     const controller = new AbortController()
     inFlight = controller

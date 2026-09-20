@@ -4,12 +4,13 @@
  * declarations under. An inferred member degrades to `any` there, which fails an `expectTypeOf` below
  * or leaves a `@ts-expect-error` unused.
  */
-import type { AccountExport, ChangePasswordInput, LukkUser, PasskeySummary, RecoveryCodeCount, ResetPasswordInput, TwoFactorEnrollment } from 'lukk-core'
+import type { AccountExport, ChangePasswordInput, LoginInput, LoginResult, LukkUser, PasskeySummary, RecoveryCodeCount, RegisterInput, RegisterResult, ResetPasswordInput, TwoFactorEnrollment } from 'lukk-core'
 import type { $Fetch } from 'ofetch'
 import { expectTypeOf } from 'vitest'
 import type { ComputedRef, Ref } from 'vue'
 import { useLukkAbilities } from '../src/runtime/composables/useLukkAbilities'
 import { useLukkAccount } from '../src/runtime/composables/useLukkAccount'
+import { useLukkAuth } from '../src/runtime/composables/useLukkAuth'
 import { useLukkChangePassword } from '../src/runtime/composables/useLukkChangePassword'
 import { useLukkConfirmation } from '../src/runtime/composables/useLukkConfirmation'
 import { useLukkEmailVerification } from '../src/runtime/composables/useLukkEmailVerification'
@@ -126,3 +127,25 @@ expectTypeOf(twoFactor.confirm).toEqualTypeOf<(code: string) => Promise<void>>()
 expectTypeOf(twoFactor.disable).toEqualTypeOf<() => Promise<void>>()
 expectTypeOf(twoFactor.recoveryCodeCount).toEqualTypeOf<() => Promise<RecoveryCodeCount>>()
 expectTypeOf(twoFactor.regenerateRecoveryCodes).toEqualTypeOf<() => Promise<{ recovery_codes: string[] }>>()
+
+// --- useLukkAuth ------------------------------------------------------------------------------------
+// The one this file was written for, and the one it omitted: the largest surface here, whose own source
+// comment names the regression (published declarations typing members `any`). Dropping its `: LukkAuth`
+// return annotation left every assertion in this file green.
+const auth = useLukkAuth()
+expectTypeOf(auth.user).toEqualTypeOf<Ref<LukkUser | null>>()
+expectTypeOf(auth.loggedIn).toEqualTypeOf<ComputedRef<boolean>>()
+expectTypeOf(auth.ready).toEqualTypeOf<ComputedRef<boolean>>()
+expectTypeOf(auth.whenReady).toEqualTypeOf<() => Promise<void>>()
+expectTypeOf(auth.restoreFailed).toEqualTypeOf<ComputedRef<boolean>>()
+expectTypeOf(auth.pendingTwoFactor).toEqualTypeOf<ComputedRef<boolean>>()
+expectTypeOf(auth.register).toEqualTypeOf<(input: RegisterInput) => Promise<RegisterResult>>()
+expectTypeOf(auth.login).toEqualTypeOf<(credentials: LoginInput) => Promise<LoginResult>>()
+expectTypeOf(auth.verifyTwoFactor).toEqualTypeOf<(code: string) => Promise<void>>()
+expectTypeOf(auth.verifyRecoveryCode).toEqualTypeOf<(recoveryCode: string) => Promise<void>>()
+expectTypeOf(auth.logout).toEqualTypeOf<() => Promise<void>>()
+expectTypeOf(auth.revokeOtherSessions).toEqualTypeOf<() => Promise<void>>()
+expectTypeOf(auth.fetchUser).toEqualTypeOf<() => Promise<void>>()
+expectTypeOf(auth.initSession).toEqualTypeOf<() => Promise<void>>()
+// @ts-expect-error the restore owns it
+auth.loggedIn.value = true

@@ -74,6 +74,23 @@ test('the visitor\'s other tabs follow that logout', async ({ page, context }) =
   await expect(other.getByTestId('auth-state')).toHaveText('guest', { timeout: 10_000 })
 })
 
+test('the other tabs follow that logout even when the BFF answers before lukk does', async ({ page, context }) => {
+  // The BFF answers a logout without waiting for lukk, so the announcement can reach the other tab
+  // while the session is still being ended: that tab's check comes back with the account on its way
+  // out, and the tab went on showing an account nobody is signed in to. Only ever seen where the
+  // round trip is slow — CI, not a laptop — so the latency here is deliberate rather than incidental.
+  const user = await freshUser(page)
+  await login(page, user.email, user.password)
+  const other = await context.newPage()
+  await visit(other, '/')
+  await expect(other.getByTestId('auth-state')).toHaveText('authenticated')
+
+  lukk('ok', 800)
+  await page.getByTestId('logout-navigate').click()
+
+  await expect(other.getByTestId('auth-state')).toHaveText('guest', { timeout: 10_000 })
+})
+
 test('a tab that was away when the server finished the logout still hears about it', async ({ page, context }) => {
   // The other half of "other tabs follow": not the announcing tab's own logout, but a tab whose page
   // load is the one that finished it — it reads the server's signed-out answer and tells the rest.
@@ -88,6 +105,10 @@ test('a tab that was away when the server finished the logout still hears about 
   await visit(page, `/dashboard?away=${encodeURIComponent(AWAY)}`)
   await page.getByTestId('logout-leave').click()
   await page.waitForURL(AWAY)
+  // The fault really took: a note is standing and the session is still live. Without this the test
+  // passes just as well when `fail-logout` does nothing, and then it proves only the ordinary path.
+  expect((await context.cookies()).some(c => c.name === '__Host-lukk-logout')).toBe(true)
+  expect(await liveSessions(page, user.email)).toBe(1)
   lukk('ok')
 
   // …so the next page load is what ends it, and that page is what the other tab hears from.
@@ -266,6 +287,10 @@ test('a forged logout note cannot be stored on a cached page and replayed to oth
 })
 
 test('a hanging lukk neither holds up the page nor loses the logout', async ({ page }) => {
+  // Its own budget: a 25 s wait followed by a 30 s poll cannot fit the suite's 30 s default, so this
+  // passed only because the first wait normally resolves in seconds — a genuine hang would have been
+  // reported as a timeout on the test rather than on the thing it is watching.
+  test.setTimeout(90_000)
   const user = await freshUser(page)
   await login(page, user.email, user.password)
 
@@ -275,6 +300,9 @@ test('a hanging lukk neither holds up the page nor loses the logout', async ({ p
   await expect(page.getByTestId('auth-state')).toHaveText('guest', { timeout: 25_000 })
   // Comfortably past the server's own 5 s give-up, and low enough to fail if that grows.
   expect(Date.now() - started).toBeLessThan(12_000)
+  // The hang really took: the page reads as signed out while lukk has NOT ended the session. Without
+  // this, a `hang` that quietly passed through would satisfy everything below.
+  expect(await liveSessions(page, user.email)).toBe(1)
 
   lukk('ok')
   await page.reload()

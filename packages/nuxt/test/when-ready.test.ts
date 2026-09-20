@@ -1,4 +1,4 @@
-import { nextTick, ref } from 'vue'
+import { effectScope, nextTick, ref } from 'vue'
 import { describe, expect, it } from 'vitest'
 import { isPrematureWait, whenReady } from '../src/runtime/utils/when-ready'
 
@@ -52,5 +52,22 @@ describe('isPrematureWait', () => {
     expect(isPrematureWait(true, false, false)).toBe(false) // already resolved (a hydrated render)
     expect(isPrematureWait(false, true, false)).toBe(false) // the server has no restore plugin
     expect(isPrematureWait(false, false, true)).toBe(false) // the restore is under way
+  })
+})
+
+describe('whenReady cleanup', () => {
+  it('stops watching once the session resolves', async () => {
+    // Every early caller installs a watcher on an app-wide ref; left running, each one lives as long as
+    // the app does.
+    const ready = ref(false)
+    const scope = effectScope()
+    const p = scope.run(() => whenReady(ready, false))!
+
+    expect(scope.effects).toHaveLength(1)
+    ready.value = true
+    await p
+
+    expect(scope.effects).toHaveLength(0)
+    scope.stop()
   })
 })

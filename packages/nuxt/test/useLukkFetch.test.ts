@@ -59,9 +59,15 @@ describe('useLukkFetch', () => {
 
   it('captures the request cookie eagerly (from useRequestHeaders)', () => {
     __test.runtimeConfig.public.lukk = { mode: 'bff', apiBaseURL: '/api' }
-    __test.requestHeaders = { cookie: '__Host-lukk-session=sealed' }
+    __test.requestHeaders = { cookie: '__Host-lukk-session=sealed', authorization: 'Bearer forged' }
     useLukkFetch()
     expect(deps().getCookieHeader()).toBe('__Host-lukk-session=sealed')
+  })
+
+  it('knows it is running in the browser', () => {
+    __test.runtimeConfig.public.lukk = { mode: 'direct', apiBaseURL: 'https://api.example.com' }
+    useLukkFetch()
+    expect(deps().isServer).toBe(false)
   })
 
   it('refresh delegates to $lukkRefresh, and resolves null when absent', async () => {

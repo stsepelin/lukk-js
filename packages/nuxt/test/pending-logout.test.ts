@@ -108,6 +108,26 @@ describe('pending logout note (direct mode)', () => {
     delete (globalThis as { localStorage?: unknown }).localStorage
   })
 
+  it('still records a sign-in when the previous record cannot be read', () => {
+    // An unreadable record counts as "no sign-in yet" (0), never as a value that poisons the arithmetic:
+    // `Math.max(sentAt, undefined)` is NaN, and a NaN record stands no logout down, ever.
+    const written = new Map<string, string>()
+    vi.stubGlobal('localStorage', { getItem: () => { throw new Error('denied') }, setItem: (k: string, v: string) => { written.set(k, v) } })
+
+    noteSignIn(undefined, 1_500)
+
+    expect(written.get('lukk:signed-in-at:/')).toBe('1500')
+  })
+
+  it.each([0, -5])('reads a note dated %i as no note', (at) => {
+    // Not a time anything here writes: a tampered or corrupted entry must not become a standing logout.
+    const store = memoryStorage()
+    store.setItem('lukk:logging-out:/', JSON.stringify({ at, fid: 'f1' }))
+    vi.stubGlobal('sessionStorage', store)
+
+    expect(readPendingLogout(undefined, 1_000)).toBeUndefined()
+  })
+
   it('ignores a note dated in the future — it would never age out, and nothing could stand it down', () => {
     // The clock moved back between writing the note and reading it (a phone waking, an RTC correction, a
     // restored VM snapshot). Bounded only from above, its age was negative and every page load for the
