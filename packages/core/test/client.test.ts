@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from 'vitest'
-import { createLukkClient, isSameOrigin, lukkError } from '../src/client'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { carriesOrigin, createLukkClient, isSameOrigin, lukkError } from '../src/client'
 
 describe('lukkError', () => {
   it('shapes a Laravel error, and falls back to statusText / omits errors without a body', () => {
@@ -9,7 +9,14 @@ describe('lukkError', () => {
   })
 })
 
+// Every mocked response is built here, so this is where a runaway retry is stopped. A client that retries
+// without end (a broken retry guard) loops in microtasks alone — the event loop never turns, no test
+// timeout can fire, and the whole run freezes instead of failing. No test here needs more than a handful.
+let responses = 0
+beforeEach(() => { responses = 0 })
+
 function json(body: unknown, status = 200): Response {
+  if (++responses > 50) throw new Error('more than 50 responses in one test — a retry loop')
   return new Response(body === undefined ? '' : JSON.stringify(body), {
     status,
     headers: { 'content-type': 'application/json' },
@@ -215,6 +222,49 @@ describe('createLukkClient', () => {
     expect(refreshCalls).toBe(1)
   })
 
+  it.each([
+    ['login', (c: ReturnType<typeof createLukkClient>) => c.login({ email: 'e', password: 'p' })],
+    ['register', (c: ReturnType<typeof createLukkClient>) => c.register({ email: 'e', password: 'p', password_confirmation: 'p' })],
+    ['twoFactorChallenge', (c: ReturnType<typeof createLukkClient>) => c.twoFactorChallenge({ challenge_token: 't', code: '123456' })],
+    ['loginWithPasskey', (c: ReturnType<typeof createLukkClient>) => c.loginWithPasskey('cid', { id: 'c' })],
+  ])('%s never refreshes on a 401 — it rejects with it', async (_, signIn) => {
+    // A sign-in doesn't use the current session, so its 401 is the answer (an unknown passkey), not an
+    // expired token. Refreshing would rotate the refresh token of the session being replaced.
+    const fetch = vi.fn(async () => json({ message: 'Unauthenticated.' }, 401))
+    const refresh = vi.fn(async () => ({ access_token: 'new', expires_in: 900 }))
+    const onUnauthenticated = vi.fn()
+    const client = createLukkClient({ baseURL: 'https://x/auth', fetch, refresh, onUnauthenticated })
+
+    await expect(signIn(client)).rejects.toMatchObject({ status: 401 })
+
+    expect(refresh).not.toHaveBeenCalled()
+    expect(onUnauthenticated).not.toHaveBeenCalled()
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+
+  it('logout refreshes and retries on a 401 by default, and not when asked not to', async () => {
+    const calls: string[] = []
+    let refreshed = false
+    const fetch = vi.fn(async (url: string) => {
+      calls.push(String(url).replace('https://x/auth', ''))
+      if (String(url).endsWith('/refresh')) return json({ access_token: 'new', expires_in: 900 })
+      return refreshed ? json({}) : json({ message: 'Unauthenticated.' }, 401)
+    })
+    const refresh = vi.fn(async () => { refreshed = true; return { access_token: 'new', expires_in: 900 } })
+    const client = createLukkClient({ baseURL: 'https://x/auth', fetch, refresh })
+
+    await client.logout()
+    expect(refresh).toHaveBeenCalledOnce()
+    expect(calls).toEqual(['/logout', '/logout'])
+
+    refreshed = false
+    refresh.mockClear()
+    calls.length = 0
+    await expect(client.logout({ retry: false })).rejects.toMatchObject({ status: 401 })
+    expect(refresh).not.toHaveBeenCalled()
+    expect(calls).toEqual(['/logout'])
+  })
+
   it('throws a typed LukkError on a failed request', async () => {
     const fetch = vi.fn(async () => json({ message: 'Nope', errors: { email: ['bad'] } }, 422))
     const client = createLukkClient({ baseURL: 'https://x/auth', fetch })
@@ -335,6 +385,41 @@ describe('isSameOrigin canonicalises before deciding', () => {
       expect(isSameOrigin(base, path), path).toBe(false)
   })
 
+  it('refuses a malformed BASE with leading whitespace or controls, even for a target it would parse to', () => {
+    // The parser would read `' https://api.example.com'` as that origin, so an unanchored base test
+    // matched it. A base like that is a misconfiguration; the answer to one is no credentials.
+    for (const bad of [' https://api.example.com/auth', '\thttps://api.example.com/auth', '\u0000https://api.example.com/auth'])
+      expect(isSameOrigin(bad, 'https://api.example.com/x'), JSON.stringify(bad)).toBe(false)
+  })
+
+  it('refuses a URL whose scheme is split by a tab, LF or CR — the parser removes them from ANYWHERE', () => {
+    // The leading-only strip missed this: the URL parser removes ASCII tab, LF and CR from any
+    // position, so each of these resolves to a foreign origin while reading as a relative path. Proven
+    // end to end against real ofetch, which leaves the string unjoined (ufo's `hasProtocol` matches
+    // `\s` inside the scheme) and hands it to `fetch`, where the platform resolves it.
+    const TAB = String.fromCharCode(9), LF = String.fromCharCode(10), CR = String.fromCharCode(13)
+
+    for (const path of [
+      `ht${TAB}tps://evil.com/steal`,
+      `htt${LF}p://evil.com/steal`,
+      `h${CR}ttps://evil.com/steal`,
+      `https${TAB}://evil.com/steal`,
+      `/${TAB}/evil.com/steal`,
+      `//evil${LF}.com/steal`,
+    ]) {
+      expect(isSameOrigin(base, path), JSON.stringify(path)).toBe(false)
+      // And the platform really does resolve them somewhere else — the reason this matters.
+      expect(new URL(path, 'https://api.example.com/').origin, JSON.stringify(path)).not.toBe('https://api.example.com')
+    }
+  })
+
+  it('reports carriesOrigin for the same split-scheme shapes', () => {
+    const TAB = String.fromCharCode(9)
+    expect(carriesOrigin(`ht${TAB}tps://evil.com`)).toBe(true)
+    expect(carriesOrigin(`/${TAB}/evil.com`)).toBe(true)
+    expect(carriesOrigin('/still/relative')).toBe(false)
+  })
+
   it('refuses a non-http scheme whatever the base', () => {
     expect(isSameOrigin(base, 'javascript:alert(1)')).toBe(false)
     expect(isSameOrigin(base, 'data:text/html,x')).toBe(false)
@@ -367,5 +452,323 @@ describe('joinURL cannot emit an authority', () => {
 
     for (const call of fetchSpy.mock.calls)
       expect(String(call[0]).startsWith('//')).toBe(false)
+  })
+})
+
+describe('URL guards, mutation-pinned', () => {
+  const base = 'https://api.example.com/auth'
+
+  /** The URL that reaches `fetch` for a given base + path — `joinURL` is private. */
+  async function fetched(baseURL: string, path: string): Promise<string> {
+    const fetchSpy = vi.fn(async () => new Response('{}', { status: 200 }))
+    const client = createLukkClient({ baseURL, fetch: fetchSpy as never })
+    await client.request(path).catch(() => {})
+
+    return String(fetchSpy.mock.calls[0]![0])
+  }
+
+  it('anchors the absolute-URL test, so a scheme in the MIDDLE of a path is still a path', async () => {
+    // Unanchored, `orders/https://x` reads as absolute and is returned UNJOINED — the caller then
+    // fetches it against the document instead of against the API.
+    expect(await fetched('https://api.example.com', 'orders/https://evil.com'))
+      .toBe('https://api.example.com/orders/https://evil.com')
+    // A genuinely absolute path still passes through, http as well as https, case-insensitively.
+    expect(await fetched('https://api.example.com', 'https://api.example.com/x')).toBe('https://api.example.com/x')
+    expect(await fetched('https://api.example.com', 'HTTP://other.example/x')).toBe('HTTP://other.example/x')
+  })
+
+  it('strips leading slashes ANYWHERE in the run, not just the first', async () => {
+    // One `/` left behind on an empty base is `//evil.com` — an authority, not a path.
+    expect(await fetched('', '//evil.com/x')).toBe('/evil.com/x')
+    expect(await fetched('https://api.example.com/', '/me')).toBe('https://api.example.com/me')
+  })
+
+  it('anchors the canonicalisation at the START of the string', () => {
+    // Unanchored, the C0 strip would also eat spaces between path segments; un-quantified it would
+    // remove only one of a run and leave the rest to shift the scheme.
+    const SP = String.fromCharCode(32), NUL = String.fromCharCode(1)
+    expect(isSameOrigin(base, `${NUL}${SP}${NUL}https://evil.com/x`)).toBe(false)
+    expect(isSameOrigin(base, `/a${SP}b`)).toBe(true) // an inner space is part of the path, not stripped
+  })
+
+  it('refuses a protocol-relative URL by its START, not its end', () => {
+    // `endsWith('//')` is the mutation this kills, and it reads every `//evil.com` as relative.
+    expect(carriesOrigin('//evil.com/x')).toBe(true)
+    expect(isSameOrigin(base, '//evil.com/x')).toBe(false)
+    // A path ENDING in `//` is not an authority and must stay relative.
+    expect(carriesOrigin('/orders//')).toBe(false)
+    expect(isSameOrigin(base, '/orders//')).toBe(true)
+  })
+
+  it('anchors the scheme test, so a colon later in the path is not a scheme', () => {
+    expect(carriesOrigin('orders/a:b')).toBe(false)
+    expect(carriesOrigin('a:b')).toBe(true)
+  })
+
+  it('requires BOTH sides to be http(s) — either one alone is not enough', () => {
+    // `||` → `&&` lets a non-http candidate through whenever the base is absolute.
+    expect(isSameOrigin(base, 'ftp://api.example.com/x')).toBe(false)
+    expect(isSameOrigin('/relative-base', 'https://api.example.com/x')).toBe(false)
+    // And https must not be read as the only acceptable scheme.
+    expect(isSameOrigin('http://api.example.com', 'http://api.example.com/x')).toBe(true)
+  })
+})
+
+describe('request() headers and credentials, mutation-pinned', () => {
+  const ok = () => json({ ok: true })
+
+  it('sets Accept exactly, and Content-Type only for a body that has none', async () => {
+    const fetch = vi.fn(async () => ok())
+    const client = createLukkClient({ baseURL: 'https://x/auth', fetch })
+
+    await client.request('/me') // no body
+    let headers = new Headers((fetch.mock.calls[0]![1] as RequestInit).headers)
+    expect(headers.get('accept')).toBe('application/json')
+    // Setting it unconditionally would declare a body on a GET that has none.
+    expect(headers.has('content-type')).toBe(false)
+
+    // A caller's own Content-Type is left alone — the guard is `!headers.has(...)`.
+    await client.request('/upload', { body: 'raw', headers: { 'Content-Type': 'text/csv' } })
+    headers = new Headers((fetch.mock.calls[1]![1] as RequestInit).headers)
+    expect(headers.get('content-type')).toBe('text/csv')
+  })
+
+  it('omits Authorization and the confirmation header when the hooks return nothing', async () => {
+    // Attaching unconditionally sends the literal `Bearer undefined`, which a server logs as a
+    // credential and which is indistinguishable from a real attempt in a rate-limit bucket.
+    const fetch = vi.fn(async () => ok())
+    const client = createLukkClient({
+      baseURL: 'https://x/auth',
+      fetch,
+      getAccessToken: () => null,
+      getConfirmationToken: () => null,
+    })
+
+    await client.request('/me')
+
+    const headers = new Headers((fetch.mock.calls[0]![1] as RequestInit).headers)
+    expect(headers.has('authorization')).toBe(false)
+    expect(headers.has('x-lukk-confirmation')).toBe(false)
+  })
+
+  it('names the credentials mode exactly, both ways', async () => {
+    // An empty string is not a valid RequestCredentials value; the platform falls back to `same-origin`
+    // for a same-origin target (invisible) and drops cookies for the cross-origin one (also invisible
+    // in a mock). Assert the literal.
+    const fetch = vi.fn(async () => ok())
+    const client = createLukkClient({ baseURL: 'https://x/auth', fetch })
+
+    await client.request('/me')
+    expect((fetch.mock.calls[0]![1] as RequestInit).credentials).toBe('include')
+
+    await client.request('https://evil.example/steal')
+    expect((fetch.mock.calls[1]![1] as RequestInit).credentials).toBe('same-origin')
+  })
+
+  it('refreshes only on a 401, and retries exactly once', async () => {
+    // `allowRetry` is what stops a server answering 401 forever from looping: the retry passes
+    // `false`, so the second 401 surfaces instead of refreshing again.
+    const refresh = vi.fn(async () => ({ access_token: 'new', expires_in: 900, refresh_token: 'r2' }))
+    const fetch = vi.fn(async () => json({ message: 'nope' }, 401))
+    const client = createLukkClient({ baseURL: 'https://x/auth', fetch, refresh })
+
+    await expect(client.request('/me')).rejects.toMatchObject({ status: 401 })
+
+    expect(refresh).toHaveBeenCalledOnce()
+    expect(fetch).toHaveBeenCalledTimes(2) // original + one retry, never a third
+
+    // A 200 refreshes nothing at all.
+    refresh.mockClear()
+    const fine = vi.fn(async () => ok())
+    await createLukkClient({ baseURL: 'https://x/auth', fetch: fine, refresh }).request('/me')
+    expect(refresh).not.toHaveBeenCalled()
+  })
+
+  it('retries with the refreshed token and returns the retry\'s body', async () => {
+    // Pins that the refresh actually produced a usable pair and the retry happened — a `refresh` that
+    // silently returned nothing would fall through to `onUnauthenticated` instead.
+    const refresh = vi.fn(async () => ({ access_token: 'new', expires_in: 900, refresh_token: 'r2' }))
+    const onTokens = vi.fn()
+    let calls = 0
+    const fetch = vi.fn(async () => (++calls === 1 ? json({ message: 'stale' }, 401) : json({ me: 'ada' })))
+    const client = createLukkClient({ baseURL: 'https://x/auth', fetch, refresh, onTokens })
+
+    expect(await client.request('/me')).toEqual({ me: 'ada' })
+    expect(onTokens).toHaveBeenCalledWith(expect.objectContaining({ access_token: 'new' }))
+  })
+
+  it('does not require an onUnauthenticated hook to exist', async () => {
+    // The `?.()` is load-bearing: a binding that supplies no hook would otherwise throw a TypeError
+    // out of `request`, replacing a clean 401 with a crash.
+    const fetch = vi.fn(async () => json({ message: 'nope' }, 401))
+    const client = createLukkClient({ baseURL: 'https://x/auth', fetch, refresh: async () => null })
+
+    await expect(client.request('/me')).rejects.toMatchObject({ status: 401 })
+  })
+})
+
+describe('the remaining client.ts guards, mutation-pinned', () => {
+  const ok = () => json({ ok: true })
+  const base = 'https://api.example.com/auth'
+
+  it('refuses a blob: URL that names the API\'s own origin', () => {
+    // `new URL('blob:https://api.example.com/uuid').origin` IS `https://api.example.com` — so without
+    // the explicit http(s) test, an origin comparison alone blesses it and attaches the bearer. The
+    // scheme check is what makes `blob:`, `javascript:` and `data:` unreachable, whatever the base.
+    expect(isSameOrigin(base, 'blob:https://api.example.com/uuid')).toBe(false)
+    expect(isSameOrigin(base, 'javascript:alert(1)')).toBe(false)
+  })
+
+  it('anchors the C0 strip at the start, so an inner space stays part of the path', () => {
+    // Unanchored, `replace` eats the FIRST run anywhere: `x https://evil.com` becomes
+    // `xhttps://evil.com`, which then reads as a scheme and is refused — a relative path
+    // misclassified. The parser only strips leading/trailing C0-or-space.
+    expect(isSameOrigin(base, 'x https://evil.com')).toBe(true)
+  })
+
+  it('releases the single-flight slot, so a later refresh is a new call', async () => {
+    // The `.finally` that clears `inflight` is what makes it single-FLIGHT rather than single-SHOT:
+    // without it the first promise is memoised forever and every later refresh returns a token that
+    // has already been rotated away.
+    const refresh = vi.fn(async () => ({ access_token: 'a', expires_in: 900, refresh_token: 'r' }))
+    let calls = 0
+    const fetch = vi.fn(async () => (++calls % 2 === 1 ? json({ message: 'stale' }, 401) : ok()))
+    const client = createLukkClient({ baseURL: base, fetch, refresh })
+
+    await client.request('/one')
+    await client.request('/two')
+
+    expect(refresh).toHaveBeenCalledTimes(2)
+  })
+
+  it('treats a non-object refresh result as "not refreshable" instead of throwing', async () => {
+    // `isTokenPair` guards the `in` operator: `'access_token' in 'a-string'` is a TypeError, so a
+    // hook returning a bare string would crash `request` rather than degrading to unauthenticated.
+    const onUnauthenticated = vi.fn()
+    const fetch = vi.fn(async () => json({ message: 'nope' }, 401))
+    const client = createLukkClient({
+      baseURL: base,
+      fetch,
+      refresh: (async () => 'not-a-pair') as never,
+      onUnauthenticated,
+    })
+
+    await expect(client.request('/me')).rejects.toMatchObject({ status: 401 })
+    expect(onUnauthenticated).toHaveBeenCalledOnce()
+  })
+
+  it('never lets a 401 from /refresh itself start another refresh', async () => {
+    // `restore()` and `refreshTokens()` pass `allowRetry: false`, because the thing that would be
+    // retried IS the refresh: allowing it turns one dead session into an endless pair of calls.
+    const refresh = vi.fn(async () => ({ access_token: 'a', expires_in: 900, refresh_token: 'r' }))
+    const fetch = vi.fn(async () => json({ message: 'nope' }, 401))
+    const client = createLukkClient({ baseURL: base, fetch, refresh })
+
+    // `restore()` swallows the failure by design — "no session" is its documented answer.
+    expect(await client.restore()).toBeNull()
+    await expect(client.refreshTokens('rt')).rejects.toMatchObject({ status: 401 })
+
+    expect(refresh).not.toHaveBeenCalled()
+    expect(fetch).toHaveBeenCalledTimes(2) // one each, no retry
+  })
+
+  it('posts each credential-bearing body under the right path', async () => {
+    // The bodies themselves: replacing any of these with `{}` sends a well-formed request that simply
+    // omits the credential, which every status-only assertion still accepts.
+    const fetch = vi.fn(async () => ok())
+    const client = createLukkClient({ baseURL: base, fetch })
+    const sent = (i: number) => ({
+      url: String(fetch.mock.calls[i]![0]),
+      body: JSON.parse((fetch.mock.calls[i]![1] as RequestInit).body as string),
+    })
+
+    await client.confirmPassword('hunter2')
+    await client.confirmPasskey('cid', { id: 'c1' })
+    await client.confirmTwoFactor('123456')
+    await client.registerPasskey({ id: 'c2' }, 'My Key')
+    await client.loginWithPasskey('cid2', { id: 'c3' })
+    await client.refreshTokens('rt-1')
+
+    expect(sent(0)).toEqual({ url: `${base}/confirm-password`, body: { password: 'hunter2' } })
+    expect(sent(1)).toEqual({ url: `${base}/confirm-passkey`, body: { ceremony_id: 'cid', credential: { id: 'c1' } } })
+    expect(sent(2)).toEqual({ url: `${base}/two-factor/confirm`, body: { code: '123456' } })
+    expect(sent(3)).toEqual({ url: `${base}/passkeys`, body: { credential: { id: 'c2' }, name: 'My Key' } })
+    expect(sent(4)).toEqual({ url: `${base}/passkeys/login`, body: { ceremony_id: 'cid2', credential: { id: 'c3' } } })
+    expect(sent(5)).toEqual({ url: `${base}/refresh`, body: { refresh_token: 'rt-1' } })
+  })
+
+  it('logs out at /logout, retrying by default and not when told otherwise', async () => {
+    const refresh = vi.fn(async () => ({ access_token: 'a', expires_in: 900, refresh_token: 'r' }))
+    const fetch = vi.fn(async () => json({ message: 'nope' }, 401))
+    const client = createLukkClient({ baseURL: base, fetch, refresh })
+
+    await expect(client.logout()).rejects.toMatchObject({ status: 401 })
+    expect(String(fetch.mock.calls[0]![0])).toBe(`${base}/logout`)
+    expect(refresh).toHaveBeenCalledOnce() // the default retries
+
+    refresh.mockClear()
+    fetch.mockClear()
+    await expect(client.logout({ retry: false })).rejects.toMatchObject({ status: 401 })
+    expect(refresh).not.toHaveBeenCalled()
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+})
+
+describe('the last client.ts guards', () => {
+  const base = 'https://api.example.com/auth'
+
+  it('accepts only a plain object as a token pair, not any value carrying access_token', async () => {
+    // `refresh` is a consumer hook: it can return anything. The object test is what stops a non-object
+    // that happens to expose `access_token` — a function with a property, a class instance built from
+    // an attacker-shaped body — reaching `onTokens` and being persisted as a session.
+    const carrier = Object.assign(() => {}, { access_token: 'tok', expires_in: 900, refresh_token: 'r' })
+    const onTokens = vi.fn()
+    const onUnauthenticated = vi.fn()
+    const fetch = vi.fn(async () => json({ message: 'nope' }, 401))
+    const client = createLukkClient({
+      baseURL: base,
+      fetch,
+      refresh: (async () => carrier) as never,
+      onTokens,
+      onUnauthenticated,
+    })
+
+    await expect(client.request('/me')).rejects.toMatchObject({ status: 401 })
+    expect(onTokens).not.toHaveBeenCalled()
+    expect(onUnauthenticated).toHaveBeenCalledOnce()
+  })
+
+  it('restores from /refresh, not from wherever an empty path lands', async () => {
+    const fetch = vi.fn(async () => json({ access_token: 'a', expires_in: 900, refresh_token: 'r' }))
+    const client = createLukkClient({ baseURL: base, fetch })
+
+    await client.restore()
+
+    expect(String(fetch.mock.calls[0]![0])).toBe(`${base}/refresh`)
+  })
+
+  it('re-sends the logout without keepalive when the browser refuses it, keeping path and retry', async () => {
+    // A browser that refuses a keepalive request needing a CORS preflight rejects with a TypeError.
+    // The fallback is the only thing standing between that and a logout that never reaches lukk —
+    // and it has to go to the same path, with the same retry decision, or it is not the same logout.
+    const refresh = vi.fn(async () => ({ access_token: 'a', expires_in: 900, refresh_token: 'r' }))
+    let call = 0
+    const fetch = vi.fn(async () => {
+      if (++call === 1) throw new TypeError('keepalive refused')
+      return json({ message: 'nope' }, 401)
+    })
+    const client = createLukkClient({ baseURL: base, fetch, refresh })
+
+    await expect(client.logout()).rejects.toMatchObject({ status: 401 })
+
+    expect(String(fetch.mock.calls[1]![0])).toBe(`${base}/logout`)
+    expect((fetch.mock.calls[1]![1] as RequestInit & { keepalive?: boolean }).keepalive).toBeUndefined()
+    expect(refresh).toHaveBeenCalledOnce() // the fallback still retries by default
+
+    // And `retry: false` is honoured on the fallback too.
+    refresh.mockClear()
+    call = 0
+    await expect(client.logout({ retry: false })).rejects.toMatchObject({ status: 401 })
+    expect(refresh).not.toHaveBeenCalled()
   })
 })

@@ -1,15 +1,21 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ACCESS_KEY } from '../src/runtime/keys'
-import { __test, useState } from './mocks/imports'
+import { ACCESS_KEY, READY_KEY, USER_KEY } from '../src/runtime/keys'
+import { __test, ssrPayload, useState } from './mocks/imports'
 
 const fetchUser = vi.fn()
 const loggedIn = { value: false }
 const resolveHydrationAccess = vi.fn()
+const withholdIfReplaced = vi.fn()
+const hydratedSessionEnded = vi.fn(async () => false)
 const setResponseHeader = vi.fn()
 
 vi.mock('h3', () => ({ setResponseHeader: (...a: unknown[]) => setResponseHeader(...a) }))
 vi.mock('../src/runtime/composables/useLukkAuth', () => ({ useLukkAuth: () => ({ fetchUser, loggedIn }) }))
-vi.mock('../src/runtime/server/hydrate', () => ({ resolveHydrationAccess: (...a: unknown[]) => resolveHydrationAccess(...a) }))
+vi.mock('../src/runtime/server/hydrate', () => ({
+  resolveHydrationAccess: (...a: unknown[]) => resolveHydrationAccess(...a),
+  withholdIfReplaced: (...a: unknown[]) => withholdIfReplaced(...a),
+  hydratedSessionEnded: (...a: unknown[]) => hydratedSessionEnded(...a),
+}))
 
 // eslint-disable-next-line import/first
 import serverPlugin from '../src/runtime/plugins/session.server'
@@ -26,15 +32,64 @@ function token(exp: number | null): string {
 const fresh = () => token(Math.floor(Date.now() / 1000) + 3600)
 
 function app(o: { serverRendered?: boolean, prerenderedAt?: unknown, ssrContext?: unknown } = {}) {
+  const hooks: Record<string, (() => unknown)[]> = {}
   return {
     payload: { serverRendered: o.serverRendered ?? true, prerenderedAt: o.prerenderedAt },
     ssrContext: 'ssrContext' in o ? o.ssrContext : { event: {} },
+    hooks: { hook: (name: string, fn: () => unknown) => { (hooks[name] ??= []).push(fn) } },
+    call: (name: string) => hooks[name]?.forEach(fn => fn()),
   }
 }
 
 afterEach(() => { __test.reset(); loggedIn.value = false; vi.clearAllMocks() })
 
 describe('session.server (BFF SSR hydration)', () => {
+  it('runs after the client plugin, under its own name', () => {
+    // It hydrates through the client plugin's `$lukk` and the shared state that plugin sets up.
+    expect((serverPlugin as unknown as { meta: unknown }).meta).toEqual({ name: 'lukk:session-hydrate', dependsOn: ['lukk:client'] })
+  })
+
+  it('checks the re-sealed session once more after the render, right before the response goes out', async () => {
+    // The render takes a while and the cookie leaves with the page: a sign-in or logout during it would
+    // otherwise have the old session written back over the new one.
+    resolveHydrationAccess.mockResolvedValue(fresh())
+    const nuxtApp = app()
+
+    await run(nuxtApp)
+    expect(withholdIfReplaced).not.toHaveBeenCalled()
+
+    nuxtApp.call('app:rendered')
+    expect(withholdIfReplaced).toHaveBeenCalledWith(nuxtApp.ssrContext.event)
+  })
+
+  it('checks it on a render error too — the error page still carries the queued cookie', async () => {
+    resolveHydrationAccess.mockResolvedValue(fresh())
+    const nuxtApp = app()
+
+    await run(nuxtApp)
+    nuxtApp.call('app:error')
+
+    expect(withholdIfReplaced).toHaveBeenCalledWith(nuxtApp.ssrContext.event)
+  })
+
+  it('renders signed out and unresolved when the session ended while the user loaded', async () => {
+    // Otherwise the page shows the account that just left, marked resolved, so the client never restores.
+    resolveHydrationAccess.mockResolvedValue(fresh())
+    fetchUser.mockImplementation(async () => {
+      loggedIn.value = true
+      useState(USER_KEY, () => null).value = { id: 'A' }
+    })
+    hydratedSessionEnded.mockResolvedValueOnce(true)
+    const nuxtApp = app()
+
+    await run(nuxtApp)
+
+    expect(useState(USER_KEY, () => null).value).toBeNull()
+    expect(useState(READY_KEY, () => false).value).toBe(false)
+    // Withheld right away, before any render hook — a streamed render sends headers before those run.
+    expect(withholdIfReplaced).toHaveBeenCalledWith(nuxtApp.ssrContext.event)
+  })
+
   it('seeds the user and marks the render no-store when a usable access token is resolved', async () => {
     resolveHydrationAccess.mockResolvedValue(fresh())
     fetchUser.mockImplementation(async () => { loggedIn.value = true })
@@ -43,9 +98,12 @@ describe('session.server (BFF SSR hydration)', () => {
 
     expect(fetchUser).toHaveBeenCalledOnce()
     expect(setResponseHeader).toHaveBeenCalledWith(expect.anything(), 'cache-control', 'no-store')
-    // Invariant: the plugin seeds identity via `fetchUser` only — the access token is never
-    // written into the SSR-serialized state.
+    // Invariant: the plugin seeds identity via `fetchUser` only — the access token is never written into
+    // the SSR-serialized state. Swept, not spot-checked: naming one key passes for a token written under
+    // any OTHER key, and `useState('lukk:ssrToken').value = access` was green before this.
     expect(useState(ACCESS_KEY, () => null).value).toBeNull()
+    const serialized = JSON.stringify(ssrPayload())
+    expect(serialized).not.toContain(fresh().split('.')[1])
   })
 
   it('marks the render no-store even when the user endpoint yields no user (a rotated cookie may be queued)', async () => {
@@ -103,4 +161,66 @@ describe('accessExpired', () => {
   it('is true within the 10s skew window', () =>
     expect(accessExpired(token(Math.floor(Date.now() / 1000) + 5))).toBe(true))
   it('is false for a comfortably-valid token', () => expect(accessExpired(fresh())).toBe(false))
+  it('reads a payload whose base64url carries both `-` and `_`', () => {
+    // Real payloads do (`iss` URLs, `?`/`>` in claims). Mangling either character corrupts the JSON,
+    // which reads as expired: a live session refreshed on every request, burning its rotation.
+    const payload = Buffer.from(JSON.stringify({ exp: 4102444800, pad: 'xxx?>~???' })).toString('base64url')
+    expect(payload).toMatch(/-.*_/)
+    expect(accessExpired(`h.${payload}.s`)).toBe(false)
+  })
+  it.each([['no signature', 'h.P'], ['an extra segment', 'h.P.s.x']])('is true for a token with %s, even a live one', (_, shape) =>
+    expect(accessExpired(shape.replace('P', fresh().split('.')[1]!))).toBe(true))
+  it('counts the exact edge of the 10s skew window as expired', () => {
+    vi.useFakeTimers({ now: 1_700_000_000_000 })
+    try {
+      expect(accessExpired(token(1_700_000_010))).toBe(true)
+      expect(accessExpired(token(1_700_000_011))).toBe(false)
+    }
+    finally { vi.useRealTimers() }
+  })
+})
+
+describe('session.server — readiness', () => {
+  const ready = () => useState<boolean>(READY_KEY, () => false)
+
+  it('marks the session resolved when it hydrated a user, so the client path stays synchronous', async () => {
+    resolveHydrationAccess.mockResolvedValue(fresh())
+    fetchUser.mockImplementation(async () => { loggedIn.value = true })
+
+    await run(app())
+
+    expect(ready().value).toBe(true)
+  })
+
+  it('does NOT mark an anonymous render resolved', async () => {
+    // That render carries no `no-store`, so a shared cache may serve it to a signed-in visitor whose
+    // cookie the edge ignored. A baked-in `ready: true` would stop that visitor's client restoring.
+    resolveHydrationAccess.mockResolvedValue(null)
+
+    await run(app())
+
+    expect(ready().value).toBe(false)
+  })
+
+  it('does NOT mark it resolved when the user endpoint yields no user', async () => {
+    // A transient failure on the server is not an answer — the client restore decides.
+    resolveHydrationAccess.mockResolvedValue(fresh())
+    fetchUser.mockResolvedValue(undefined)
+
+    await run(app())
+
+    expect(ready().value).toBe(false)
+  })
+
+  it('does NOT mark a prerendered page resolved, even when a session would have hydrated', async () => {
+    // Set the mocks explicitly: `clearAllMocks` keeps implementations, so relying on what earlier tests
+    // left behind made this pass in file order and fail to catch a dropped prerender guard when run alone.
+    resolveHydrationAccess.mockResolvedValue(fresh())
+    fetchUser.mockImplementation(async () => { loggedIn.value = true })
+
+    await run(app({ prerenderedAt: 1 }))
+
+    expect(fetchUser).not.toHaveBeenCalled()
+    expect(ready().value).toBe(false)
+  })
 })

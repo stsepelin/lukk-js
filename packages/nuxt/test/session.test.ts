@@ -35,6 +35,19 @@ describe('getLukkAccessToken / useLukkSession', () => {
     expect(await getLukkAccessToken({ cookies: { '__Host-lukk-session': JSON.stringify({ access: 'other' }) } })).toBeNull()
   })
 
+  it('returns null while the browser\'s logout note is on the request — for the app\'s own middleware too, which runs first', async () => {
+    const e = event(JSON.stringify({ access: 'tok' }))
+    ;(e.cookies as Record<string, string>)['__Host-lukk-logout'] = '1'
+    expect(await getLukkAccessToken(e)).toBeNull()
+    __test.runtimeConfig.lukk = { sessionPassword: 'p'.repeat(32), cookieSecure: false, cookieNamespace: 'admin' } as unknown as Record<string, unknown>
+    expect(await getLukkAccessToken({ cookies: { 'lukk-admin-session': JSON.stringify({ access: 'devtok' }), '__Host-lukk-logout': '1' } })).toBe('devtok') // another app's note
+    expect(await getLukkAccessToken({ cookies: { 'lukk-admin-session': JSON.stringify({ access: 'devtok' }), 'lukk-admin-logout': '1' } })).toBeNull()
+    // The server's answer to that note counts too: logged out already, until the page clears it.
+    expect(await getLukkAccessToken({ cookies: { 'lukk-admin-session': JSON.stringify({ access: 'tok' }), 'lukk-admin-signed-out': '1' } })).toBeNull()
+    // Another app's, though, says nothing about this one.
+    expect(await getLukkAccessToken({ cookies: { 'lukk-admin-session': JSON.stringify({ access: 'tok' }), '__Host-lukk-signed-out': '1' } })).toBe('tok')
+  })
+
   it('returns null when there is no session cookie (unauthenticated)', async () => {
     expect(await getLukkAccessToken(event())).toBeNull()
   })

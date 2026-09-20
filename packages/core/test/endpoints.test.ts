@@ -12,6 +12,7 @@ function json(body: unknown, status = 200): Response {
 describe('endpoint methods → route + verb', () => {
   const cases: Array<[string, (c: LukkClient) => Promise<unknown>, string, string | undefined]> = [
     ['logout', c => c.logout(), 'https://x/auth/logout', 'POST'],
+    ['claimSession', c => c.claimSession(), 'https://x/auth/session/claim', 'POST'],
     ['revokeAllSessions', c => c.revokeAllSessions(), 'https://x/auth/sessions', 'DELETE'],
     ['revokeOtherSessions', c => c.revokeOtherSessions(), 'https://x/auth/sessions/others', 'DELETE'],
     ['deleteAccount', c => c.deleteAccount(), 'https://x/auth/account', 'DELETE'],
@@ -40,6 +41,34 @@ describe('endpoint methods → route + verb', () => {
     const [u, init] = fetch.mock.calls[0]!
     expect(u).toBe(url)
     expect((init as RequestInit | undefined)?.method).toBe(method)
+  })
+})
+
+describe('logout request shape', () => {
+  it('sends a JSON body, so a cookie-authenticated logout is a non-simple request', async () => {
+    // lukk only honours the refresh cookie on logout for a request a cross-site form couldn't have made.
+    const fetch = vi.fn(async () => new Response(null, { status: 204 }))
+    await createLukkClient({ baseURL: 'https://x/auth', fetch }).logout()
+    const init = fetch.mock.calls[0]![1] as RequestInit
+    expect(new Headers(init.headers).get('Content-Type')).toBe('application/json')
+    expect(init.body).toBe('{}')
+    // Survives a navigation that starts right after it.
+    expect(init.keepalive).toBe(true)
+  })
+
+  it('sends it again without keepalive where the browser refuses one needing a preflight', async () => {
+    const fetch = vi.fn()
+      .mockRejectedValueOnce(new TypeError('Preflight request for request with keepalive specified is currently not supported'))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+    await createLukkClient({ baseURL: 'https://x/auth', fetch }).logout()
+    expect(fetch).toHaveBeenCalledTimes(2)
+    expect((fetch.mock.calls[1]![1] as RequestInit).keepalive).toBeUndefined()
+  })
+
+  it('does not resend on an answer from lukk', async () => {
+    const fetch = vi.fn(async () => new Response(JSON.stringify({ message: 'Server Error' }), { status: 500 }))
+    await expect(createLukkClient({ baseURL: 'https://x/auth', fetch }).logout()).rejects.toMatchObject({ status: 500 })
+    expect(fetch).toHaveBeenCalledOnce()
   })
 })
 
