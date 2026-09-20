@@ -132,6 +132,23 @@ describe('acrossTabs', () => {
     expect(order).toEqual(['granted'])
   })
 
+  it('hands the lock back the moment its work is done, not when the next tab gives up waiting', async () => {
+    // Releasing the Web Lock is what lets the next tab in. Left held, that tab still proceeds — after
+    // waiting out TAB_LOCK_WAIT_MS — so every operation in every other tab pays three seconds and
+    // nothing fails. The cost only shows up as a slow app.
+    vi.useFakeTimers()
+    vi.stubGlobal('navigator', { locks: fakeLocks() })
+    const [one, two] = [tab(), tab()]
+
+    await acrossTabs(one, async () => {})
+    let ran = false
+    const next = acrossTabs(two, async () => { ran = true })
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(ran).toBe(true)
+    await next
+  })
+
   it('releases the lock when the operation throws', async () => {
     vi.stubGlobal('navigator', { locks: fakeLocks() })
     const [one, two] = [tab(), tab()]
