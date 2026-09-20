@@ -235,61 +235,8 @@ export function visitorIp(event: H3Event, clientIpHeader?: string): string {
   return normalizeIp(raw)
 }
 
-/**
- * Headers a browser can set that an upstream may read as coming from its edge proxy, blanked before
- * the app-API proxy forwards.
- *
- * Two families, both spoofable and both consequential:
- *
- * The upstream decides which of these to trust (Laravel's `TrustProxies` honours a configured mask
- * and CDNs read their own), so any one arriving from the BROWSER is an attempt to choose the
- * upstream's idea of `$request->ip()` — the value that becomes a rate-limit and lockout key. The
- * proxy asserts `x-forwarded-for` itself and blanks the rest.
- *
- * Blanked rather than deleted: `proxyRequest` merges over the inbound headers, and an empty string
- * replaces where an absent key would leave the client's value in place.
- */
-export const SPOOFABLE_FORWARDING: Record<string, string> = {
-  'x-forwarded-host': '',
-  'x-forwarded-proto': '',
-  'x-forwarded-port': '',
-  'x-forwarded-server': '',
-  // The path/scheme family. `x-forwarded-prefix` is the one with teeth: Symfony honours
-  // `HEADER_X_FORWARDED_PREFIX` from a trusted proxy and applies it to the base path every generated
-  // URL is built on, so a browser-set value rewrites the links the app emails and renders. The others
-  // are the same idea through different front ends, and `x-original-url`/`x-rewrite-url` are the
-  // IIS/ARR spelling that has repeatedly been used to reach paths a front-end ACL believed it blocked.
-  'x-forwarded-prefix': '',
-  'x-forwarded-scheme': '',
-  'x-forwarded-ssl': '',
-  'x-forwarded-uri': '',
-  'x-original-url': '',
-  'x-rewrite-url': '',
-  'x-forwarded': '',
-  'x-original-forwarded-for': '',
-  'x-http-forwarded-for': '',
-  'forwarded': '',
-  'x-real-ip': '',
-  'x-client-ip': '',
-  'x-remote-ip': '',
-  'x-remote-addr': '',
-  'x-originating-ip': '',
-  'client-ip': '',
-  'true-client-ip': '',
-  'cf-connecting-ip': '',
-  'cf-connecting-ipv6': '',
-  'cf-pseudo-ipv4': '',
-  'fastly-client-ip': '',
-  'x-cluster-client-ip': '',
-  'x-azure-clientip': '',
-  'x-azure-socketip': '',
-  'fly-client-ip': '',
-  'x-vercel-forwarded-for': '',
-  'x-vercel-proxied-for': '',
-  'x-appengine-user-ip': '',
-  'do-connecting-ip': '',
-  'oai-host': '',
-}
+// Lives in `shared` so the step-up header validation reads the same list (see `RESERVED_HEADERS`).
+export { SPOOFABLE_FORWARDING } from '../shared'
 
 /**
  * Hop-by-hop headers, which a proxy MUST NOT forward (RFC 9110 §7.6.1).

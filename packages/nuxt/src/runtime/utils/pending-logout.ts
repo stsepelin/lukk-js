@@ -37,28 +37,22 @@ export interface PendingLogout {
   fid?: string
 }
 
-function storage(): Storage | undefined {
-  try { return typeof sessionStorage === 'undefined' ? undefined : sessionStorage }
-  catch { return undefined }
-}
-
-function shared(): Storage | undefined {
-  try { return typeof localStorage === 'undefined' ? undefined : localStorage }
-  catch { return undefined }
-}
+// Storage is touched directly, inside each caller's `try`: on the server it is undeclared, and where the
+// browser blocks it, reading the global throws — both land in the same `catch` as a failed read or write.
 
 /** Note a logout asked for at `now`, for the session `fid` if known. */
 export function notePendingLogout(scope?: string, fid?: string, now = Date.now()): void {
-  try { storage()?.setItem(noteKey(scope), JSON.stringify(fid === undefined ? { at: now } : { at: now, fid })) }
+  // `JSON.stringify` drops an undefined `fid`, so a note for an unknown session carries only `at`.
+  try { sessionStorage.setItem(noteKey(scope), JSON.stringify({ at: now, fid })) }
   catch { /* no note */ }
 }
 
 /** Drop the note — or with `upTo`, only one written no later than that: a logout asked for after it stands. */
 export function clearPendingLogout(scope?: string, upTo?: number): void {
   try {
-    const store = storage()
-    if (upTo !== undefined && (readNote(store?.getItem(noteKey(scope)))?.at ?? 0) > upTo) return
-    store?.removeItem(noteKey(scope))
+    // Without `upTo` every note goes: nothing is later than `Infinity`.
+    if ((readNote(sessionStorage.getItem(noteKey(scope)))?.at ?? 0) > (upTo ?? Infinity)) return
+    sessionStorage.removeItem(noteKey(scope))
   }
   catch { /* nothing to clear */ }
 }
@@ -69,7 +63,7 @@ export function noteSignIn(scope: string | undefined, sentAt: number): void {
   // note written between them, and the next page load would honour that note and end the newer session.
   // Never forwards past now either — see `signedInSince`.
   const now = Date.now()
-  try { shared()?.setItem(signedInKey(scope), String(Math.min(Math.max(sentAt, lastSignIn(scope)), now))) }
+  try { localStorage.setItem(signedInKey(scope), String(Math.min(Math.max(sentAt, lastSignIn(scope)), now))) }
   catch { /* no record */ }
 }
 
@@ -79,7 +73,7 @@ export function noteSignIn(scope: string | undefined, sentAt: number): void {
  */
 export function readPendingLogout(scope?: string, now = Date.now()): PendingLogout | undefined {
   try {
-    const note = readNote(storage()?.getItem(noteKey(scope)))
+    const note = readNote(sessionStorage.getItem(noteKey(scope)))
     // Bounded from BOTH ends. A note dated in the future — the clock moved back between writing and
     // reading it — has a negative age, so an upper bound alone honoured it forever, while `signedInSince`
     // disbelieved the equally-future sign-in record and nothing could stand it down.
@@ -87,6 +81,7 @@ export function readPendingLogout(scope?: string, now = Date.now()): PendingLogo
     if (!note || age < 0 || age >= PENDING_LOGOUT_TTL_MS) return undefined
     return note.fid !== undefined || !signedInSince(scope, note.at) ? note : undefined
   }
+  // Stryker disable next-line BlockStatement: equivalent — an emptied catch falls off the end, which returns undefined too.
   catch { return undefined }
 }
 
@@ -107,14 +102,16 @@ export function signedInSince(scope: string | undefined, at: number, now = Date.
 function readNote(raw: string | null | undefined): PendingLogout | undefined {
   try {
     const note = JSON.parse(raw ?? '') as Partial<PendingLogout> | null
+    // Stryker disable next-line OptionalChaining: equivalent — for a stored `null`, `note.at` throws inside this try and reads as no note all the same.
     if (typeof note?.at !== 'number' || !(note.at > 0)) return undefined
     return typeof note.fid === 'string' ? { at: note.at, fid: note.fid } : { at: note.at }
   }
+  // Stryker disable next-line BlockStatement: equivalent — an emptied catch falls off the end, which returns undefined too.
   catch { return undefined }
 }
 
 // A record that can't be read says nothing about a later sign-in, so the note stands.
 function lastSignIn(scope: string | undefined): number {
-  try { return Number(shared()?.getItem(signedInKey(scope))) || 0 }
+  try { return Number(localStorage.getItem(signedInKey(scope))) || 0 }
   catch { return 0 }
 }

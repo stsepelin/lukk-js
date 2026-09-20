@@ -38,6 +38,7 @@ function isLoopback(url: string): boolean {
     return hostname === 'localhost' || hostname.endsWith('.localhost')
       || /^127\./.test(hostname) || hostname === '[::1]' || hostname === '0.0.0.0'
   }
+  // Stryker disable next-line BlockStatement: equivalent — an emptied catch returns undefined, and the one caller tests truthiness.
   catch {
     return false
   }
@@ -49,6 +50,7 @@ function carriesQueryOrFragment(url: string): boolean {
     const { search, hash } = new URL(url)
     return !!search || !!hash
   }
+  // Stryker disable next-line BlockStatement: equivalent — an emptied catch returns undefined, and the one caller tests truthiness.
   catch {
     return false
   }
@@ -324,7 +326,7 @@ export default defineNuxtModule<ModuleOptions>({
     // every proxied request; a name the proxies set themselves silently breaks step-up (or, in the
     // auth proxy, clobbers Accept/Content-Type). Both fail loudly here rather than at request time.
     if (!isUsableConfirmationHeader(options.confirmationHeader)) {
-      fail(`[lukk-nuxt] confirmationHeader "${options.confirmationHeader}" must be a valid HTTP header name that the proxies don't already set (not Authorization, Accept, Content-Type, Cookie, or a forwarding header). Use a token such as X-Lukk-Confirmation.`)
+      fail(`[lukk-nuxt] confirmationHeader "${options.confirmationHeader}" must be a valid HTTP header name that neither the proxies nor the transport already own (not Authorization, Accept, Content-Type, Cookie, a forwarding header, a hop-by-hop or browser-forbidden header like Connection or Origin, or a Proxy-/Sec- name). Use a token such as X-Lukk-Confirmation.`)
     }
 
     // BFF mode seals tokens with this secret; fail loudly at build, not per-request.

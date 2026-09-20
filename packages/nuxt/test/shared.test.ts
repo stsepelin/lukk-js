@@ -89,8 +89,35 @@ describe('confirmationHeaderName', () => {
   })
 
   it('falls back for a header the proxies set themselves, in either collision direction', () => {
-    for (const reserved of ['Authorization', 'accept', 'Content-Type', 'cookie', 'x-forwarded-for', 'CF-Connecting-IP'])
+    for (const reserved of ['Authorization', 'accept', 'Content-Type', 'cookie', 'Host', 'x-forwarded-for', 'CF-Connecting-IP'])
       expect(confirmationHeaderName(reserved)).toBe('X-Lukk-Confirmation')
+  })
+
+  it('falls back for the sealed-session request header of any app, however its cookie is named', () => {
+    // h3 reads a session from `x-<cookie name>-session`, and the app-API proxy blanks it.
+    for (const reserved of ['x-lukk-session-session', 'X-__Host-lukk-session-session', 'x-lukk-admin-session-session', 'x-lukk-a.b-c-session-session', 'x-lukk-a~b-session-session'])
+      expect(confirmationHeaderName(reserved), reserved).toBe('X-Lukk-Confirmation')
+  })
+
+  it('does not reserve a name that merely resembles the sealed-session header', () => {
+    for (const usable of ['x-x-lukk-session-session', 'x-lukk-session-session-v2', 'x-__secure-lukk-session-session'])
+      expect(confirmationHeaderName(usable), usable).toBe(usable)
+  })
+
+  it('falls back for a name the transport refuses or drops — one would 502 every proxied request', () => {
+    // undici throws on these even with an empty value, and the app-API proxy always sets the header.
+    // A browser drops them instead (Fetch's forbidden request-header names), prefixes included.
+    const forbidden = [
+      'Accept-Charset', 'accept-encoding', 'access-control-request-headers', 'access-control-request-method',
+      'Connection', 'content-length', 'cookie2', 'date', 'dnt', 'Expect', 'keep-alive', 'origin', 'referer',
+      'set-cookie', 'te', 'trailer', 'transfer-encoding', 'upgrade', 'Proxy-Step-Up', 'sec-step-up',
+    ]
+    for (const name of forbidden) expect(confirmationHeaderName(name), name).toBe('X-Lukk-Confirmation')
+  })
+
+  it('still accepts names that only begin like a forbidden prefix', () => {
+    for (const usable of ['x-proxy-step-up', 'secure-step-up', 'proxystep'])
+      expect(confirmationHeaderName(usable), usable).toBe(usable)
   })
 })
 

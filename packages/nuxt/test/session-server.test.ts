@@ -44,6 +44,11 @@ function app(o: { serverRendered?: boolean, prerenderedAt?: unknown, ssrContext?
 afterEach(() => { __test.reset(); loggedIn.value = false; vi.clearAllMocks() })
 
 describe('session.server (BFF SSR hydration)', () => {
+  it('runs after the client plugin, under its own name', () => {
+    // It hydrates through the client plugin's `$lukk` and the shared state that plugin sets up.
+    expect((serverPlugin as unknown as { meta: unknown }).meta).toEqual({ name: 'lukk:session-hydrate', dependsOn: ['lukk:client'] })
+  })
+
   it('checks the re-sealed session once more after the render, right before the response goes out', async () => {
     // The render takes a while and the cookie leaves with the page: a sign-in or logout during it would
     // otherwise have the old session written back over the new one.
@@ -156,6 +161,23 @@ describe('accessExpired', () => {
   it('is true within the 10s skew window', () =>
     expect(accessExpired(token(Math.floor(Date.now() / 1000) + 5))).toBe(true))
   it('is false for a comfortably-valid token', () => expect(accessExpired(fresh())).toBe(false))
+  it('reads a payload whose base64url carries both `-` and `_`', () => {
+    // Real payloads do (`iss` URLs, `?`/`>` in claims). Mangling either character corrupts the JSON,
+    // which reads as expired: a live session refreshed on every request, burning its rotation.
+    const payload = Buffer.from(JSON.stringify({ exp: 4102444800, pad: 'xxx?>~???' })).toString('base64url')
+    expect(payload).toMatch(/-.*_/)
+    expect(accessExpired(`h.${payload}.s`)).toBe(false)
+  })
+  it.each([['no signature', 'h.P'], ['an extra segment', 'h.P.s.x']])('is true for a token with %s, even a live one', (_, shape) =>
+    expect(accessExpired(shape.replace('P', fresh().split('.')[1]!))).toBe(true))
+  it('counts the exact edge of the 10s skew window as expired', () => {
+    vi.useFakeTimers({ now: 1_700_000_000_000 })
+    try {
+      expect(accessExpired(token(1_700_000_010))).toBe(true)
+      expect(accessExpired(token(1_700_000_011))).toBe(false)
+    }
+    finally { vi.useRealTimers() }
+  })
 })
 
 describe('session.server — readiness', () => {

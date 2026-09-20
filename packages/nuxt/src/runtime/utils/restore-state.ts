@@ -253,7 +253,9 @@ function holdTabLock(locks: TabLocks, state: RestoreState): Promise<void> {
 export function beginSession(nuxtApp: object, sentAt: number): void {
   const state = restoreState(nuxtApp)
   state.epoch++
-  useState<boolean>(RESTORE_FAILED_KEY, () => false).value = false
+  // Stryker disable next-line ArrowFunction,BooleanLiteral: equivalent — the initial value is overwritten on the next line.
+  const restoreFailed = useState<boolean>(RESTORE_FAILED_KEY, () => false)
+  restoreFailed.value = false
   // A logout never finished is moot once a sign-in is sent after it — here, or in a tab that left and
   // returns. One asked for while this sign-in was already out still stands.
   clearPendingLogout(state.scope, sentAt)

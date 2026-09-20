@@ -28,6 +28,7 @@ describe('useLukkEmailVerification', () => {
     const sendEmailVerification = vi.fn(() => new Promise<void>((r) => { release = r }))
     __test.nuxtApp = { $lukk: { sendEmailVerification } }
     const ev = useLukkEmailVerification()
+    expect(ev.sending.value).toBe(false) // idle until asked — a bound button starts enabled
 
     const pending = ev.sendVerificationEmail()
     expect(ev.sending.value).toBe(true)

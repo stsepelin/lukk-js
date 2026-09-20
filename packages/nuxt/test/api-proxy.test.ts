@@ -6,12 +6,17 @@ import type { TokenSession } from '../src/runtime/server/utils/refresh'
 let upstreamSetCookie: string | string[] | undefined
 // The fetch Response h3 hands to onResponse; a test can make it a redirect to exercise the guard.
 let upstreamResponse: { status: number, type: string, headers: Headers }
-const proxyRequest = vi.fn(async (event: { node: { res: { getHeader: (k: string) => unknown, setHeader: (k: string, v: unknown) => void, removeHeader: unknown } } }, target: string, opts?: { headers?: Record<string, string>, onResponse?: (e: unknown, r: unknown) => void }) => {
+const proxyRequest = vi.fn(async (event: { node: { res: { statusCode: number, getHeader: (k: string) => unknown, setHeader: (k: string, v: unknown) => void, removeHeader: unknown } } }, target: string, opts?: { headers?: Record<string, string>, onResponse?: (e: unknown, r: unknown) => void }) => {
   // Simulate h3 appending the upstream Set-Cookie to whatever's already queued (the session).
   if (upstreamSetCookie !== undefined) {
     const arr = (v: unknown): unknown[] => (v === undefined ? [] : Array.isArray(v) ? v : [v])
     event.node.res.setHeader('set-cookie', [...arr(event.node.res.getHeader('set-cookie')), ...arr(upstreamSetCookie)])
   }
+  // `sendProxy` copies the upstream STATUS too — through `sanitizeStatusCode`, which turns a status
+  // of 0 (undici's opaque redirect) into the empty 200 the 3xx guard exists to catch — and it does so
+  // before `onResponse` runs. Without this the mock made every upstream status look like the
+  // handler's own, so "passes 500 through" and "rewrote 500 to 502" were indistinguishable.
+  event.node.res.statusCode = upstreamResponse.status >= 100 && upstreamResponse.status <= 999 ? upstreamResponse.status : 200
   // h3 calls onResponse after setting upstream headers, before streaming the body.
   if (opts?.onResponse) await opts.onResponse(event, upstreamResponse)
   return { target, headers: opts?.headers }
@@ -62,6 +67,8 @@ vi.mock('../src/runtime/server/revoke-dropped', () => ({ revokeDroppedSession: (
 import handler from '../src/runtime/server/api-proxy'
 // eslint-disable-next-line import/first
 import { endSession, forgetEndedSessions, markSessionEnded } from '../src/runtime/server/ended-sessions'
+// eslint-disable-next-line import/first
+import { confirmationHeaderName } from '../src/runtime/shared'
 
 /** A minimal JWT (header.payload.sig) carrying just the given claims — not signed. */
 function jwt(claims: Record<string, unknown>): string {
@@ -156,6 +163,55 @@ describe('app-API proxy', () => {
     expect(proxyRequest.mock.calls[0]![2]!.headers!['x-lukk-confirmation']).toBe('server-ct')
   })
 
+  it('delivers the server-held step-up token under any configured name, even one this proxy writes itself', async () => {
+    // A step-up header named after a header this proxy sets or blanks passed validation, and the proxy
+    // then overwrote the token on every request: step-up silently stopped working through it. Driven
+    // from what the proxy ACTUALLY sends, so a header it starts writing later is covered with no edit.
+    sessionData = { access: 'tok', confirmation: 'server-ct' }
+    await run(ev({ path: '/api/me' }))
+    const written = Object.keys(proxyRequest.mock.calls[0]![2]!.headers!).filter(name => name !== 'x-lukk-confirmation')
+    expect(written.length).toBeGreaterThan(20)
+
+    for (const name of written) {
+      proxyRequest.mockClear()
+      ;(__test.runtimeConfig as Record<string, unknown>).public = { lukk: { confirmationHeader: name } }
+      await run(ev({ path: '/api/me' }))
+      const sent = proxyRequest.mock.calls[0]![2]!.headers!
+      expect(sent[confirmationHeaderName(name).toLowerCase()], name).toBe('server-ct')
+    }
+  })
+
+  it('blanks the sealed-session REQUEST header, under the exact name h3 would read it from', async () => {
+    // h3 accepts a sealed session from `x-<cookie name>-session` unless told not to. Every
+    // `useSession` call here says `sessionHeader: false`, but the app API is a different server with
+    // its own h3 — so the name is blanked on the way out too. Blanked under exactly that name: one
+    // case or spelling off and the forged seal travels on untouched.
+    await run(ev({ path: '/api/me', headers: { 'x-__host-lukk-session-session': 'forged-seal' } }))
+    const headers = proxyRequest.mock.calls[0]![2]!.headers!
+    expect(headers['x-__host-lukk-session-session']).toBe('')
+  })
+
+  it('does not let a client use Connection to strip the headers this proxy sets', async () => {
+    // RFC 9110 §7.6.1 says a proxy removes the fields `Connection` names — so naming `authorization`
+    // there would strip the injected bearer, and naming the step-up header would strip the token that
+    // makes a confirm-gated route reachable. Both would present as a plain 401/403 from the app API,
+    // with nothing in the request to explain it. The proxy's own headers are exempt from that rule.
+    sessionData = { access: 'tok', confirmation: 'server-ct' }
+    const e = ev({ path: '/api/me', headers: {
+      'connection': 'authorization, Accept, x-forwarded-for, via, content-type, x-lukk-confirmation, te',
+      'content-type': 'multipart/form-data; boundary=xyz',
+    } })
+    await run(e)
+    const headers = proxyRequest.mock.calls[0]![2]!.headers!
+    expect(headers.authorization).toBe('Bearer tok')
+    expect(headers.accept).toBe('application/json')
+    expect(headers['x-forwarded-for']).toBe('203.0.113.7')
+    expect(headers.via).toBe('1.1 lukk-nuxt')
+    expect(headers['x-lukk-confirmation']).toBe('server-ct')
+    expect(headers).not.toHaveProperty('content-type') // still h3's to forward, not blanked to ''
+    expect(headers.te).toBe('') // a real hop-by-hop header is still blanked
+  })
+
   it('forwards the browser Accept when forceJson is disabled', async () => {
     __test.runtimeConfig.lukk = { ...__test.runtimeConfig.lukk, apiForceJson: false } as unknown as Record<string, unknown>
     await run(ev({ path: '/api/report.pdf', headers: { accept: 'application/pdf' } }))
@@ -182,6 +238,32 @@ describe('app-API proxy', () => {
     const e = ev({ path: '/api/users' })
     await run(e)
     expect(e.node.res.statusCode).toBe(502)
+  })
+
+  it('rewrites the whole 3xx range, at both edges, and never leaks the upstream Location', async () => {
+    // A `redirect: 'manual'` fetch answers with the 3xx itself on workerd/Deno, headers and all.
+    // Forwarding the Location downstream would hand the browser the redirect the proxy just refused
+    // to follow — the browser would then follow it, without the bearer but with the visitor.
+    for (const status of [300, 302, 399]) {
+      upstreamResponse = { status, type: 'default', headers: new Headers() }
+      const e = ev({ path: '/api/users' })
+      await run(e)
+      expect(e.node.res.statusCode).toBe(502)
+      expect(e.node.res.removeHeader).toHaveBeenCalledWith('location')
+    }
+  })
+
+  it('passes every other upstream status through untouched', async () => {
+    // The 502 exists for a redirect this proxy refuses to follow, and for nothing else. Widening it
+    // by a single status collapses the app API's own answers — a 400 validation error, a 404, a 500 —
+    // into one indistinguishable gateway error, and takes the response body with them.
+    for (const status of [200, 299, 400, 404, 500]) {
+      upstreamResponse = { status, type: 'default', headers: new Headers() }
+      const e = ev({ path: '/api/users' })
+      await run(e)
+      expect(e.node.res.statusCode).toBe(status)
+      expect(e.node.res.removeHeader).not.toHaveBeenCalledWith('location')
+    }
   })
 
   it('sends an empty Accept when forceJson is off and the browser sent none', async () => {
@@ -242,6 +324,19 @@ describe('app-API proxy', () => {
     expect(e.node.res.getHeader('set-cookie')).toEqual(['locale=en'])
   })
 
+  it('reads an upstream cookie NAME exactly — no truncation, no leading whitespace', async () => {
+    // Both halves guard the allow-list. A `Set-Cookie` with no `=` at all has no name, and must not
+    // be able to impersonate an allow-listed one by having the check read all-but-its-last-character
+    // (`locales` is not `locale`). And a value that arrives with the optional whitespace RFC 9110
+    // permits after the colon is still that cookie, so the name has to be read past it — otherwise
+    // one padding space is all it takes to slip a cookie by the `isSessionCookieName` guard too.
+    ;(__test.runtimeConfig.lukk as Record<string, unknown>).apiForwardSetCookie = ['locale']
+    upstreamSetCookie = ['locales', ' locale=en; Path=/']
+    const e = ev({ path: '/api/me' })
+    await run(e)
+    expect(e.node.res.getHeader('set-cookie')).toEqual([' locale=en; Path=/'])
+  })
+
   it('carries the rotated session cookie AND allow-listed upstream cookies together', async () => {
     sessionData = { access: expiredJwt(), refresh: 'r' }
     refreshOnce.mockResolvedValue({ pair: { access: 'new-tok', refresh: 'r2' }, retryable: false })
@@ -288,6 +383,16 @@ describe('app-API proxy', () => {
     e.node.req.socket.remoteAddress = ''
     await run(e)
     expect(proxyRequest).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ headers: expect.objectContaining({ 'x-forwarded-for': '' }) }))
+  })
+
+  it('sets an empty XFF when there is no socket at all, rather than throwing', async () => {
+    // Some presets give `node.req` no socket whatsoever. Reading through it unguarded throws inside
+    // the header bag — before `proxyRequest` is ever called — so an unset `clientIpHeader` would
+    // take down every app-API request on that preset, as a TypeError with no hint of the cause.
+    const e = ev({ path: '/api/x' })
+    ;(e.node.req as { socket?: unknown }).socket = undefined
+    await run(e)
+    expect(proxyRequest.mock.calls[0]![2]!.headers!['x-forwarded-for']).toBe('')
   })
 
   it('forwards without a bearer when there is no session cookie (and never opens a session)', async () => {
@@ -342,6 +447,26 @@ describe('app-API proxy', () => {
     // Upstream Set-Cookie stripped, but the rotated session cookie restored.
     expect(e.node.res.removeHeader).toHaveBeenCalledWith('set-cookie')
     expect(e.node.res.setHeader).toHaveBeenCalledWith('set-cookie', '__Host-lukk-session=rotated')
+    // Nothing replaced this session, so the pair it just minted is the one the browser is about to
+    // hold — revoking it here would sign the visitor out one request after renewing them.
+    expect(revokeDroppedSession).not.toHaveBeenCalled()
+  })
+
+  it('opens the read-write session under the hardened cookie options the re-seal writes back', async () => {
+    // The rotate re-seals, which means h3 writes the cookie again from exactly these options — drop
+    // one and the renewed session lands as a weaker cookie than the one it replaced. `sessionHeader:
+    // false` closes h3's other door: without it a sealed session is accepted from the
+    // `x-<name>-session` REQUEST header, an auth channel outside `__Host-`, Secure, HttpOnly and
+    // SameSite=Strict. And the name has to be this app's, or the rotate re-seals the wrong cookie.
+    sessionData = { access: expiredJwt(), refresh: 'r' }
+    refreshOnce.mockResolvedValue({ pair: { access: 'new-tok', refresh: 'r2' }, retryable: false })
+    await run(ev({ path: '/api/me' }))
+    expect(useSession).toHaveBeenCalledWith(expect.anything(), {
+      password: 'x'.repeat(32),
+      name: '__Host-lukk-session',
+      cookie: { sameSite: 'strict', secure: true, httpOnly: true, path: '/' },
+      sessionHeader: false,
+    })
   })
 
   describe('a session a sign-in replaced or a logout ended while this request was out', () => {
@@ -359,6 +484,8 @@ describe('app-API proxy', () => {
       expect(refreshOnce).not.toHaveBeenCalled()
       expect(proxyRequest).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ headers: expect.objectContaining({ authorization: `Bearer ${stale}` }) }))
       expect(e.node.res.setHeader).not.toHaveBeenCalledWith('set-cookie', expect.anything())
+      // No rotate ran, so there is no dropped pair — and the revoke call would be made with none.
+      expect(revokeDroppedSession).not.toHaveBeenCalled()
     })
 
     it('withholds the signed-out cookie a logout this request finished queued, when a sign-in replaced that session meanwhile', async () => {
@@ -427,6 +554,8 @@ describe('app-API proxy', () => {
     await run(e)
     expect(proxyRequest).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ headers: expect.objectContaining({ authorization: `Bearer ${stale}` }) }))
     expect(e.node.res.setHeader).not.toHaveBeenCalledWith('set-cookie', expect.anything())
+    // The refresh minted nothing, so there is nothing to hand back for revocation.
+    expect(revokeDroppedSession).not.toHaveBeenCalled()
   })
 
   it('treats a malformed or exp-less access token as expired and refreshes', async () => {
@@ -470,22 +599,54 @@ describe('app-API proxy', () => {
 
   it('rejects a cross-origin state-changing request (CSRF)', async () => {
     const e = ev({ path: '/api/orders', method: 'POST', headers: { origin: 'https://evil.com', host: 'app.test' } })
-    await run(e)
+    const body = await run(e)
     expect(e.status).toBe(403)
+    // The body says which rule refused, and says nothing else — a 403 with an empty body reads as a
+    // failed auth check and sends the caller looking at their session instead of their Origin.
+    expect(body).toEqual({ message: 'Cross-origin request rejected.' })
     expect(proxyRequest).not.toHaveBeenCalled()
+  })
+
+  it('serves the dev-http shape when the session cookie is not Secure', async () => {
+    // Two things hang off the one `secure` flag and must not diverge: the cookie name loses its
+    // `__Host-` prefix (the browser rejects that prefix without Secure), and the Origin check stops
+    // insisting on https — under `nuxi dev` over plain http there is no Secure cookie to downgrade,
+    // and getting it backwards 403s every non-GET in dev.
+    ;(__test.runtimeConfig.lukk as Record<string, unknown>).cookieSecure = false
+    const e = ev({ path: '/api/orders', method: 'POST', headers: { origin: 'http://app.test', host: 'app.test' } })
+    await run(e)
+    expect(e.status).toBe(200)
+    const headers = proxyRequest.mock.calls[0]![2]!.headers!
+    expect(headers['x-lukk-session-session']).toBe('')
+    expect(headers).not.toHaveProperty('x-__host-lukk-session-session')
   })
 
   it('refuses to proxy the lukk BFF routes', async () => {
     const e = ev({ path: '/api/_lukk/login', method: 'POST', headers: sameOrigin })
-    await run(e)
+    const body = await run(e)
     expect(e.status).toBe(404)
+    expect(body).toEqual({ message: 'Not found.' })
+    expect(proxyRequest).not.toHaveBeenCalled()
+  })
+
+  it('refuses the BFF mount itself, not only the routes under it', async () => {
+    // `/api/_lukk` has no trailing slash, so the `startsWith` half of the guard doesn't see it — and
+    // without the exact-match half it falls straight through to the mount check and gets proxied to
+    // the app API as `/_lukk`, handing the consumer's API the path lukk reserves for itself.
+    const e = ev({ path: '/api/_lukk' })
+    const body = await run(e)
+    expect(e.status).toBe(404)
+    expect(body).toEqual({ message: 'Not found.' })
     expect(proxyRequest).not.toHaveBeenCalled()
   })
 
   it('rejects a path outside the mount', async () => {
     const e = ev({ path: '/apixyz' })
-    await run(e)
+    const body = await run(e)
     expect(e.status).toBe(404)
+    // Deliberately the same opaque body as the BFF-route refusal: neither tells a prober which of
+    // the two rules it hit, or that the mount exists at all.
+    expect(body).toEqual({ message: 'Not found.' })
     expect(proxyRequest).not.toHaveBeenCalled()
   })
 
@@ -510,6 +671,9 @@ describe('app-API proxy', () => {
     expect(e.status).toBe(500) // a deployment fault, so it must page someone — not a 4xx
     expect(body.message).toContain('Proxy target could not be resolved')
     expect(String(error.mock.calls[0]![0])).toContain('undefined/api')
+    // And which setting to go and fix. This proxy and the auth proxy both resolve a base from config;
+    // an unlabelled message leaves an operator guessing between `api.target` and `baseURL`.
+    expect(String(error.mock.calls[0]![0])).toContain('lukk `api.target`')
     expect(proxyRequest).not.toHaveBeenCalled()
     error.mockRestore()
   })

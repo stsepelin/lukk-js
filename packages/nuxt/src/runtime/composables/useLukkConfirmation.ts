@@ -83,6 +83,7 @@ export function useLukkConfirmation(): LukkConfirmation {
   function record(result: { confirmation_token?: string }): void {
     // Client-only, both halves: a step-up is earned by a request the browser made, and a `true` serialised
     // into `__NUXT_DATA__` would claim one for whoever the render is later handed to.
+    // Stryker disable next-line ConditionalExpression: the mutation run compiles the client, where this is `true` already; the server half is pinned in test/server-env/confirmation.test.ts.
     if (import.meta.client) {
       if (result.confirmation_token) token.value = result.confirmation_token
       confirmedFlag.value = true
@@ -131,8 +132,13 @@ export function useLukkConfirmation(): LukkConfirmation {
     return new Promise((resolve, reject) => {
       const stop = watch([confirmedFlag, required], ([ok, req]) => {
         // `confirmed` wins over `required` going false, so a concurrent retry can't cancel this one.
-        if (ok) { stop(); resolve() }
-        else if (!req) { stop(); reject(unearnable ?? new Error('lukk: confirmation cancelled')) }
+        if (ok) {
+          stop()
+          resolve()
+          return
+        }
+        // Stryker disable next-line ConditionalExpression: equivalent — `confirmed` is cleared before this watcher starts and it stops the moment `confirmed` turns true, so while it is alive the only change it can see with `ok` false is `required` going false.
+        if (!req) { stop(); reject(unearnable ?? new Error('lukk: confirmation cancelled')) }
       })
     })
   }

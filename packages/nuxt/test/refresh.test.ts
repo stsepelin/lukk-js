@@ -129,3 +129,68 @@ describe('refreshOnce client identity', () => {
     expect((fetchSpy.mock.calls[0]![1]!.headers as Record<string, string>)['X-Forwarded-For']).toBeUndefined()
   })
 })
+
+describe('refreshOnce outcome', () => {
+  const answer = (status: number, body: unknown = {}) => new Response(JSON.stringify(body), { status })
+
+  it('POSTs the refresh token as JSON and asks for JSON back', async () => {
+    // lukk's route is POST-only, and its JSON errors depend on `Accept` — without it a validation
+    // failure renders as a redirect, which this client refuses to follow and would read as an outage.
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(answer(200, { access_token: 'a' }))
+
+    await refreshOnce({ id: `s-${Math.random()}`, data: { refresh: 'rt' } }, 'https://lukk/auth')
+
+    const init = fetchSpy.mock.calls[0]![1]!
+    expect(init.method).toBe('POST')
+    expect(init.headers).toMatchObject({ 'Content-Type': 'application/json', 'Accept': 'application/json' })
+    expect(JSON.parse(String(init.body))).toEqual({ refresh_token: 'rt' })
+  })
+
+  it('hands back the rotated pair as final — the token it sent is spent', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(answer(200, { access_token: 'a2', refresh_token: 'r2', expires_in: 900 }))
+
+    expect(await refreshOnce({ id: `s-${Math.random()}`, data: { refresh: 'rt' } }, 'https://lukk/auth'))
+      .toEqual({ pair: { access: 'a2', refresh: 'r2' }, expiresIn: 900, retryable: false })
+  })
+
+  it.each([401, 403])('ends the session on a %i — lukk rejected the token itself', async (status) => {
+    // Retrying a revoked or reused token is not harmless: every attempt past grace is another
+    // reuse signal, and the session never ends while the caller keeps it.
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(answer(status))
+
+    expect(await refreshOnce({ id: `s-${Math.random()}`, data: { refresh: 'rt' } }, 'https://lukk/auth'))
+      .toEqual({ pair: null, retryable: false })
+  })
+
+  it.each([429, 503])('keeps the session on a %i — the token was never consumed', async (status) => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(answer(status))
+
+    expect(await refreshOnce({ id: `s-${Math.random()}`, data: { refresh: 'rt' } }, 'https://lukk/auth'))
+      .toEqual({ pair: null, retryable: true })
+  })
+
+  it('keeps the session when the baseURL is unusable, and names the setting at fault', async () => {
+    // A deployment fault, not a dead session: the token was never sent.
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const base = `undefined/auth-${Math.random()}`
+
+    expect(await refreshOnce({ id: `s-${Math.random()}`, data: { refresh: 'rt' } }, base)).toEqual({ pair: null, retryable: true })
+    expect(String(error.mock.calls[0]![0])).toContain('lukk `baseURL`')
+  })
+
+  it('never collapses two sessions that have no identity', async () => {
+    // Without a key, joining an in-flight refresh would hand one visitor another visitor's tokens.
+    let first!: (r: Response) => void
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+      .mockImplementationOnce(() => new Promise((resolve) => { first = resolve }))
+      .mockResolvedValueOnce(answer(200, { access_token: 'B2' }))
+
+    const a = refreshOnce({ data: { refresh: 'rA' } }, 'https://lukk/auth')
+    const b = await refreshOnce({ data: { refresh: 'rB' } }, 'https://lukk/auth')
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
+    expect(b.pair?.access).toBe('B2')
+    first(answer(200, { access_token: 'A2' }))
+    expect((await a).pair?.access).toBe('A2')
+  })
+})

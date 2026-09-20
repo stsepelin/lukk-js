@@ -64,7 +64,7 @@ describe('overlapping calls', () => {
     const pw = useLukkChangePassword()
 
     const first = pw.changePassword(input)
-    await expect(pw.changePassword(input)).rejects.toMatchObject({ status: 409 })
+    await expect(pw.changePassword(input)).rejects.toMatchObject({ status: 409, message: 'A password change is already in progress.' })
 
     // The decisive assertion: the second call never reached the network.
     expect(changePassword).toHaveBeenCalledOnce()

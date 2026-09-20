@@ -62,7 +62,9 @@ export default defineEventHandler(async (event) => {
   const session = () => (rwSession ??= openSession(event, sessionPassword, sessionName, cookieOptions))
 
   // Resolve + contain the upstream URL to same-origin-under-base (defeats traversal / authority-smuggling).
-  const subpath = event.path.slice(LUKK_BFF_PREFIX.length).split('?')[0] || '/'
+  const path = event.path.slice(LUKK_BFF_PREFIX.length).split('?')[0]
+  // Stryker disable next-line StringLiteral: equivalent — `resolveTarget` resolves '' and '/' to the same URL, and neither is a subpath branched on below. Kept so the log names a path.
+  const subpath = path || '/'
   const target = resolveTarget(baseURL, subpath)
   if (!target) return rejectUnresolvedTarget(event, baseURL, 'lukk `baseURL`', subpath)
 
@@ -110,10 +112,8 @@ export default defineEventHandler(async (event) => {
     // than letting the fetch error escape as a 500 with a stack trace in the log on every attempt.
     return fetch(target!, { method, headers, body, redirect: 'manual' }).catch((error: unknown) => {
       reportProxyFailure(target!, error)
-      return new Response(
-        JSON.stringify({ message: 'lukk could not be reached.' }),
-        { status: 502, headers: { 'content-type': 'application/json' } },
-      )
+      // No headers: only the status and body of this Response are read below.
+      return new Response(JSON.stringify({ message: 'lukk could not be reached.' }), { status: 502 })
     })
   }
 
@@ -325,6 +325,7 @@ function isConfirmation(value: unknown): value is { confirmation_token: string }
 
 function safeParse(text: string): unknown {
   try { return JSON.parse(text) }
+  // Stryker disable next-line BlockStatement: equivalent — an emptied catch yields undefined, which no capture matches and the handler's final `?? text` turns back into the text.
   catch { return text }
 }
 
@@ -334,16 +335,18 @@ function safeParse(text: string): unknown {
  * Deliberately a deny-list, unlike the capture gates above: a capture must be sure of the shape
  * before it stores something, but a REMOVAL must not depend on the shape being what we expected.
  */
-function redactCredentials(data: unknown, depth = 0): unknown {
+function redactCredentials(data: unknown): unknown {
   // Arrays and nested objects too, to the docblock's promise rather than the shape lukk happens to
   // send today: a list of sessions, or a `{ data: { ... } }` envelope from a rebound response, carried
-  // a token straight through. Depth-capped so a deep or cyclic body cannot spend the request here.
-  if (depth > 4 || typeof data !== 'object' || data === null) return data
-  if (Array.isArray(data)) return data.map(item => redactCredentials(item, depth + 1))
+  // a token straight through.
+  //
+  // To any depth. It was capped at four levels "so a deep or cyclic body cannot spend the request",
+  // which made a token five levels down pass through untouched — the opposite of failing closed. A
+  // `JSON.parse` result cannot be cyclic, the work is linear in a body lukk already sent, and a body
+  // nested deeply enough to exhaust the stack fails the request rather than leaking anything.
+  if (typeof data !== 'object' || data === null) return data
+  if (Array.isArray(data)) return data.map(item => redactCredentials(item))
 
-  const body = data as Record<string, unknown>
-  const { access_token: _a, refresh_token: _r, confirmation_token: _c, ...rest } = body
-  const cleaned = Object.fromEntries(Object.entries(rest).map(([key, value]) => [key, redactCredentials(value, depth + 1)]))
-
-  return cleaned
+  const { access_token: _a, refresh_token: _r, confirmation_token: _c, ...rest } = data as Record<string, unknown>
+  return Object.fromEntries(Object.entries(rest).map(([key, value]) => [key, redactCredentials(value)]))
 }

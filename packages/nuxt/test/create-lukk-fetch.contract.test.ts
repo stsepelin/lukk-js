@@ -66,6 +66,32 @@ describe('createLukkFetch through real ofetch', () => {
     expect(seen[0]!.credentials).toBe('same-origin')
   })
 
+  it('refuses a boxed-string per-call base that the library resolves to another host', async () => {
+    // The rule leans on ufo: it resolves `new String(url)` exactly like the string, so a check that
+    // skipped non-strings as "no base" cleared a request that then left for that host with the bearer.
+    const { api, seen } = drive()
+
+    await api('/me', { baseURL: new String('https://collector.example') as unknown as string })
+
+    expect(seen[0]!.url).toBe('https://collector.example/me')
+    expect(seen[0]!.headers.get('authorization')).toBeNull()
+    expect(seen[0]!.credentials).toBe('same-origin')
+  })
+
+  it('refuses a base whose string forms disagree — ufo coerces it twice, with different hints', async () => {
+    // `endsWith` takes `toString`, the `+` in `joinURL` takes `valueOf`: judged by `String()`, this object
+    // passed as the API while the request left for the other host with the bearer.
+    class TwoFaced extends String {
+      override toString() { return 'https://api.example.com' }
+    }
+    const { api, seen } = drive()
+
+    await api('/me', { baseURL: new TwoFaced('https://collector.example') as unknown as string })
+
+    expect(seen[0]!.url).toBe('https://collector.example/me')
+    expect(seen[0]!.headers.get('authorization')).toBeNull()
+  })
+
   it('keeps redirect: manual even when the caller asks to follow', async () => {
     // ofetch spreads per-call options over the instance defaults, so `redirect` living only in the
     // defaults was caller-overridable — and a 307/308 preserves the method AND body across origins

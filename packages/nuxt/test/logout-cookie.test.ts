@@ -66,6 +66,17 @@ describe('BFF logout note cookie (browser side)', () => {
     }
   })
 
+  it('accepts a note time from the plausibility floor on, and nothing before it', () => {
+    // The floor tells a real epoch-ms time from the bare `1` older notes carried; it is inclusive.
+    const { doc, jar } = fakeDocument()
+    vi.stubGlobal('document', doc)
+
+    jar.set('lukk-logout', '1600000000000')
+    expect(logoutNoteAt('lukk-logout')).toBe(1_600_000_000_000)
+    jar.set('lukk-logout', '1599999999999')
+    expect(logoutNoteAt('lukk-logout')).toBeUndefined()
+  })
+
   it('reads only its own name — not a longer one that starts the same, nor another app\'s', () => {
     const { doc, jar } = fakeDocument()
     vi.stubGlobal('document', doc)

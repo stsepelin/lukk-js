@@ -66,6 +66,7 @@ export default defineNuxtPlugin({
       // cookie may hold a newer sign-in by now, from anywhere.
       else if (note?.fid !== undefined) {
         await auth.initSession()
+        // Stryker disable next-line ArrowFunction: equivalent — the client plugin creates this key first, and `tokenFamily` reads undefined and null alike.
         const access = useState<string | null>(ACCESS_KEY, () => null)
         // On the restored session's FAMILY, not on `loggedIn`: an app with no `user.endpoint` never reads as
         // logged in, and this branch would then drop the note of a session the restore had just renewed.

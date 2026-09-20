@@ -102,21 +102,105 @@ export const LUKK_CONFIRMATION_HEADER = 'X-Lukk-Confirmation'
 const HEADER_TOKEN = /^[a-z0-9!#$%&'*+.^_`|~-]+$/i
 
 /**
+ * Headers a browser can set that an upstream may read as coming from its edge proxy, blanked before
+ * the app-API proxy forwards.
+ *
+ * Two families, both spoofable and both consequential:
+ *
+ * The upstream decides which of these to trust (Laravel's `TrustProxies` honours a configured mask
+ * and CDNs read their own), so any one arriving from the BROWSER is an attempt to choose the
+ * upstream's idea of `$request->ip()` — the value that becomes a rate-limit and lockout key. The
+ * proxy asserts `x-forwarded-for` itself and blanks the rest.
+ *
+ * Blanked rather than deleted: `proxyRequest` merges over the inbound headers, and an empty string
+ * replaces where an absent key would leave the client's value in place.
+ */
+export const SPOOFABLE_FORWARDING: Record<string, string> = {
+  'x-forwarded-host': '',
+  'x-forwarded-proto': '',
+  'x-forwarded-port': '',
+  'x-forwarded-server': '',
+  // The path/scheme family. `x-forwarded-prefix` is the one with teeth: Symfony honours
+  // `HEADER_X_FORWARDED_PREFIX` from a trusted proxy and applies it to the base path every generated
+  // URL is built on, so a browser-set value rewrites the links the app emails and renders. The others
+  // are the same idea through different front ends, and `x-original-url`/`x-rewrite-url` are the
+  // IIS/ARR spelling that has repeatedly been used to reach paths a front-end ACL believed it blocked.
+  'x-forwarded-prefix': '',
+  'x-forwarded-scheme': '',
+  'x-forwarded-ssl': '',
+  'x-forwarded-uri': '',
+  'x-original-url': '',
+  'x-rewrite-url': '',
+  'x-forwarded': '',
+  'x-original-forwarded-for': '',
+  'x-http-forwarded-for': '',
+  'forwarded': '',
+  'x-real-ip': '',
+  'x-client-ip': '',
+  'x-remote-ip': '',
+  'x-remote-addr': '',
+  'x-originating-ip': '',
+  'client-ip': '',
+  'true-client-ip': '',
+  'cf-connecting-ip': '',
+  'cf-connecting-ipv6': '',
+  'cf-pseudo-ipv4': '',
+  'fastly-client-ip': '',
+  'x-cluster-client-ip': '',
+  'x-azure-clientip': '',
+  'x-azure-socketip': '',
+  'fly-client-ip': '',
+  'x-vercel-forwarded-for': '',
+  'x-vercel-proxied-for': '',
+  'x-appengine-user-ip': '',
+  'do-connecting-ip': '',
+  'oai-host': '',
+}
+
+/**
  * Header names the proxies set themselves. A step-up header colliding with one of these breaks
  * something either way, and silently: in the app-API proxy the confirmation token is overwritten by
  * the fixed header, so step-up stops working; in the auth proxy the token is written FIRST and would
  * clobber `Accept`/`Content-Type`, so lukk misreads the request instead.
+ *
+ * Built FROM the map the app-API proxy blanks, never copied from it: a hand-kept copy here had fallen
+ * behind — the `x-forwarded-prefix` family and `via` were accepted as step-up header names, and the
+ * proxy then blanked or overwrote the token on every request.
  */
 const RESERVED_HEADERS = new Set([
-  'accept', 'authorization', 'content-type', 'cookie', 'host', 'x-forwarded-for',
-  'x-forwarded-host', 'x-forwarded-proto', 'x-forwarded-port', 'forwarded', 'x-real-ip',
-  'x-client-ip', 'true-client-ip', 'cf-connecting-ip', 'fastly-client-ip', 'x-cluster-client-ip',
+  'accept', 'authorization', 'content-type', 'cookie', 'host', 'x-forwarded-for', 'via',
+  ...Object.keys(SPOOFABLE_FORWARDING),
 ])
 
-/** Whether a configured step-up header is a valid token and not one the proxies set themselves. */
+/**
+ * Names the transport itself refuses or discards (the Fetch standard's forbidden request-header names,
+ * which cover the hop-by-hop ones). Not a silent loss of step-up but a total outage: undici throws on
+ * `connection`, `keep-alive`, `content-length`, `expect` and the like even with an empty value, and the
+ * app-API proxy always sets the step-up header — so every proxied request answered 502. A browser in
+ * direct mode drops them instead, and step-up fails with nothing pointing at the setting.
+ */
+const TRANSPORT_HEADERS = new Set([
+  'accept-charset', 'accept-encoding', 'access-control-request-headers', 'access-control-request-method',
+  'connection', 'content-length', 'cookie2', 'date', 'dnt', 'expect', 'keep-alive', 'origin', 'referer',
+  'set-cookie', 'te', 'trailer', 'transfer-encoding', 'upgrade',
+])
+const TRANSPORT_PREFIX = /^(proxy|sec)-/
+
+/**
+ * `x-<session cookie name>-session`: h3 reads a sealed session from it, so the app-API proxy blanks it.
+ * Named per app, and the namespace may be any header-token characters (`module.ts` only warns about
+ * the unusual ones), so the pattern takes the whole token alphabet rather than `isSessionCookieName`'s.
+ */
+const SESSION_REQUEST_HEADER = /^x-(__host-)?lukk-([a-z0-9!#$%&'*+.^_`|~-]+-)?session-session$/
+
+/** Whether a configured step-up header is a valid token and not one the proxies or the transport own. */
 export function isUsableConfirmationHeader(name: string): boolean {
   const lower = name.toLowerCase()
-  return HEADER_TOKEN.test(lower) && !RESERVED_HEADERS.has(lower)
+  return HEADER_TOKEN.test(lower)
+    && !RESERVED_HEADERS.has(lower)
+    && !TRANSPORT_HEADERS.has(lower)
+    && !TRANSPORT_PREFIX.test(lower)
+    && !SESSION_REQUEST_HEADER.test(lower)
 }
 
 /**

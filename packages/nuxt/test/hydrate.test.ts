@@ -154,6 +154,33 @@ describe('resolveHydrationAccess', () => {
     expect(event.node.req.headers.cookie).toBe('locale=en; __Host-lukk-session=FRESH_SEAL')
   })
 
+  it('reseals with the same cookie the auth proxy sets — Strict, HttpOnly, whole-site — and never from a header', async () => {
+    // Pinned on `bff.ts`, and this is the OTHER place the session cookie is written: dropping
+    // `httpOnly` hands the seal to page script, a narrower `path` leaves the old seal in place for the
+    // rest of the site, and a header-borne session is an auth channel outside every cookie attribute.
+    unsealResult = { data: { access: expiredJwt(), refresh: 'r' } }
+    refreshOnce.mockResolvedValue({ pair: { access: 'NEW', refresh: 'r2' }, retryable: false })
+
+    await resolveHydrationAccess(ev('__Host-lukk-session=STALE'))
+
+    expect(useSession).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      cookie: { sameSite: 'strict', secure: true, httpOnly: true, path: '/' },
+      sessionHeader: false,
+    }))
+  })
+
+  it('warns when the resealed session nears the cookie limit, as the auth proxy does', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    unsealResult = { data: { access: expiredJwt(), refresh: 'r' } }
+    refreshOnce.mockResolvedValue({ pair: { access: 'x'.repeat(4000), refresh: 'r2' }, retryable: false })
+    sessionObj.data = { access: 'x'.repeat(4000), refresh: 'r2' }
+
+    await resolveHydrationAccess(ev('__Host-lukk-session=STALE'))
+
+    expect(String(warn.mock.calls[0]?.[0])).toContain('4096-octet')
+    warn.mockRestore()
+  })
+
   it('mirrors just the fresh seal when the request carried no cookie header', async () => {
     unsealResult = { data: { access: expiredJwt(), refresh: 'r' } }
     refreshOnce.mockResolvedValue({ pair: { access: 'NEW', refresh: 'r2' }, retryable: false })

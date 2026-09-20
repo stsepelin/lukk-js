@@ -75,14 +75,17 @@ export default defineNuxtPlugin({
         // with the cleared cookie and is simply rejected.
         if (state.handover) {
           await settle(state.handover)
+          // Stryker disable next-line StringLiteral: never surfaced — every catcher maps a SupersededRefresh to null or `superseded`; the text is for a debugger.
           if (epoch !== state.epoch) throw new SupersededRefresh('lukk: a sign-in replaced the session before this refresh was sent')
         }
 
         const pair = await client.refreshTokens()
         if (epoch !== state.epoch) {
           if (import.meta.client && cfg.mode === 'direct') await endStaleRotation(pair.access_token)
+          // Stryker disable next-line StringLiteral: never surfaced — see above.
           throw new SupersededRefresh('lukk: the session changed while this refresh was in flight')
         }
+        // Stryker disable next-line ConditionalExpression: the mutation run compiles the client, where this is `true` already; the server half is pinned in test/server-env/client-plugin.test.ts.
         if (import.meta.client) accessToken.value = pair.access_token
         return pair
       }
@@ -148,6 +151,7 @@ export default defineNuxtPlugin({
     // A throwing refresh means "not refreshable" → null (the documented contract).
     const safeRefresh = () => refresh()
       .then((pair) => {
+        // Stryker disable next-line ConditionalExpression: the mutation run compiles the client, where this is `true` already; the server half is pinned in test/server-env/client-plugin.test.ts.
         if (import.meta.client) void resyncUser(pair).catch(() => {})
         return pair
       })
@@ -169,6 +173,7 @@ export default defineNuxtPlugin({
       getAccessToken: () => accessToken.value,
       getConfirmationToken: () => confirmation.value,
       refresh: safeRefresh,
+      // Stryker disable next-line ConditionalExpression: the mutation run compiles the client, where this is `true` already; the server half is pinned in test/server-env/client-plugin.test.ts.
       onTokens: (pair) => { if (import.meta.client) accessToken.value = pair.access_token },
       // Not when the refresh that failed was superseded: the token held now belongs to a session that
       // began after that refresh started, and it is not the one the server rejected.
