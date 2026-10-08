@@ -6,7 +6,7 @@ vi.mock('h3', () => ({
 }))
 
 // eslint-disable-next-line import/first
-import { hopByHopHeaders, isForeignOrigin, rejectUnresolvedTarget, reportProxyFailure, resolveTarget, SPOOFABLE_FORWARDING, viaHeader, visitorIp } from '../src/runtime/server/proxy-utils'
+import { hopByHopHeaders, isForeignOrigin, reachesLukk, rejectUnresolvedTarget, reportProxyFailure, resolveTarget, routeWithin, SPOOFABLE_FORWARDING, viaHeader, visitorIp } from '../src/runtime/server/proxy-utils'
 
 const ev = () => ({ status: 200 } as { status: number })
 
@@ -45,8 +45,67 @@ describe('resolveTarget', () => {
     expect(resolveTarget('https://api.example.com/auth#frag', '/login')).toBe('https://api.example.com/auth/login')
   })
 
+  it('keeps a decoded `?` or `#` in the subpath as path data', () => {
+    // The subpath arrives DECODED, so these were `%3F` / `%23` on the wire. Left bare, the parser made
+    // them a query or fragment, and the upstream received a different path than policy had looked at.
+    expect(resolveTarget('https://api.example.com/auth', '/refresh#x')).toBe('https://api.example.com/auth/refresh%23x')
+    expect(resolveTarget('https://api.example.com/auth', '/a?b?c#d')).toBe('https://api.example.com/auth/a%3Fb%3Fc%23d')
+  })
+
   it('keeps containment for a sibling path that merely shares a prefix', () => {
     expect(resolveTarget('https://api.example.com/auth', '../auth2/x')).toBeNull()
+  })
+})
+
+describe('routeWithin', () => {
+  // What lukk's router will match, not what the URL string looks like: Laravel trims trailing slashes
+  // from the raw path and then `rawurldecode`s it (Illuminate\\Routing\\Matching\\UriValidator).
+  it.each([
+    ['https://l.test/auth/refresh', '/refresh'],
+    ['https://l.test/auth/refresh/', '/refresh'],
+    ['https://l.test/auth/refresh//', '/refresh'],
+    ['https://l.test/auth/refresh%2F', '/refresh/'], // trimmed BEFORE decoding, as Laravel does
+    ['https://l.test/auth%2Frefresh', '/refresh'],
+    ['https://l.test/auth/refres%68', '/refresh'],
+    ['https://l.test/auth/refres%6A', '/refresj'], // upper-case hex too
+    ['https://l.test/auth/caf%C3%A9', '/caf%C3%A9'], // non-ASCII escapes stay as they are
+    ['https://l.test/auth/%7Ftail', '/\u007Ftail'], // the top of the ASCII range is decoded
+    ['https://l.test/auth/%80tail', '/%80tail'], // and the byte after it is not
+    ['https://l.test/auth', '/'],
+    ['https://l.test/auth/', '/'],
+  ])('%s is %s to lukk', (target, route) => {
+    expect(routeWithin(target, 'https://l.test/auth')).toBe(route)
+  })
+
+  it('trims the base the same way', () => {
+    expect(routeWithin('https://l.test/auth/login', 'https://l.test/auth/')).toBe('/login')
+    expect(routeWithin('https://l.test/auth/login', 'https://l.test/aut%68')).toBe('/login')
+  })
+
+  it('is null for a path that only shares the prefix, or lies outside', () => {
+    expect(routeWithin('https://l.test/authors', 'https://l.test/auth')).toBeNull()
+    expect(routeWithin('https://l.test/users', 'https://l.test/auth')).toBeNull()
+  })
+
+  it('places everything under a root base', () => {
+    expect(routeWithin('https://l.test/login', 'https://l.test')).toBe('/login')
+    expect(routeWithin('https://l.test/', 'https://l.test/')).toBe('/')
+  })
+})
+
+describe('reachesLukk', () => {
+  it('decides a non-root base on the path, whatever the host', () => {
+    expect(reachesLukk('https://api.test/auth/login', 'https://api.test/auth')).toBe(true)
+    expect(reachesLukk('https://api.test/auth/login', 'http://internal:8000/auth')).toBe(true)
+    expect(reachesLukk('https://api.test/Auth/LOGIN', 'https://api.test/auth')).toBe(true)
+    expect(reachesLukk('https://api.test/auth/login', 'https://api.test/AUTH')).toBe(true)
+    expect(reachesLukk('https://api.test/authors', 'https://api.test/auth')).toBe(false)
+  })
+
+  it('decides a root base on the origin', () => {
+    expect(reachesLukk('https://api.test/users', 'https://api.test')).toBe(true)
+    expect(reachesLukk('https://API.test/users', 'https://api.test/')).toBe(true)
+    expect(reachesLukk('https://api.test/users', 'https://auth.test')).toBe(false)
   })
 })
 

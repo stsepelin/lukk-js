@@ -13,7 +13,7 @@ let upstream: Server
 let auth: Server
 let proxy: Server
 let proxyURL = ''
-let received: { method?: string, contentType?: string, accept?: string, authorization?: string, xForwardedFor?: string, visitorCountry?: string, body: Buffer } = { body: Buffer.alloc(0) }
+let received: { url?: string, method?: string, contentType?: string, accept?: string, authorization?: string, xForwardedFor?: string, visitorCountry?: string, body: Buffer } = { body: Buffer.alloc(0) }
 let refreshCalls = 0
 
 const port = (s: Server) => (s.address() as { port: number }).port
@@ -43,7 +43,7 @@ beforeAll(async () => {
         res.end(JSON.stringify({ ok: true }))
         return
       }
-      received = { method: req.method, contentType: req.headers['content-type'], accept: req.headers.accept, authorization: req.headers.authorization, xForwardedFor: req.headers['x-forwarded-for'] as string | undefined, visitorCountry: req.headers['x-visitor-country'] as string | undefined, body: Buffer.concat(chunks) }
+      received = { url: req.url, method: req.method, contentType: req.headers['content-type'], accept: req.headers.accept, authorization: req.headers.authorization, xForwardedFor: req.headers['x-forwarded-for'] as string | undefined, visitorCountry: req.headers['x-visitor-country'] as string | undefined, body: Buffer.concat(chunks) }
       res.setHeader('content-type', 'application/json')
       res.end(JSON.stringify({ ok: true }))
     })
@@ -154,6 +154,38 @@ describe('api-proxy integration (real h3 + upstream)', () => {
 
     expect(res.status).toBe(200)
     expect(received.visitorCountry).toBe('EE')
+  })
+
+  it('keeps an encoded `?` in the path as path data, and the query exactly as sent (real h3 decoding)', async () => {
+    // h3 decodes `event.path` before the handler runs, so `%3F` arrives as a bare `?`. Splitting that
+    // on `?` moved part of the PATH into an invented query on the way upstream.
+    const res = await fetch(`${proxyURL}/api/files/a%3Fb?x=%23&y=1`)
+    expect(res.status).toBe(200)
+    expect(received.url).toBe('/files/a%3Fb?x=%23&y=1')
+  })
+
+  it('refuses lukk\'s own routes when the app API and lukk are the same server', async () => {
+    // The documented layout: `api.target` is the app, `baseURL` the same app under /auth. Proxied, the
+    // login response — a token pair — streamed straight to the browser.
+    const cfg = __test.runtimeConfig.lukk as Record<string, unknown>
+    const baseURL = cfg.baseURL
+    cfg.baseURL = `${cfg.apiTarget as string}/auth`
+    received = { body: Buffer.alloc(0) }
+    try {
+      for (const path of ['/api/auth/login', '/api/auth/./login', '/api/auth%2Flogin', '/api/auth/login/']) {
+        const res = await fetch(`${proxyURL}${path}`, { method: 'POST', body: '{}' })
+        expect(res.status, path).toBe(404)
+      }
+      expect(received.url).toBeUndefined() // nothing reached the upstream
+    }
+    finally {
+      cfg.baseURL = baseURL
+    }
+  })
+
+  it('marks the streamed response as varying by Cookie', async () => {
+    const res = await fetch(`${proxyURL}/api/me`)
+    expect(res.headers.get('vary')).toBe('Cookie')
   })
 
   it('forwards the socket address, not a client-supplied one, with no trusted header configured', async () => {

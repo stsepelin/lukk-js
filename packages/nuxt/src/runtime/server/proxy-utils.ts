@@ -12,10 +12,16 @@ import { isResolvableBase, redactCredentials } from '../shared'
  * Returns null for BOTH an unusable base and an escaping subpath — very different faults, so
  * callers report them via `rejectUnresolvedTarget` rather than collapsing them into one message.
  *
- * Containment is at the URL layer: `..` and its `%2e` spellings are normalized away, but forms the
- * spec does NOT treat as dot-segments (`..%2f`, `%252e%252e`) stay literal in the path and are
- * forwarded percent-encoded. That's correct and same-origin, but it means an upstream that decodes
- * a second time owns that decision — don't read this as full path normalization on lukk's behalf.
+ * `subpath` is a DECODED path — h3's `event.path` has already decoded every escape except `%2F` and
+ * `%25` by the time a handler sees it. So `..%2f` reaches here with the `%2f` intact and stays literal
+ * (the URL spec does not read it as a dot-segment), and `%252e%252e` reaches here as `%252e%252e` and
+ * is forwarded as such; but `%2e%2e` has become `..` and is normalized away like any other. Either
+ * way the result is same-origin and under the base. An upstream that decodes a second time owns that
+ * decision — don't read this as full path normalization on lukk's behalf.
+ *
+ * Because it is decoded, a `?` or `#` in it was data in a path segment (`%3F`, `%23` on the wire), and
+ * is re-encoded here: left bare, the URL parser made it the start of a query or fragment, so the
+ * upstream received a different path than the one the policy above it had looked at.
  */
 export function resolveTarget(base: string, subpath: string): string | null {
   // Reject a non-http(s) base up front. Its origin serializes to `"null"`, so the containment check
@@ -35,9 +41,59 @@ export function resolveTarget(base: string, subpath: string): string | null {
   b.search = ''
   b.hash = ''
   const prefix = `${b.origin}${b.pathname.replace(/\/$/, '')}/`
-  const target = new URL(`${b.href.replace(/\/$/, '')}/${subpath.replace(/^\//, '')}`)
+  const target = new URL(`${b.href.replace(/\/$/, '')}/${subpath.replace(/^\//, '').replace(/[?#]/g, encodeURIComponent)}`)
   if (!`${target.origin}${target.pathname}/`.startsWith(prefix)) return null
   return target.toString()
+}
+
+/**
+ * The path a Laravel router matches for `pathname`, the way `UriValidator` derives it: trailing
+ * slashes trimmed from the raw path, THEN percent-decoded once (`rawurldecode`). So `/auth/`,
+ * `/auth%2Flogin` and `/aut%68` are `/auth`, `/auth/login` and `/auth` to lukk, whatever they look
+ * like as URLs.
+ *
+ * Only ASCII escapes are decoded: every route literal compared against this is ASCII, and an escape
+ * of a non-ASCII byte can only ever produce a non-ASCII character, which no such literal contains.
+ * That keeps it total — `decodeURIComponent` throws on a malformed sequence, `rawurldecode` doesn't.
+ */
+function routedPath(pathname: string): string {
+  return pathname.replace(/\/+$/, '').replace(/%([0-7][0-9a-f])/gi, (_, hex: string) => String.fromCharCode(Number.parseInt(hex, 16)))
+}
+
+/**
+ * Where `target` lands within `base` AS LUKK'S ROUTER SEES IT (`/refresh`, `/login`, ...), or null
+ * when it is not under `base` at all. Both must be absolute http(s) URLs.
+ *
+ * Route policy must be decided on THIS, never on the request path it came from: the upstream URL
+ * collapses dot segments and drops a fragment, and Laravel trims a trailing slash and decodes the
+ * rest, so `/./refresh`, `/refresh/` and `/refresh%2F` (among others) all reach lukk's refresh route
+ * while comparing unequal to `'/refresh'` as strings.
+ */
+export function routeWithin(target: string, base: string): string | null {
+  const root = routedPath(new URL(base).pathname)
+  const path = routedPath(new URL(target).pathname)
+  if (path !== root && !path.startsWith(`${root}/`)) return null
+  return path.slice(root.length) || '/'
+}
+
+/**
+ * Whether an upstream URL the app-API proxy built would reach one of lukk's own routes.
+ *
+ * Those routes answer with credentials — a token pair, a step-up token — and the app-API proxy
+ * streams bodies through untouched, so reaching one hands the browser exactly what BFF mode keeps
+ * from it. Under a non-root base the PATH decides, whatever the host: the same Laravel app is
+ * routinely reached under two names (a public one for `api.target`, an internal one for `baseURL`),
+ * and an origin comparison waves the token routes through exactly there. Case-insensitively — Laravel
+ * matches case-sensitively, so this costs nothing, and it doesn't depend on that staying true.
+ *
+ * A lukk mounted at the ROOT owns every path, so only the origin can tell its routes apart: on its
+ * own host everything is refused; on another host nothing is (lukk bound to a separate domain).
+ */
+export function reachesLukk(target: string, base: string): boolean {
+  const t = new URL(target.toLowerCase())
+  const b = new URL(base.toLowerCase())
+  if (routeWithin(t.href, b.href) === null) return false
+  return routedPath(b.pathname) !== '' || t.origin === b.origin
 }
 
 /** Bases already reported, so a broken deploy logs once per value instead of once per request. */

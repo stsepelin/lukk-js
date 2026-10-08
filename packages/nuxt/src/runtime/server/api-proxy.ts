@@ -1,8 +1,8 @@
 import { defineEventHandler, getRequestHeader, proxyRequest, setResponseStatus, useSession } from 'h3'
 import { useRuntimeConfig } from '#imports'
-import { LUKK_BFF_PREFIX, confirmationHeaderName, isSessionCookieName, sessionCookieName, signedOutCookieName } from '../shared'
+import { LUKK_BFF_PREFIX, confirmationHeaderName, isResolvableBase, isSessionCookieName, sessionCookieName, signedOutCookieName } from '../shared'
 import { accessExpired } from './access-token'
-import { hopByHopHeaders, isForeignOrigin, reportProxyFailure, rejectUnresolvedTarget, resolveTarget, SPOOFABLE_FORWARDING, viaHeader, visitorIp } from './proxy-utils'
+import { hopByHopHeaders, isForeignOrigin, reachesLukk, reportProxyFailure, rejectUnresolvedTarget, resolveTarget, SPOOFABLE_FORWARDING, viaHeader, visitorIp } from './proxy-utils'
 import { sessionEnded, sessionKey } from './ended-sessions'
 import { logoutNoted, withholdSignedOut } from './logout-note'
 import { revokeDroppedSession } from './revoke-dropped'
@@ -45,9 +45,15 @@ export default defineEventHandler(async (event) => {
     return { message: 'Cross-origin request rejected.' }
   }
 
-  const queryAt = event.path.indexOf('?')
-  const path = queryAt === -1 ? event.path : event.path.slice(0, queryAt)
-  const query = queryAt === -1 ? '' : event.path.slice(queryAt)
+  // The query comes from the RAW request target. h3 percent-decodes the path half of `event.path`
+  // (leaving the query as sent), so an encoded `?` in a path segment (`/a%3Fb`) arrives there as a
+  // real one — splitting `event.path` on it moved part of the path into an invented query. h3 appends
+  // the query verbatim, so the decoded path is whatever precedes it. (`node.req.url` is always set
+  // by h3; the fallback only keeps a request without one behaving as it did.)
+  const raw = event.node.req.url ?? event.path
+  const queryAt = raw.indexOf('?')
+  const query = queryAt === -1 ? '' : raw.slice(queryAt)
+  const path = event.path.slice(0, event.path.length - query.length)
 
   // The lukk BFF routes belong to the other proxy.
   if (path === LUKK_BFF_PREFIX || path.startsWith(`${LUKK_BFF_PREFIX}/`)) {
@@ -66,6 +72,18 @@ export default defineEventHandler(async (event) => {
   const subpath = path.slice(apiPath.length) || '/'
   const base = resolveTarget(apiTarget, subpath)
   if (!base) return rejectUnresolvedTarget(event, apiTarget, 'lukk `api.target`', subpath)
+
+  // Never lukk's own routes. They answer with credentials — a token pair from `/login`, a step-up
+  // token from `/confirm-password` — and this proxy streams bodies through untouched, so in the
+  // documented layout (`api.target` = the app, `baseURL` = the same app under `/auth`) a same-origin
+  // script could POST `/api/auth/login` and read the tokens BFF mode exists to keep server-side. The
+  // auth proxy is the only way to them. Decided on the resolved URL, the way lukk's router will see
+  // it, not on the request path. An unresolvable `baseURL` fails closed: there is no telling then.
+  if (!isResolvableBase(baseURL)) return rejectUnresolvedTarget(event, baseURL, 'lukk `baseURL`', subpath)
+  if (reachesLukk(base, baseURL)) {
+    setResponseStatus(event, 404)
+    return { message: 'Not found.' }
+  }
 
   // Read the sealed session READ-ONLY first (never minting or sliding a cookie — h3's
   // useSession would re-seal a fresh *empty* session for an expired/tampered seal,
@@ -209,6 +227,10 @@ export default defineEventHandler(async (event) => {
       }
       if (keep.length) ev.node.res.setHeader('set-cookie', keep)
       ev.node.res.setHeader('cache-control', 'private, no-store')
+      // And per visitor: `no-store` keeps it out of a conforming cache, `Vary: Cookie` out of one that
+      // keys on the URL alone regardless (RFC 9111 §4.1). Added to what the upstream varies on, not over it.
+      const vary = String(ev.node.res.getHeader('vary') ?? '')
+      if (!/(?:^|,)\s*(?:cookie|\*)\s*(?:,|$)/i.test(vary)) ev.node.res.setHeader('vary', vary ? `${vary}, Cookie` : 'Cookie')
 
       // A trusted JSON upstream shouldn't 3xx — reject it rather than stream an empty 200 (or a
       // Location) downstream. Last, so the header hygiene above has already run.

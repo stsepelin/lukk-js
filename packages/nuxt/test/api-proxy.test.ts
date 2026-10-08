@@ -78,7 +78,9 @@ function jwt(claims: Record<string, unknown>): string {
 const freshJwt = () => jwt({ exp: Math.floor(Date.now() / 1000) + 3600 })
 const expiredJwt = () => jwt({ exp: Math.floor(Date.now() / 1000) - 10 })
 
-function ev(o: { path: string, method?: string, headers?: Record<string, string> }) {
+// `path` is h3's `event.path`, which is percent-DECODED (all but `%2F` and `%25`); `url` is the raw
+// request target h3 leaves on `node.req.url`. They differ only when the request carried an escape.
+function ev(o: { path: string, url?: string, method?: string, headers?: Record<string, string> }) {
   const headers: Record<string, unknown> = {}
   return {
     path: o.path,
@@ -86,7 +88,7 @@ function ev(o: { path: string, method?: string, headers?: Record<string, string>
     headers: o.headers ?? {},
     status: 200,
     ip: '203.0.113.7' as string | undefined,
-    node: { req: { socket: { remoteAddress: '203.0.113.7' } }, res: {
+    node: { req: { url: o.url ?? o.path, socket: { remoteAddress: '203.0.113.7' } }, res: {
       statusCode: 200,
       getHeader: vi.fn((k: string) => headers[k]),
       setHeader: vi.fn((k: string, v: unknown) => { headers[k] = v }),
@@ -676,6 +678,139 @@ describe('app-API proxy', () => {
     expect(String(error.mock.calls[0]![0])).toContain('lukk `api.target`')
     expect(proxyRequest).not.toHaveBeenCalled()
     error.mockRestore()
+  })
+})
+
+describe('lukk\'s own routes, reached through the app-API proxy', () => {
+  // The documented canonical config: the app API and lukk are the same Laravel app, lukk under /auth.
+  // Proxying `/api/auth/login` there streamed lukk's token pair straight to the browser — the one thing
+  // BFF mode exists to prevent — and `/api/auth/confirm-password` the step-up token.
+  beforeEach(() => {
+    __test.runtimeConfig.lukk = { ...__test.runtimeConfig.lukk, apiTarget: 'https://api.example.com', baseURL: 'https://api.example.com/auth' } as unknown as Record<string, unknown>
+  })
+
+  it.each([
+    ['/api/auth/login', '/api/auth/login'],
+    ['/api/auth/confirm-password', '/api/auth/confirm-password'],
+    ['/api/auth', '/api/auth'], // the base itself
+    ['/api/auth/', '/api/auth/'], // Laravel trims the trailing slash before matching
+    ['/api/./auth/refresh', '/api/./auth/refresh'], // dot segments collapse in the upstream URL
+    ['/api/x/../auth/login', '/api/x/../auth/login'],
+    // h3 leaves `%2F` encoded in `event.path`; Laravel's UriValidator `rawurldecode`s before matching.
+    ['/api/auth%2Flogin', '/api/auth%2Flogin'],
+    ['/api/auth%2flogin', '/api/auth%2flogin'], // either case of the escape
+    ['/api/AUTH/login', '/api/AUTH/login'], // refused case-insensitively — failing closed costs nothing
+  ])('refuses %s', async (path, url) => {
+    const e = ev({ path, url, method: 'POST', headers: sameOrigin })
+    const body = await run(e)
+    expect(e.status).toBe(404)
+    expect(body).toEqual({ message: 'Not found.' })
+    expect(proxyRequest).not.toHaveBeenCalled()
+  })
+
+  it('refuses them when lukk is configured under a different host for the same app', async () => {
+    // The same Laravel app is routinely reached under two names: a public one for `api.target` and an
+    // internal one for `baseURL`. An origin comparison would wave the token routes through exactly there.
+    __test.runtimeConfig.lukk = { ...__test.runtimeConfig.lukk, baseURL: 'http://laravel.internal:8000/auth' } as unknown as Record<string, unknown>
+    const e = ev({ path: '/api/auth/login', method: 'POST', headers: sameOrigin })
+    await run(e)
+    expect(e.status).toBe(404)
+    expect(proxyRequest).not.toHaveBeenCalled()
+  })
+
+  it('still proxies the app\'s own routes, including one that merely shares the prefix', async () => {
+    await run(ev({ path: '/api/authors' }))
+    await run(ev({ path: '/api/users/auth' }))
+    expect(proxyRequest.mock.calls.map(call => call[1])).toEqual(['https://api.example.com/authors', 'https://api.example.com/users/auth'])
+  })
+
+  it('refuses everything when lukk is mounted at the root of the same origin', async () => {
+    // There is no path that tells the app's routes from lukk's then, so no route is safe to proxy.
+    __test.runtimeConfig.lukk = { ...__test.runtimeConfig.lukk, baseURL: 'https://api.example.com' } as unknown as Record<string, unknown>
+    const e = ev({ path: '/api/users' })
+    await run(e)
+    expect(e.status).toBe(404)
+    expect(proxyRequest).not.toHaveBeenCalled()
+  })
+
+  it('proxies when lukk is mounted at the root of ANOTHER host — its routes are bound there', async () => {
+    __test.runtimeConfig.lukk = { ...__test.runtimeConfig.lukk, baseURL: 'https://auth.example.com/' } as unknown as Record<string, unknown>
+    await run(ev({ path: '/api/login' }))
+    expect(proxyRequest).toHaveBeenCalledWith(expect.anything(), 'https://api.example.com/login', expect.anything())
+  })
+
+  it('fails closed, as a config fault, when lukk\'s base cannot be resolved', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    __test.runtimeConfig.lukk = { ...__test.runtimeConfig.lukk, baseURL: `undefined/auth-${Math.random()}` } as unknown as Record<string, unknown>
+    const e = ev({ path: '/api/auth/login' })
+    await run(e)
+    expect(e.status).toBe(500)
+    expect(String(error.mock.calls[0]![0])).toContain('lukk `baseURL`')
+    expect(proxyRequest).not.toHaveBeenCalled()
+  })
+})
+
+describe('the request target, as the browser sent it', () => {
+  it('keeps an encoded `?` in a path segment as data, not as the start of the query', async () => {
+    // h3 decodes `event.path`, so `/a%3Fb` arrives as `/a?b` — and splitting THAT on `?` sent the
+    // upstream a different path with an invented query parameter.
+    await run(ev({ path: '/api/files/a?b', url: '/api/files/a%3Fb' }))
+    await run(ev({ path: '/api/files/a?b?x=1', url: '/api/files/a%3Fb?x=1' }))
+    await run(ev({ path: '/api/files/a#b?x=%23', url: '/api/files/a%23b?x=%23' }))
+    expect(proxyRequest.mock.calls.map(call => call[1])).toEqual([
+      'https://laravel.test/files/a%3Fb',
+      'https://laravel.test/files/a%3Fb?x=1',
+      'https://laravel.test/files/a%23b?x=%23',
+    ])
+  })
+
+  it('reads the query off event.path when the request carries no raw target', async () => {
+    const e = ev({ path: '/api/search?q=1' })
+    ;(e.node.req as { url?: string }).url = undefined
+    await run(e)
+    expect(proxyRequest).toHaveBeenCalledWith(expect.anything(), 'https://laravel.test/search?q=1', expect.anything())
+  })
+
+  it('forwards the query exactly as it was sent — never re-encoded', async () => {
+    await run(ev({ path: '/api/search?q=a%26b&tag=%2F', url: '/api/search?q=a%26b&tag=%2F' }))
+    expect(proxyRequest).toHaveBeenCalledWith(expect.anything(), 'https://laravel.test/search?q=a%26b&tag=%2F', expect.anything())
+  })
+})
+
+describe('response caching', () => {
+  it('declares the response varies by Cookie, keeping whatever the upstream already varies on', async () => {
+    // `private, no-store` keeps it out of a conforming cache; `Vary: Cookie` is what stops one that
+    // ignores `no-store` from serving one visitor's response to another. The BFF proxy sends both.
+    const e = ev({ path: '/api/me' })
+    e.node.res.setHeader('vary', 'Accept-Encoding')
+    await run(e)
+    expect(e.node.res.getHeader('vary')).toBe('Accept-Encoding, Cookie')
+
+    const bare = ev({ path: '/api/me' })
+    await run(bare)
+    expect(bare.node.res.getHeader('vary')).toBe('Cookie')
+
+    const already = ev({ path: '/api/me' })
+    already.node.res.setHeader('vary', 'Origin, cookie')
+    await run(already)
+    expect(already.node.res.getHeader('vary')).toBe('Origin, cookie')
+
+    // Optional whitespace around a list member is allowed (RFC 9110 §5.6.1).
+    const spaced = ev({ path: '/api/me' })
+    spaced.node.res.setHeader('vary', 'Cookie , Origin')
+    await run(spaced)
+    expect(spaced.node.res.getHeader('vary')).toBe('Cookie , Origin')
+
+    // A name that merely starts with it is a different header.
+    const longer = ev({ path: '/api/me' })
+    longer.node.res.setHeader('vary', 'Cookie2')
+    await run(longer)
+    expect(longer.node.res.getHeader('vary')).toBe('Cookie2, Cookie')
+
+    const star = ev({ path: '/api/me' })
+    star.node.res.setHeader('vary', '*')
+    await run(star)
+    expect(star.node.res.getHeader('vary')).toBe('*')
   })
 })
 
