@@ -57,7 +57,10 @@ export function resolveTarget(base: string, subpath: string): string | null {
  * That keeps it total — `decodeURIComponent` throws on a malformed sequence, `rawurldecode` doesn't.
  */
 function routedPath(pathname: string): string {
-  return pathname.replace(/\/+$/, '').replace(/%([0-7][0-9a-f])/gi, (_, hex: string) => String.fromCharCode(Number.parseInt(hex, 16)))
+  // Repeated slashes collapse too, last: Laravel alone never routes `//auth/login`, but a hop in front of
+  // it that merges slashes (nginx's default `merge_slashes on`) hands it `/auth/login`. Reading them as
+  // distinct let `/api//auth/login` past the app-API proxy and `/_lukk//refresh` past the refresh rule.
+  return pathname.replace(/\/+$/, '').replace(/%([0-7][0-9a-f])/gi, (_, hex: string) => String.fromCharCode(Number.parseInt(hex, 16))).replace(/\/{2,}/g, '/')
 }
 
 /**

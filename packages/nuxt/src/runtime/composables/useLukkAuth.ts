@@ -132,8 +132,17 @@ export function useLukkAuth(): LukkAuth {
    * `verifyTwoFactor` / `verifyRecoveryCode`. Otherwise the token is persisted
    * and the user loaded.
    */
-  async function login(credentials: LoginInput): Promise<LoginResult> {
-    const { result, current } = await signIn(nuxtApp, () => $lukk.login(credentials), r => !isTwoFactorChallenge(r))
+  function login(credentials: LoginInput): Promise<LoginResult> {
+    return signInWith(() => $lukk.login(credentials))
+  }
+
+  /**
+   * Any sign-in that answers with a token pair or a two-factor challenge — a password, or a passkey
+   * (`useLukkPasskeys().login()` reaches it through {@link SIGN_IN}). One path, so a sign-in superseded
+   * by a logout always ends its own session rather than joining the logout that went out before it.
+   */
+  async function signInWith(send: () => Promise<LoginResult>): Promise<LoginResult> {
+    const { result, current } = await signIn(nuxtApp, send, r => !isTwoFactorChallenge(r))
     if (!current) return endSupersededSignIn(result, !isTwoFactorChallenge(result))
     if (isTwoFactorChallenge(result)) {
       // Client-only, for the reason ACCESS_KEY is: a `useState` written during SSR serialises
@@ -518,5 +527,13 @@ export function useLukkAuth(): LukkAuth {
     return settled(ready, isServer)
   }
 
-  return { user, loggedIn, ready, whenReady, restoreFailed, pendingTwoFactor, register, login, verifyTwoFactor, verifyRecoveryCode, logout, revokeOtherSessions, fetchUser, initSession }
+  const auth: LukkAuth = { user, loggedIn, ready, whenReady, restoreFailed, pendingTwoFactor, register, login, verifyTwoFactor, verifyRecoveryCode, logout, revokeOtherSessions, fetchUser, initSession }
+  // Symbol-keyed and non-enumerable: internal to lukk-nuxt, absent from `LukkAuth` and from spreads.
+  Object.defineProperty(auth, SIGN_IN, { value: signInWith })
+  return auth
 }
+
+/** The shared sign-in completion, for lukk-nuxt's own composables. Not public API. */
+export const SIGN_IN = Symbol('lukk.signIn')
+
+export type SignInWith = (send: () => Promise<LoginResult>) => Promise<LoginResult>

@@ -58,6 +58,16 @@ describe('resolveTarget', () => {
 })
 
 describe('routeWithin', () => {
+  it('reads repeated slashes the way a slash-merging hop delivers them', () => {
+    // Laravel alone never routes `//auth/login`, but nginx (`merge_slashes on`, the default) or an
+    // ingress in front of it hands lukk `/auth/login`. Read as distinct, `/api//auth/login` slipped past
+    // the app-API proxy's refusal and `/_lukk//refresh` past the BFF's never-proxy-refresh rule.
+    expect(routeWithin('https://l.test//auth/login', 'https://l.test/auth')).toBe('/login')
+    expect(routeWithin('https://l.test/auth//refresh', 'https://l.test/auth')).toBe('/refresh')
+    expect(routeWithin('https://l.test/auth/%2F%2Frefresh', 'https://l.test/auth')).toBe('/refresh')
+    expect(routeWithin('https://l.test/auth///', 'https://l.test/auth')).toBe('/')
+  })
+
   // What lukk's router will match, not what the URL string looks like: Laravel trims trailing slashes
   // from the raw path and then `rawurldecode`s it (Illuminate\\Routing\\Matching\\UriValidator).
   it.each([

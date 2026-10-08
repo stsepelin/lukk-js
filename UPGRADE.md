@@ -56,6 +56,12 @@ now `'pwd' | 'otp' | 'pop' | 'user' | 'mfa'`; anything comparing against `'webau
   no longer receives them; send what it needs explicitly.
 - `useLukkForm` drafts live under `lukk:form:<rememberKey>`, so a draft remembered under the old key
   is not carried over.
+- In BFF mode, `$lukkRefresh()` resolves to the `REFRESHED_WITHOUT_TOKEN` symbol instead of the
+  proxy's `{ ok, expires_in }`; code reading `.expires_in` from it gets `undefined`. Both are truthy on
+  success. `$lukkRestore()`'s `pair` carries the same symbol.
+- Every BFF auth-proxy response carries `X-Content-Type-Options: nosniff`, and a non-JSON upstream body
+  goes out as `text/plain`.
+- Route checks collapse repeated slashes, so `/api//auth/login` is refused like `/api/auth/login`.
 
 ### Every composable now declares its return type
 

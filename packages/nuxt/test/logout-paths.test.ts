@@ -8,6 +8,8 @@ vi.mock('../src/runtime/composables/useLukkFetch', () => ({ useLukkFetch: () => 
 
 // eslint-disable-next-line import/first
 import { useLukkAuth } from '../src/runtime/composables/useLukkAuth'
+// eslint-disable-next-line import/first
+import { useLukkPasskeys } from '../src/runtime/composables/useLukkPasskeys'
 
 function withApp(lukk: Record<string, unknown>, extra: Record<string, unknown> = {}, mode: 'direct' | 'bff' = 'direct') {
   __test.nuxtApp = { $lukk: lukk, ...extra }
@@ -88,6 +90,34 @@ describe('useLukkAuth — logout paths', () => {
     void auth.logout()
     await new Promise(resolve => setTimeout(resolve, 0))
     expect(logout).toHaveBeenCalledTimes(2)
+  })
+
+  it('ends the session a passkey sign-in issued after a logout went out, with a logout of its own', async () => {
+    // A passkey sign-in superseded by a logout called `logout()` for its session — which now JOINS the
+    // logout in progress, and that one went out before the session existed. Only one request was sent,
+    // and the session the passkey sign-in had just been issued stayed live.
+    let finishFirst!: () => void
+    let land!: () => void
+    const logout = vi.fn()
+      .mockImplementationOnce(() => new Promise<void>((resolve) => { finishFirst = resolve }))
+      .mockImplementationOnce(async () => {})
+    const loginWithPasskey = vi.fn(() => new Promise((resolve) => { land = () => resolve({ access_token: 'B', expires_in: 900 }) }))
+    const passkeyLoginOptions = vi.fn(async () => ({ ceremony_id: 'cer', options: { challenge: 'AA' } }))
+    withApp({ logout, loginWithPasskey, passkeyLoginOptions })
+    const buffer = new ArrayBuffer(1)
+    const assertion = { id: 'credential', type: 'public-key', rawId: buffer, getClientExtensionResults: () => ({}), response: { clientDataJSON: buffer, authenticatorData: buffer, signature: buffer, userHandle: null } }
+    vi.stubGlobal('navigator', { credentials: { get: vi.fn(async () => assertion) } })
+    const auth = useLukkAuth()
+
+    const signingIn = useLukkPasskeys().login().catch(() => {})
+    await vi.waitFor(() => expect(loginWithPasskey).toHaveBeenCalledOnce())
+    const first = auth.logout()
+    await vi.waitFor(() => expect(logout).toHaveBeenCalledOnce())
+    land()
+    await vi.waitFor(() => expect(logout).toHaveBeenCalledTimes(2))
+    finishFirst()
+    await first
+    await signingIn
   })
 
   it('joins a logout already out — a double click ends the session once, and neither call rejects', async () => {

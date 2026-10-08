@@ -1,8 +1,6 @@
-import { credentialToJSON, isTwoFactorChallenge, type LoginResult, type PasskeyLoginOptions, type PasskeySummary, toCreationOptions, toRequestOptions } from 'lukk-core'
-import { useNuxtApp, useState } from '#imports'
-import { CHALLENGE_KEY } from '../keys'
-import { signIn } from '../utils/restore-state'
-import { useLukkAuth } from './useLukkAuth'
+import { credentialToJSON, type LoginResult, type PasskeyLoginOptions, type PasskeySummary, toCreationOptions, toRequestOptions } from 'lukk-core'
+import { useNuxtApp } from '#imports'
+import { SIGN_IN, type SignInWith, useLukkAuth } from './useLukkAuth'
 import { useLukkConfirmation } from './useLukkConfirmation'
 
 /**
@@ -39,28 +37,10 @@ export function useLukkPasskeys(): LukkPasskeys {
    */
   async function login(): Promise<LoginResult> {
     const assertion = await assert()
-    // The same session handover as a password login — see `useLukkAuth().login`.
-    const { result, current } = await signIn(nuxtApp, () => $lukk.loginWithPasskey(assertion.ceremony_id, assertion.credential), r => !isTwoFactorChallenge(r))
-    const auth = useLukkAuth()
-
-    if (isTwoFactorChallenge(result)) {
-      // No session was issued, so a logout meanwhile leaves nothing to end — only the challenge to drop.
-      // Client-only, as in `useLukkAuth().login`: a challenge written during SSR would serialise into
-      // the page payload.
-      if (current) {
-        // Stryker disable next-line ConditionalExpression,ArrowFunction: the mutation run compiles the client, where `import.meta.client` is `true` already, and the initial value is overwritten on the same line.
-        if (import.meta.client) useState<string | null>(CHALLENGE_KEY, () => null).value = result.challenge_token
-      }
-      return result
-    }
-
-    // Logged out while the response was on the wire: end the session it just issued.
-    if (!current) {
-      await auth.logout()
-      return result
-    }
-    await auth.fetchUser()
-    return result
+    // The password sign-in's own completion: the same handover, challenge handling and — when a logout
+    // overtook it — the same logout of its own for the session it issued.
+    const signInWith = (useLukkAuth() as unknown as Record<typeof SIGN_IN, SignInWith>)[SIGN_IN]
+    return signInWith(() => $lukk.loginWithPasskey(assertion.ceremony_id, assertion.credential))
   }
 
   /** Earn step-up confirmation with a passkey (recorded via `useLukkConfirmation`). */

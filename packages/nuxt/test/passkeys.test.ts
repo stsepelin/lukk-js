@@ -6,11 +6,15 @@ vi.mock('lukk-core', () => ({
   toCreationOptions: (json: unknown) => ({ creation: json }),
   toRequestOptions: (json: unknown) => ({ request: json }),
   credentialToJSON: (cred: { id: string }) => ({ serialized: cred.id }),
-  isTwoFactorChallenge: (r: { two_factor?: boolean }) => r.two_factor === true,
 }))
 
-const fetchUser = vi.fn()
-vi.mock('../src/runtime/composables/useLukkAuth', () => ({ useLukkAuth: () => ({ fetchUser }) }))
+// The sign-in itself — handover, challenge, superseded logout — is useLukkAuth's, shared with the
+// password path and tested with the real composable in session-generation and logout-paths.
+const signInWith = vi.fn((send: () => Promise<unknown>) => send())
+vi.mock('../src/runtime/composables/useLukkAuth', () => {
+  const SIGN_IN = Symbol('lukk.signIn')
+  return { SIGN_IN, useLukkAuth: () => ({ [SIGN_IN]: signInWith }) }
+})
 
 // eslint-disable-next-line import/first
 import { useLukkConfirmation } from '../src/runtime/composables/useLukkConfirmation'
@@ -39,49 +43,30 @@ describe('useLukkPasskeys', () => {
     expect($lukk.registerPasskey).toHaveBeenCalledWith({ serialized: 'cred-1' }, 'My Key')
   })
 
-  it('logs in with a passkey and loads the user', async () => {
+  it('signs in through the shared sign-in, sending the assertion it made', async () => {
+    const answer = { two_factor: true, challenge_token: 'ct' }
     const $lukk = {
       passkeyLoginOptions: vi.fn().mockResolvedValue({ ceremony_id: 'cer', options: { challenge: 'c' } }),
-      loginWithPasskey: vi.fn().mockResolvedValue({ access_token: 'a', expires_in: 900 }),
+      loginWithPasskey: vi.fn().mockResolvedValue(answer),
     }
     __test.nuxtApp = { $lukk }
     const get = vi.fn().mockResolvedValue({ id: 'cred-2' })
     withNavigator(vi.fn(), get)
 
-    await useLukkPasskeys().login()
+    await expect(useLukkPasskeys().login()).resolves.toBe(answer)
 
     expect(get).toHaveBeenCalledWith({ publicKey: { request: { challenge: 'c' } } })
+    expect(signInWith).toHaveBeenCalledOnce()
     expect($lukk.loginWithPasskey).toHaveBeenCalledWith('cer', { serialized: 'cred-2' })
-    expect(fetchUser).toHaveBeenCalledOnce()
   })
 
-  it('surfaces a two-factor challenge from a passkey sign-in, like a password sign-in does', async () => {
-    // lukk 0.7 answers a SINGLE-factor passkey assertion on an account with confirmed two-factor with
-    // a challenge, not a session. Dropping it left the visitor on the sign-in page with nothing to
-    // type the code into, and `fetchUser` loading no one.
-    const $lukk = {
-      passkeyLoginOptions: vi.fn().mockResolvedValue({ ceremony_id: 'cer', options: { challenge: 'c' } }),
-      loginWithPasskey: vi.fn().mockResolvedValue({ two_factor: true, challenge_token: 'ct' }),
-    }
+  it('makes the assertion before the sign-in starts, so a cancelled prompt signs nobody in', async () => {
+    const $lukk = { passkeyLoginOptions: vi.fn().mockResolvedValue({ ceremony_id: 'cer', options: { challenge: 'c' } }), loginWithPasskey: vi.fn() }
     __test.nuxtApp = { $lukk }
-    withNavigator(vi.fn(), vi.fn().mockResolvedValue({ id: 'cred-9' }))
+    withNavigator(vi.fn(), vi.fn().mockRejectedValue(new Error('NotAllowedError')))
 
-    await expect(useLukkPasskeys().login()).resolves.toEqual({ two_factor: true, challenge_token: 'ct' })
-
-    expect(useState<string | null>('lukk:challenge', () => null).value).toBe('ct')
-    expect(fetchUser).not.toHaveBeenCalled()
-  })
-
-  it('resolves to the token pair when the passkey signs in outright', async () => {
-    const $lukk = {
-      passkeyLoginOptions: vi.fn().mockResolvedValue({ ceremony_id: 'cer', options: { challenge: 'c' } }),
-      loginWithPasskey: vi.fn().mockResolvedValue({ access_token: 'a', expires_in: 900 }),
-    }
-    __test.nuxtApp = { $lukk }
-    withNavigator(vi.fn(), vi.fn().mockResolvedValue({ id: 'cred-10' }))
-
-    await expect(useLukkPasskeys().login()).resolves.toEqual({ access_token: 'a', expires_in: 900 })
-    expect(useState<string | null>('lukk:challenge', () => null).value).toBeNull()
+    await expect(useLukkPasskeys().login()).rejects.toThrow('NotAllowedError')
+    expect(signInWith).not.toHaveBeenCalled()
   })
 
   it('earns step-up confirmation with a passkey', async () => {
