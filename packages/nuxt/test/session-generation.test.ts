@@ -600,9 +600,16 @@ describe('a sign-in or logout in another tab', () => {
   class FakeChannel {
     static instances: FakeChannel[] = []
     posted: unknown[] = []
+    closed = false
     onmessage: ((event: MessageEvent) => void) | null = null
     constructor(public name: string) { FakeChannel.instances.push(this) }
-    postMessage(message: unknown) { this.posted.push(message) }
+    postMessage(message: unknown) {
+      // Like the browser: a closed channel throws `InvalidStateError`.
+      if (this.closed) throw new DOMException('closed', 'InvalidStateError')
+      this.posted.push(message)
+    }
+
+    close() { this.closed = true }
   }
   const otherTabSays = async () => {
     FakeChannel.instances.at(-1)!.onmessage!({ data: 'changed' } as MessageEvent)
@@ -786,6 +793,28 @@ describe('a sign-in or logout in another tab', () => {
     ;(clientPlugin as unknown as () => unknown)()
     expect(FakeChannel.instances.at(-1)!.name).toBe('lukk:session:/#admin')
     expect(restoreState(__test.nuxtApp).scope).toBe('/#admin')
+  })
+
+  it('closes the channel when the app is torn down, and stops announcing on it', () => {
+    // Left open, an unmounted app (HMR, a micro-frontend, a test) kept answering other tabs and held the
+    // channel for the life of the page.
+    const unmount: (() => void)[] = []
+    __test.nuxtApp = { vueApp: { onUnmount: (fn: () => void) => { unmount.push(fn) } } }
+    boot()
+    const channel = FakeChannel.instances.at(-1)!
+    expect(channel.closed).toBe(false)
+
+    for (const fn of unmount) fn()
+
+    expect(channel.closed).toBe(true)
+    expect(channel.onmessage).toBeNull()
+    expect(restoreState(__test.nuxtApp).announce).toBeUndefined()
+  })
+
+  it('still wires the channel on a Vue without app.onUnmount', () => {
+    __test.nuxtApp = { vueApp: {} }
+    boot()
+    expect(FakeChannel.instances.at(-1)!.onmessage).toBeTypeOf('function')
   })
 
   it('does not listen where the browser has no BroadcastChannel', () => {

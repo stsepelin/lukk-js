@@ -7,6 +7,8 @@ vi.mock('../src/runtime/composables/useLukkFetch', () => ({ useLukkFetch: () => 
 
 // eslint-disable-next-line import/first
 import { useLukkForm } from '../src/runtime/composables/useLukkForm'
+// eslint-disable-next-line import/first
+import { useState } from './mocks/imports'
 
 const val422 = (errors: Record<string, string[]>): LukkError => ({ status: 422, message: 'The given data was invalid.', errors })
 
@@ -425,6 +427,21 @@ describe('useLukkForm', () => {
     // The dangerous keys land as harmless own props on null-prototype nodes, not on the global.
     expect(({} as Record<string, unknown>).polluted).toBeUndefined()
     expect(({} as Record<string, unknown>).p2).toBeUndefined()
+  })
+
+  it('keeps a remembered draft in its own namespace — a key can never alias lukk\'s (or the app\'s) state', () => {
+    // `useState` keys are global to the app. Unprefixed, `rememberKey: 'lukk:user'` made the draft the
+    // signed-in user's state, and any app key could be overwritten the same way.
+    const user = useState<unknown>('lukk:user', () => ({ id: 1, name: 'Ada' }))
+    const appState = useState<unknown>('cart', () => ['item'])
+
+    const form = useLukkForm({ name: '' }, { rememberKey: 'lukk:user' })
+    form.data.name = 'Mallory'
+    useLukkForm({ items: [] as string[] }, { rememberKey: 'cart' })
+
+    expect(user.value).toEqual({ id: 1, name: 'Ada' })
+    expect(appState.value).toEqual(['item'])
+    expect(useState('lukk:form:lukk:user', () => null).value).toEqual({ name: 'Mallory' })
   })
 
   it('rememberKey persists data across instances (survives SPA navigation)', () => {

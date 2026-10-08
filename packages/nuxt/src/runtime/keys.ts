@@ -10,3 +10,6 @@ export const CHALLENGE_KEY = 'lukk:challenge'
 export const CONFIRMATION_KEY = 'lukk:confirmation'
 export const CONFIRMED_KEY = 'lukk:confirmed'
 export const CONFIRM_REQUIRED_KEY = 'lukk:confirm-required'
+// Prefix of a `useLukkForm` `rememberKey`: the draft lives at `lukk:form:<key>`, so no key can alias any
+// other state — `rememberKey: 'lukk:user'` otherwise made the draft the signed-in user.
+export const FORM_KEY_PREFIX = 'lukk:form'

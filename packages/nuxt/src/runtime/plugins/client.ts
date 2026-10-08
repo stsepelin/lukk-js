@@ -233,6 +233,14 @@ export default defineNuxtPlugin({
         const channel = new window.BroadcastChannel(`lukk:session:${scope}`)
         state.announce = () => channel.postMessage('changed')
         channel.onmessage = () => { void followOtherTab().catch(() => {}) }
+        // Closed with the app (HMR, a micro-frontend): left open it kept answering other tabs for the life
+        // of the page, and announcing on it after `close()` would throw. `onUnmount` is Vue 3.5+.
+        const vueApp = (nuxtApp as { vueApp?: { onUnmount?: (fn: () => void) => void } }).vueApp
+        vueApp?.onUnmount?.(() => {
+          state.announce = undefined
+          channel.onmessage = null
+          channel.close()
+        })
       }
     }
 

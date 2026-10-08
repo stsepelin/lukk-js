@@ -1,6 +1,7 @@
 import type { FetchOptions } from 'ofetch'
 import type { LukkError } from 'lukk-core'
 import { computed, reactive, ref, shallowRef, useState } from '#imports'
+import { FORM_KEY_PREFIX } from '../keys'
 import { useLukkFetch } from './useLukkFetch'
 
 type FormFields = Record<string, unknown>
@@ -147,7 +148,7 @@ export function useLukkForm<T extends FormFields>(initial: T, options: UseLukkFo
   // `rememberKey` backs `data` with Nuxt `useState` so it survives SPA navigation; otherwise
   // it's a plain per-instance reactive. Either way it's the live, editable field object.
   const data = options.rememberKey
-    ? useState<T>(options.rememberKey, () => cloneData(initial) as T).value
+    ? useState<T>(`${FORM_KEY_PREFIX}:${options.rememberKey}`, () => cloneData(initial) as T).value
     : reactive(cloneData(initial)) as T
   // A plain-object deep clone of the live data (File/Blob by reference).
   const snapshot = (): FormFields => cloneData(data) as FormFields

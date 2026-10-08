@@ -72,17 +72,19 @@ export function noteSignIn(scope: string | undefined, sentAt: number): void {
  * sign-in. One WITH a family is never judged by time: the session it names settles it.
  */
 export function readPendingLogout(scope?: string, now = Date.now()): PendingLogout | undefined {
-  try {
-    const note = readNote(sessionStorage.getItem(noteKey(scope)))
-    // Bounded from BOTH ends. A note dated in the future — the clock moved back between writing and
-    // reading it — has a negative age, so an upper bound alone honoured it forever, while `signedInSince`
-    // disbelieved the equally-future sign-in record and nothing could stand it down.
-    const age = now - note!.at
-    if (!note || age < 0 || age >= PENDING_LOGOUT_TTL_MS) return undefined
-    return note.fid !== undefined || !signedInSince(scope, note.at) ? note : undefined
-  }
-  // Stryker disable next-line BlockStatement: equivalent — an emptied catch falls off the end, which returns undefined too.
-  catch { return undefined }
+  // Only the storage read can throw; the rest is checked, not caught. (A missing note used to be found by
+  // dereferencing it and letting the TypeError land in this catch.)
+  let raw: string | null = null
+  try { raw = sessionStorage.getItem(noteKey(scope)) }
+  catch { /* no storage: no note */ }
+  const note = readNote(raw)
+  if (!note) return undefined
+  // Bounded from BOTH ends. A note dated in the future — the clock moved back between writing and
+  // reading it — has a negative age, so an upper bound alone honoured it forever, while `signedInSince`
+  // disbelieved the equally-future sign-in record and nothing could stand it down.
+  const age = now - note.at
+  if (age < 0 || age >= PENDING_LOGOUT_TTL_MS) return undefined
+  return note.fid !== undefined || !signedInSince(scope, note.at) ? note : undefined
 }
 
 /** Was a sign-in sent, in any tab, at or after `at`? */
