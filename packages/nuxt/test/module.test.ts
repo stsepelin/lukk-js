@@ -102,9 +102,13 @@ describe('lukk-nuxt module', () => {
 
     expect(template.filename).toBe('types/lukk-nuxt.d.ts')
     const contents = template.getContents()
-    expect(contents).toContain(`import type { LukkClient, TokenPair } from 'lukk-core'`)
+    // Was `Promise<TokenPair | null>`, which the BFF default never resolved to: its refresh hands the
+    // browser no token. That assertion pinned the untruthful type, so it changed with it.
+    expect(contents).toContain(`import type { LukkClient, RefreshOutcome } from 'lukk-core'`)
     expect(contents).toContain('$lukk: LukkClient')
-    expect(contents).toContain('$lukkRefresh: () => Promise<TokenPair | null>')
+    expect(contents).toContain('$lukkRefresh: () => Promise<RefreshOutcome>')
+    // Provided by the plugin all along, and missing from the types.
+    expect(contents).toContain('$lukkRestore: () => Promise<{ pair: RefreshOutcome, unavailable: boolean, superseded?: boolean }>')
   })
 
   it('registers the streaming-render marker alongside SSR hydration, and not without it', () => {
@@ -515,19 +519,27 @@ describe('lukk-nuxt module — what it registers, and when it speaks up', () => 
     ])
   })
 
-  it('types $lukk and $lukkRefresh on the NuxtApp', () => {
+  it('types $lukk, $lukkRefresh and $lukkRestore on the NuxtApp', () => {
     setup({ baseURL: 'https://api/auth', mode: 'bff' })
     const template = kit.addTypeTemplate.mock.calls[0]![0] as { filename: string, getContents: () => string }
 
     expect(template.filename).toBe('types/lukk-nuxt.d.ts')
+    // `$lukkRefresh` was typed `Promise<TokenPair | null>` — untrue in BFF mode, where no token reaches the
+    // browser — and `$lukkRestore` was not typed at all. The exact text pinned both; it changed with them.
     expect(template.getContents()).toBe([
-      `import type { LukkClient, TokenPair } from 'lukk-core'`,
+      `import type { LukkClient, RefreshOutcome } from 'lukk-core'`,
       `declare module '#app' {`,
       `  interface NuxtApp {`,
       `    /** The lukk-core client, wired for the configured transport. */`,
       `    $lukk: LukkClient`,
-      `    /** The shared single-flight refresh; \`null\` when the session can't be refreshed. */`,
-      `    $lukkRefresh: () => Promise<TokenPair | null>`,
+      `    /**`,
+      `     * The shared single-flight refresh: the new pair in direct mode; \`REFRESHED_WITHOUT_TOKEN\` in bff`,
+      `     * mode, where the proxy re-sealed the session and the browser holds no token; \`null\` when the`,
+      `     * session can't be refreshed.`,
+      `     */`,
+      `    $lukkRefresh: () => Promise<RefreshOutcome>`,
+      `    /** The same refresh, reporting why it failed: \`unavailable\` for "couldn't tell", not "signed out". */`,
+      `    $lukkRestore: () => Promise<{ pair: RefreshOutcome, unavailable: boolean, superseded?: boolean }>`,
       `  }`,
       `}`,
       `export {}`,

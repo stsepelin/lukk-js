@@ -1,4 +1,4 @@
-import { createLukkClient, type LukkClient, singleFlight, type TokenPair } from 'lukk-core'
+import { createLukkClient, type LukkClient, REFRESHED_WITHOUT_TOKEN, type RefreshOutcome, singleFlight, type TokenPair } from 'lukk-core'
 import { defineNuxtPlugin, useNuxtApp, useRuntimeConfig, useState } from '#imports'
 import { useLukkAuth } from '../composables/useLukkAuth'
 import { ACCESS_KEY, CONFIRMATION_KEY } from '../keys'
@@ -13,7 +13,7 @@ import { tokenSubject } from '../utils/token-subject'
 class SupersededRefresh extends Error {}
 
 /** What a restore learned. `superseded`: a newer sign-in or logout decided the session instead. */
-export interface RestoreOutcome { pair: TokenPair | null, unavailable: boolean, superseded?: boolean }
+export interface RestoreOutcome { pair: RefreshOutcome, unavailable: boolean, superseded?: boolean }
 
 /** How long a restore waits for another tab's sign-in cookie to land before retrying a 409. */
 export const REPLACED_SESSION_RETRY_DELAY_MS = 400
@@ -85,6 +85,11 @@ export default defineNuxtPlugin({
           // Stryker disable next-line StringLiteral: never surfaced — see above.
           throw new SupersededRefresh('lukk: the session changed while this refresh was in flight')
         }
+        // BFF: the proxy rotated and re-sealed the session server-side, and answers the browser with no
+        // token (`{ ok, expires_in }`). Say exactly that. Returned as if it were a pair, core's shape gate
+        // refused it, so a 401 was never retried in BFF mode even right after a successful renewal — and
+        // nothing here may hold a token in this mode, whatever the answer looked like.
+        if (cfg.mode === 'bff') return REFRESHED_WITHOUT_TOKEN
         // Stryker disable next-line ConditionalExpression: the mutation run compiles the client, where this is `true` already; the server half is pinned in test/server-env/client-plugin.test.ts.
         if (import.meta.client) accessToken.value = pair.access_token
         return pair
@@ -114,7 +119,7 @@ export default defineNuxtPlugin({
       state.announce?.()
     }
     // Published so a sign-in or `logout()` can wait for it — see `settleRefresh`.
-    const refresh = (): Promise<TokenPair> => (state.refreshing = flight())
+    const refresh = (): Promise<TokenPair | typeof REFRESHED_WITHOUT_TOKEN> => (state.refreshing = flight())
     // Abilities are re-derived on EVERY mint server-side — that is what makes revoking one take
     // effect within `access_ttl` rather than lasting the life of the refresh token. The client only
     // learns a grant through the user resource, so without this a refreshed token silently carried a
@@ -133,11 +138,13 @@ export default defineNuxtPlugin({
     // previous one's name.
     let resyncing = false
 
-    async function resyncUser(pair: TokenPair): Promise<void> {
+    async function resyncUser(pair: TokenPair | typeof REFRESHED_WITHOUT_TOKEN): Promise<void> {
       const { user, fetchUser } = useLukkAuth()
       if (resyncing || user.value == null) return
 
-      const subject = tokenSubject(pair.access_token)
+      // No token in BFF mode (`REFRESHED_WITHOUT_TOKEN` has no `access_token`), so no subject to compare;
+      // the abilities resync below still applies.
+      const subject = tokenSubject((pair as Partial<TokenPair>).access_token)
       const switched = subject !== undefined && state.subject !== undefined && subject !== state.subject
 
       // `resyncing` breaks the cycle where `fetchUser`'s own 401 refreshes again and re-enters here.

@@ -1,3 +1,4 @@
+import { REFRESHED_WITHOUT_TOKEN } from 'lukk-core'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ACCESS_KEY, READY_KEY } from '../src/runtime/keys'
 import { restoreState } from '../src/runtime/utils/restore-state'
@@ -66,6 +67,21 @@ describe('client plugin', () => {
     expect(await captured.hooks!.getAccessToken()).toBe('fresh')
   })
 
+  it('says "renewed, no token for you" in bff mode, and holds no token — whatever the proxy answered', async () => {
+    // The proxy answers `{ ok: true, expires_in }`. Typed and returned as a token pair, it failed core's
+    // shape gate, so lukk-core never retried a 401 in BFF mode even right after a successful renewal.
+    __test.runtimeConfig.public.lukk = { mode: 'bff', baseURL: '', confirmationHeader: 'X' }
+    const { provide } = (clientPlugin as unknown as () => { provide: { lukkRefresh: () => Promise<unknown> } })()
+    captured.client!.refreshTokens.mockResolvedValueOnce({ ok: true, expires_in: 900 })
+    expect(await provide.lukkRefresh()).toBe(REFRESHED_WITHOUT_TOKEN)
+    expect(captured.hooks!.refresh).toBe(provide.lukkRefresh)
+
+    // Even a pair: the browser never holds a token in BFF mode.
+    captured.client!.refreshTokens.mockResolvedValueOnce({ access_token: 'leaked', expires_in: 900 })
+    expect(await provide.lukkRefresh()).toBe(REFRESHED_WITHOUT_TOKEN)
+    expect(useState(ACCESS_KEY, () => null).value).toBeNull()
+  })
+
   it('reloads the user when the BFF refuses to renew a session another tab replaced', async () => {
     // This tab still shows that session. Reloading the user makes it show what the browser now holds.
     __test.runtimeConfig.public.lukk = { mode: 'bff', baseURL: '', confirmationHeader: 'X' }
@@ -97,9 +113,12 @@ describe('client plugin — $lukkRestore', () => {
     return (clientPlugin as unknown as () => { provide: Provide })().provide
   }
 
-  it('hands back the pair on success', async () => {
+  it('hands back the renewal on success', async () => {
+    // This setup is BFF mode, whose proxy never answers with a token pair — the mock's pair stood in for
+    // `{ ok, expires_in }`. Expecting it back pinned the untruthful `TokenPair` this restore claimed to
+    // return; it now says what happened, which is all a BFF browser can know.
     const { lukkRestore } = setup()
-    await expect(lukkRestore()).resolves.toEqual({ pair: { access_token: 'fresh', expires_in: 900 }, unavailable: false })
+    await expect(lukkRestore()).resolves.toEqual({ pair: REFRESHED_WITHOUT_TOKEN, unavailable: false })
   })
 
   it.each([
@@ -136,7 +155,8 @@ describe('client plugin — $lukkRestore', () => {
     expect(captured.client!.refreshTokens).toHaveBeenCalledOnce()
     await vi.advanceTimersByTimeAsync(1)
 
-    await expect(restoring).resolves.toEqual({ pair: { access_token: 'fresh', expires_in: 900 }, unavailable: false })
+    // BFF mode: the renewal, never a pair (see "hands back the renewal on success").
+    await expect(restoring).resolves.toEqual({ pair: REFRESHED_WITHOUT_TOKEN, unavailable: false })
     expect(captured.client!.refreshTokens).toHaveBeenCalledTimes(2)
   })
 

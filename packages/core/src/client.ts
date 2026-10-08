@@ -31,8 +31,12 @@ export interface LukkClientHooks {
   getAccessToken?: () => string | null | Promise<string | null>
   /** Step-up token for `X-Lukk-Confirmation`, when one has been earned. */
   getConfirmationToken?: () => string | null | Promise<string | null>
-  /** Obtain a fresh pair when a request 401s. Return null if not refreshable. */
-  refresh?: () => Promise<TokenPair | null>
+  /**
+   * Renew the session when a request 401s: a fresh pair (handed to `onTokens`, then the request is
+   * retried), `REFRESHED_WITHOUT_TOKEN` when it was renewed somewhere this client holds no token for
+   * (a BFF proxy re-sealing its own session — the request is retried as is), or null if not refreshable.
+   */
+  refresh?: () => Promise<RefreshOutcome>
   /** Persist a freshly-minted pair (login / 2FA / passkey login / restore). */
   onTokens?: (pair: TokenPair) => void | Promise<void>
   /** Refresh failed → the session is gone. */
@@ -40,6 +44,19 @@ export interface LukkClientHooks {
   /** Header carrying the confirmation token (default `X-Lukk-Confirmation`). */
   confirmationHeader?: string
 }
+
+/**
+ * What a `refresh` hook returns when the session WAS renewed but there is no token for this client to
+ * hold — a BFF proxy rotates and re-seals server-side and tells the browser only that it did.
+ *
+ * A symbol, not a shape, on purpose: the pair a hook returns is shape-gated (`isTokenPair`) because it
+ * may come straight from a response body, and no body can produce a symbol. So "renewed" can only ever
+ * be said by the binding's own code, never by whatever a server answered.
+ */
+export const REFRESHED_WITHOUT_TOKEN: unique symbol = Symbol('lukk.refreshed-without-token')
+
+/** A `refresh` hook's answer: a new pair, a renewal with no token to hold, or null when not refreshable. */
+export type RefreshOutcome = TokenPair | typeof REFRESHED_WITHOUT_TOKEN | null
 
 /** Collapse concurrent calls into a single in-flight promise. */
 export function singleFlight<T>(fn: () => Promise<T>): () => Promise<T> {
@@ -89,7 +106,7 @@ export function createLukkClient(hooks: LukkClientHooks) {
     })
 
     if (res.status === 401 && allowRetry && refreshOnce) {
-      let pair: TokenPair | null
+      let pair: RefreshOutcome
       // A throwing refresh hook means "not refreshable" — honor the documented contract.
       try { pair = await refreshOnce() }
       // Stryker disable next-line BlockStatement: emptying this catch leaves `pair` undefined instead
@@ -102,6 +119,8 @@ export function createLukkClient(hooks: LukkClientHooks) {
         await hooks.onTokens?.(pair)
         return request<T>(path, init, false) // retry once with the new token
       }
+      // Renewed where this client can't see — nothing to store, and the retry carries what it always did.
+      if (pair === REFRESHED_WITHOUT_TOKEN) return request<T>(path, init, false)
       await hooks.onUnauthenticated?.()
     }
 
