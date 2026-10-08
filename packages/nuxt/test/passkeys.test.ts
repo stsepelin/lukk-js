@@ -11,9 +11,9 @@ vi.mock('lukk-core', () => ({
 // The sign-in itself — handover, challenge, superseded logout — is useLukkAuth's, shared with the
 // password path and tested with the real composable in session-generation and logout-paths.
 const signInWith = vi.fn((send: () => Promise<unknown>) => send())
-vi.mock('../src/runtime/composables/useLukkAuth', () => {
-  const SIGN_IN = Symbol('lukk.signIn')
-  return { SIGN_IN, useLukkAuth: () => ({ [SIGN_IN]: signInWith }) }
+vi.mock('../src/runtime/composables/useLukkAuth', async () => {
+  const { SIGN_IN } = await import('../src/runtime/utils/sign-in')
+  return { useLukkAuth: () => ({ [SIGN_IN]: signInWith }) }
 })
 
 // eslint-disable-next-line import/first

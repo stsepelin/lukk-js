@@ -1176,7 +1176,7 @@ describe('route policy follows the URL lukk receives, not the string the browser
   // The upstream URL collapses dot segments and drops a fragment, and Laravel trims a trailing slash and
   // decodes before routing — so each of these reaches lukk's own route while comparing unequal to it as
   // a string. Policy keyed on the raw string was bypassed by every one of them.
-  it.each(['/api/_lukk/./refresh', '/api/_lukk/refresh/', '/api/_lukk/a/../refresh', '/api/_lukk/refresh//'])('serves %s as the refresh it is — never proxies it', async (path) => {
+  it.each(['/api/_lukk/./refresh', '/api/_lukk/refresh/', '/api/_lukk/a/../refresh', '/api/_lukk/refresh//', '/api/_lukk/refresh///'])('serves %s as the refresh it is — never proxies it', async (path) => {
     const session = makeSession({ access: 'old', refresh: 'rt-seed' })
     const fetchMock = vi.fn(async () => jsonRes({ access_token: 'new-at', refresh_token: 'rt-1', expires_in: 900 }))
     mockFetch().fetch = fetchMock
@@ -1189,6 +1189,24 @@ describe('route policy follows the URL lukk receives, not the string the browser
     expect(String((fetchMock.mock.calls[0] as unknown[])[0])).toBe('https://lukk/auth/refresh')
     expect(String(((fetchMock.mock.calls[0] as unknown[])[1] as { body: string }).body)).toContain('rt-seed')
     expect(body).toEqual({ ok: true, expires_in: 900 })
+  })
+
+  it.each(['/api/_lukk//logout', '/api/_lukk/x//refresh', '/api/_lukk/refresh%2F%2F', '/api/_lukk/refresh/%2F', '/api/_lukk/x%2F..%2Frefresh', '/api/_lukk/x%5C..%5Crefresh'])('refuses %s, a path lukk has no route for but a slash-merging hop might', async (path) => {
+    // Policy and forwarding must agree on one URL. Collapsed for the rules but forwarded raw, `//logout`
+    // had the sealed refresh token injected and POSTed to a path lukk does not route — to whatever does,
+    // an app's fallback route included. lukk has no route with an empty or encoded-slash segment, so
+    // such a path is refused before anything is decided or sent.
+    const session = makeSession({ access: 'A', refresh: 'rA' })
+    const fetchMock = vi.fn(async () => jsonRes(null, 204))
+    mockFetch().fetch = fetchMock
+
+    const event = makeEvent({ path, method: 'POST', body: '{}', headers: sameOrigin, session })
+    const body = await run(event)
+
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(session.clear).not.toHaveBeenCalled()
+    expect(event.status).toBe(404)
+    expect(body).toEqual({ message: 'Not found.' })
   })
 
   it.each(['/api/_lukk/logout/', '/api/_lukk/./logout', '/api/_lukk/x/../logout'])('ends the session on %s like any logout', async (path) => {

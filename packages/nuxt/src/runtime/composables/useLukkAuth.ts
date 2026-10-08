@@ -2,6 +2,7 @@ import { isRegistrationPending, isTwoFactorChallenge, type LoginInput, type Logi
 import type { ComputedRef, Ref } from 'vue'
 import { computed, useNuxtApp, useRuntimeConfig, useState } from '#imports'
 import { ACCESS_KEY, CHALLENGE_KEY, CONFIRMATION_KEY, CONFIRMED_KEY, READY_KEY, RESTORE_FAILED_KEY, USER_KEY } from '../keys'
+import { SIGN_IN } from '../utils/sign-in'
 import { isAuthRejection } from '../shared'
 import { clearPendingLogout, notePendingLogout, signedInSince } from '../utils/pending-logout'
 import { acrossTabs, restoreState, settleRefresh, signIn } from '../utils/restore-state'
@@ -532,8 +533,3 @@ export function useLukkAuth(): LukkAuth {
   Object.defineProperty(auth, SIGN_IN, { value: signInWith })
   return auth
 }
-
-/** The shared sign-in completion, for lukk-nuxt's own composables. Not public API. */
-export const SIGN_IN = Symbol('lukk.signIn')
-
-export type SignInWith = (send: () => Promise<LoginResult>) => Promise<LoginResult>

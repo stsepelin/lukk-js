@@ -84,6 +84,14 @@ export default defineEventHandler(async (event) => {
   // cookie clear were each one dot away from being skipped. (`target` resolved, so the base is usable
   // and `target` lies under it.)
   const route = routeWithin(target, baseURL)!
+  // …and only on a path that reaches lukk AS WRITTEN. lukk routes nothing with an empty segment or an
+  // encoded slash or backslash (trailing slashes are fine: Laravel trims them), but a slash-merging or decoding hop in front of it might turn one into a
+  // real route. Deciding policy on the cleaned path while forwarding the raw one injected the sealed
+  // refresh token into a request lukk never received; refusing them keeps the two the same URL.
+  if (/\/{2,}[^/]|%2f|%5c/i.test(new URL(target).pathname)) {
+    setResponseStatus(event, 404)
+    return { message: 'Not found.' }
+  }
 
   // lukk stamps `Cache-Control: no-store` on every credential-bearing response; this handler
   // returns a body and a status and drops the upstream's headers, so that directive was being

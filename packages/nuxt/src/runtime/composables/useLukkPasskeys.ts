@@ -1,6 +1,7 @@
 import { credentialToJSON, type LoginResult, type PasskeyLoginOptions, type PasskeySummary, toCreationOptions, toRequestOptions } from 'lukk-core'
 import { useNuxtApp } from '#imports'
-import { SIGN_IN, type SignInWith, useLukkAuth } from './useLukkAuth'
+import { SIGN_IN, type SignInWith } from '../utils/sign-in'
+import { useLukkAuth } from './useLukkAuth'
 import { useLukkConfirmation } from './useLukkConfirmation'
 
 /**
