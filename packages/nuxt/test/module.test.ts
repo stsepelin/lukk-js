@@ -350,6 +350,13 @@ describe('lukk-nuxt module', () => {
     expect(warned({ baseURL: '/auth', mode: 'direct' })).toBe(false)
   })
 
+  it('passes the sealed session\'s lifetime through, defaulting to lukk\'s 30-day refresh_ttl', () => {
+    const dflt = setup({ baseURL: 'https://api/auth', mode: 'bff' })
+    expect((dflt.options.runtimeConfig.lukk as { sessionMaxAge: number }).sessionMaxAge).toBe(2592000)
+    const set = setup({ baseURL: 'https://api/auth', mode: 'bff', session: { password: 'x'.repeat(32), maxAge: 86400 } })
+    expect((set.options.runtimeConfig.lukk as { sessionMaxAge: number }).sessionMaxAge).toBe(86400)
+  })
+
   it('passes the auth proxy\'s body limit through, defaulting to 1 MiB', () => {
     const dflt = setup({ baseURL: 'https://api/auth', mode: 'bff' })
     expect((dflt.options.runtimeConfig.lukk as { bodyLimit: number }).bodyLimit).toBe(1024 * 1024)

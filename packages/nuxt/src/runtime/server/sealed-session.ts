@@ -1,4 +1,4 @@
-import type { H3Event } from 'h3'
+import type { H3Event, SessionConfig } from 'h3'
 import { getCookie, unsealSession } from 'h3'
 import type { TokenSession } from './utils/refresh'
 
@@ -33,4 +33,23 @@ export async function readSealedSessionWithId(event: H3Event, password: string |
   catch {
     return { data: {} }
   }
+}
+
+/** lukk's own default `refresh_ttl`: past it the refresh token inside a seal is dead anyway. */
+export const DEFAULT_SESSION_MAX_AGE = 30 * 24 * 60 * 60
+
+/**
+ * The iron options every sealed session is WRITTEN with: a lifetime, in seconds.
+ *
+ * Without one iron seals with no expiry, so a seal copied out of a browser unsealed forever — long after
+ * the session it held was over. iron stamps the expiry into the seal itself and every unseal checks it
+ * (`unsealSession`, `useSession`), so the write is the whole of it; the readers need no option to honour
+ * it. Per seal, not per session: a refresh re-seals with a fresh lifetime, and lukk's own refresh family
+ * bounds the session. (A seal written before this existed carries no expiry and is honoured until it is
+ * next re-sealed — a refresh within one access-token lifetime of its next use.)
+ *
+ * Partial on purpose: h3 spreads this OVER iron's defaults, so only `ttl` changes.
+ */
+export function sessionSeal(maxAge: number | undefined): SessionConfig['seal'] {
+  return { ttl: (maxAge ?? DEFAULT_SESSION_MAX_AGE) * 1000 } as SessionConfig['seal']
 }

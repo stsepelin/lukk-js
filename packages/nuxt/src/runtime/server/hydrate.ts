@@ -7,7 +7,7 @@ import { visitorIp } from './proxy-utils'
 import { sessionEnded, sessionKey, withholdSessionCookie } from './ended-sessions'
 import { logoutNoted } from './logout-note'
 import { revokeDroppedSession } from './revoke-dropped'
-import { readSealedSessionWithId } from './sealed-session'
+import { readSealedSessionWithId, sessionSeal } from './sealed-session'
 import { warnIfSessionTooLarge } from './session-size'
 import { refreshOnce, type TokenSession } from './utils/refresh'
 
@@ -17,6 +17,7 @@ interface LukkServerConfig {
   cookieNamespace?: string
   clientIpHeader?: string
   baseURL?: string
+  sessionMaxAge?: number
 }
 
 /**
@@ -45,7 +46,7 @@ interface LukkServerConfig {
  * unrefreshable, or failed/revoked refresh; the caller then defers to the client-side restore.
  */
 export async function resolveHydrationAccess(event: H3Event): Promise<string | null> {
-  const { sessionPassword, cookieSecure, cookieNamespace, clientIpHeader, baseURL } = (useRuntimeConfig(event).lukk ?? {}) as LukkServerConfig
+  const { sessionPassword, cookieSecure, cookieNamespace, clientIpHeader, baseURL, sessionMaxAge } = (useRuntimeConfig(event).lukk ?? {}) as LukkServerConfig
   const secure = cookieSecure !== false
   const name = sessionCookieName(secure, cookieNamespace)
 
@@ -89,6 +90,9 @@ export async function resolveHydrationAccess(event: H3Event): Promise<string | n
       // SameSite=Strict. Nothing here reads it, but leaving a door open on a session primitive
       // isn't worth the two words it costs to close.
       sessionHeader: false,
+      // Every seal written to the browser gets a lifetime (see `sessionSeal`). Not the in-process mirror
+      // below: that one never leaves this request.
+      seal: sessionSeal(sessionMaxAge),
     })
     // A session a sign-in replaced or a logout ended while this render was out is not re-sealed — that
     // would put it back in the browser. The client decides instead.

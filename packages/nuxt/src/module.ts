@@ -154,8 +154,13 @@ export interface ModuleOptions {
    * so behind a load balancer without sticky sessions — or on serverless and edge runtimes — a late
    * refresh served by another instance can still write a replaced session back. Use a strongly
    * consistent driver that expires keys (Redis, Upstash / Vercel KV) — not an eventually consistent one.
+   *
+   * `maxAge` (seconds, default 2592000 = 30 days, lukk's default `refresh_ttl`) is the lifetime of each
+   * seal written: a sealed cookie copied out of a browser stops unsealing that long after it was written.
+   * Every refresh re-seals, so an active session is bounded by lukk's refresh family instead. Keep it at
+   * least as long as lukk's `refresh_ttl`, or idle sessions end before their refresh token does.
    */
-  session: { password: string, cookieSecure?: boolean, name?: string, sharedStore?: string }
+  session: { password: string, cookieSecure?: boolean, name?: string, sharedStore?: string, maxAge?: number }
   /**
    * BFF only, optional: proxy your own app API so it's authenticated out of the
    * box. Requests to `${path}/**` are forwarded to the FIXED `target` (your
@@ -302,6 +307,7 @@ export default defineNuxtModule<ModuleOptions>({
         // come from ONE source and can't diverge under an independent runtime-config override.
         cookieNamespace: options.session.name,
         sharedStore: options.session.sharedStore ?? '',
+        sessionMaxAge: options.session.maxAge ?? 2592000,
         apiPath,
         apiTarget: options.api.target,
         apiForceJson: options.api.forceJson,

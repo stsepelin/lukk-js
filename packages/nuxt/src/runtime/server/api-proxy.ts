@@ -6,7 +6,7 @@ import { hopByHopHeaders, isForeignOrigin, reachesLukk, reportProxyFailure, reje
 import { sessionEnded, sessionKey } from './ended-sessions'
 import { logoutNoted, withholdSignedOut } from './logout-note'
 import { revokeDroppedSession } from './revoke-dropped'
-import { readSealedSession } from './sealed-session'
+import { readSealedSession, sessionSeal } from './sealed-session'
 import { refreshOnce, type TokenSession } from './utils/refresh'
 
 /**
@@ -18,7 +18,7 @@ import { refreshOnce, type TokenSession } from './utils/refresh'
  * docs/transport-modes.md.
  */
 export default defineEventHandler(async (event) => {
-  const { apiPath, apiTarget, apiForceJson, baseURL, sessionPassword, apiForwardSetCookie, cookieSecure, cookieNamespace, clientIpHeader } = useRuntimeConfig(event).lukk as {
+  const { apiPath, apiTarget, apiForceJson, baseURL, sessionPassword, apiForwardSetCookie, cookieSecure, cookieNamespace, clientIpHeader, sessionMaxAge } = useRuntimeConfig(event).lukk as {
     apiPath: string
     apiTarget: string
     apiForceJson: boolean
@@ -28,6 +28,7 @@ export default defineEventHandler(async (event) => {
     cookieSecure?: boolean
     cookieNamespace?: string
     clientIpHeader?: string
+    sessionMaxAge?: number
   }
   // Stryker disable next-line ArrayDeclaration: the list is only read as `.length` and `.includes(name)`, so a placeholder entry changes nothing unless an upstream sets a cookie named after Stryker's own sentinel.
   const forwardSetCookie = apiForwardSetCookie ?? []
@@ -107,6 +108,8 @@ export default defineEventHandler(async (event) => {
       // SameSite=Strict. Nothing here reads it (readSealedSession is cookie-only), but leaving the
       // door open on a session primitive is not worth the two words it costs to close.
       sessionHeader: false,
+      // Every seal written gets a lifetime (see `sessionSeal`).
+      seal: sessionSeal(sessionMaxAge),
     })
     // Proactive refresh: rotate ONCE (shared single-flight with the BFF proxy) so a
     // streamed request isn't spent on a guaranteed 401. A revoked session still

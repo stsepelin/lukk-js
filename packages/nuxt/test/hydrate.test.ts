@@ -154,6 +154,18 @@ describe('resolveHydrationAccess', () => {
     expect(event.node.req.headers.cookie).toBe('locale=en; __Host-lukk-session=FRESH_SEAL')
   })
 
+  it('gives the reseal the same lifetime the auth proxy does — 30 days unless configured', async () => {
+    unsealResult = { data: { access: expiredJwt(), refresh: 'r' } }
+    refreshOnce.mockResolvedValue({ pair: { access: 'NEW', refresh: 'r2' }, retryable: false })
+    await resolveHydrationAccess(ev('__Host-lukk-session=STALE'))
+    expect(useSession).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ seal: { ttl: 2592000 * 1000 } }))
+
+    configure({ sessionMaxAge: 60 })
+    refreshOnce.mockResolvedValue({ pair: { access: 'NEW2', refresh: 'r3' }, retryable: false })
+    await resolveHydrationAccess(ev('__Host-lukk-session=STALE'))
+    expect(useSession).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ seal: { ttl: 60 * 1000 } }))
+  })
+
   it('reseals with the same cookie the auth proxy sets — Strict, HttpOnly, whole-site — and never from a header', async () => {
     // Pinned on `bff.ts`, and this is the OTHER place the session cookie is written: dropping
     // `httpOnly` hands the seal to page script, a narrower `path` leaves the old seal in place for the

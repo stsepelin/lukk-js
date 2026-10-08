@@ -161,6 +161,19 @@ describe('BFF proxy', () => {
     })
   })
 
+  it('gives every seal it writes a lifetime — 30 days unless configured', async () => {
+    // Without one, iron seals with no expiry: a seal copied out of a browser unsealed forever, long
+    // after the session it held had ended. iron stamps the expiry into the seal and checks it on every
+    // unseal, so it is set where the seal is written.
+    mockFetch().fetch = vi.fn(async () => jsonRes({ access_token: 'a', refresh_token: 'r', expires_in: 900 }))
+    await run(makeEvent({ path: '/api/_lukk/login', method: 'POST', headers: sameOrigin, session: makeSession() }))
+    expect(h3state.lastSessionConfig).toMatchObject({ seal: { ttl: 2592000 * 1000 } })
+
+    ;(__test.runtimeConfig.lukk as Record<string, unknown>).sessionMaxAge = 3600
+    await run(makeEvent({ path: '/api/_lukk/login', method: 'POST', headers: sameOrigin, session: makeSession() }))
+    expect(h3state.lastSessionConfig).toMatchObject({ seal: { ttl: 3600 * 1000 } })
+  })
+
   it('writes the sealed session under the per-app namespaced cookie name', async () => {
     ;(__test.runtimeConfig.lukk as Record<string, unknown>).cookieNamespace = 'admin' // → __Host-lukk-admin-session
     const session = makeSession()

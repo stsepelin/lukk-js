@@ -6,7 +6,7 @@ import { LUKK_BFF_PREFIX, confirmationHeaderName, logoutCookieName, sessionCooki
 import { isForeignOrigin, rejectUnresolvedTarget, reportProxyFailure, resolveTarget, routeWithin, viaHeader, visitorIp } from './proxy-utils'
 import { endSession, newSessionId, sessionEnded, sessionKey, sessionReplaced, withholdSessionCookie } from './ended-sessions'
 import { revokeDroppedSession } from './revoke-dropped'
-import { readSealedSession } from './sealed-session'
+import { readSealedSession, sessionSeal } from './sealed-session'
 import { warnIfSessionTooLarge } from './session-size'
 import { refreshOnce, type TokenSession } from './utils/refresh'
 
@@ -35,7 +35,7 @@ export const DEFAULT_BODY_LIMIT = 1024 * 1024
  * ever holds the opaque session cookie, never a token.
  */
 export default defineEventHandler(async (event) => {
-  const { baseURL, sessionPassword, cookieSecure, cookieNamespace, clientIpHeader, bodyLimit } = useRuntimeConfig(event).lukk as { baseURL: string, sessionPassword: string, cookieSecure?: boolean, cookieNamespace?: string, clientIpHeader?: string, bodyLimit?: number }
+  const { baseURL, sessionPassword, cookieSecure, cookieNamespace, clientIpHeader, bodyLimit, sessionMaxAge } = useRuntimeConfig(event).lukk as { baseURL: string, sessionPassword: string, cookieSecure?: boolean, cookieNamespace?: string, clientIpHeader?: string, bodyLimit?: number, sessionMaxAge?: number }
   const method = event.method
 
   // Every response from here is ours, on the APP's origin — never let a browser second-guess its type.
@@ -69,7 +69,7 @@ export default defineEventHandler(async (event) => {
   const hasCookie = !!getCookie(event, sessionName)
   const sealed = await readSealedSession(event, sessionPassword, sessionName)
   let rwSession: ReturnType<typeof openSession> | null = null
-  const session = () => (rwSession ??= openSession(event, sessionPassword, sessionName, cookieOptions))
+  const session = () => (rwSession ??= openSession(event, sessionPassword, sessionName, cookieOptions, sessionMaxAge))
 
   // Resolve + contain the upstream URL to same-origin-under-base (defeats traversal / authority-smuggling).
   const path = event.path.slice(LUKK_BFF_PREFIX.length).split('?')[0]
@@ -366,12 +366,13 @@ async function readBoundedBody(event: H3Event, limit: number): Promise<string | 
 }
 
 /** Open the read-write sealed session (h3 mints the cookie if absent — call only when writing). */
-function openSession(event: H3Event, password: string, name: string, cookie: SessionCookieOptions) {
+function openSession(event: H3Event, password: string, name: string, cookie: SessionCookieOptions, maxAge: number | undefined) {
   // `sessionHeader: false`: h3 otherwise accepts a sealed session from the `x-<name>-session`
   // REQUEST HEADER in preference to the cookie — an auth channel outside `__Host-`, Secure,
   // HttpOnly and SameSite=Strict. Nothing here reads it, but a session primitive shouldn't leave
   // a second door open.
-  return useSession<TokenSession>(event, { password, name, cookie, sessionHeader: false })
+  // `seal`: every seal written gets a lifetime (see `sessionSeal`).
+  return useSession<TokenSession>(event, { password, name, cookie, sessionHeader: false, seal: sessionSeal(maxAge) })
 }
 
 function isConfirmation(value: unknown): value is { confirmation_token: string } {

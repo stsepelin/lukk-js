@@ -463,12 +463,24 @@ describe('app-API proxy', () => {
     sessionData = { access: expiredJwt(), refresh: 'r' }
     refreshOnce.mockResolvedValue({ pair: { access: 'new-tok', refresh: 'r2' }, retryable: false })
     await run(ev({ path: '/api/me' }))
+    // `seal` added with the seal lifetime: this exact match pinned a re-seal with NO expiry, which is
+    // the defect ("gives the re-seal a lifetime" below) — the cookie options it guards are unchanged.
     expect(useSession).toHaveBeenCalledWith(expect.anything(), {
       password: 'x'.repeat(32),
       name: '__Host-lukk-session',
       cookie: { sameSite: 'strict', secure: true, httpOnly: true, path: '/' },
       sessionHeader: false,
+      seal: { ttl: 2592000 * 1000 },
     })
+  })
+
+  it('gives the re-seal a lifetime — 30 days unless configured', async () => {
+    // A seal with no expiry unseals forever, however long ago it was copied out of a browser.
+    ;(__test.runtimeConfig.lukk as Record<string, unknown>).sessionMaxAge = 600
+    sessionData = { access: expiredJwt(), refresh: 'r' }
+    refreshOnce.mockResolvedValue({ pair: { access: 'new-tok', refresh: 'r2' }, retryable: false })
+    await run(ev({ path: '/api/me' }))
+    expect(useSession).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ seal: { ttl: 600 * 1000 } }))
   })
 
   describe('a session a sign-in replaced or a logout ended while this request was out', () => {
