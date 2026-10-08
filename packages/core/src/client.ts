@@ -236,7 +236,11 @@ export function createLukkClient(hooks: LukkClientHooks) {
     passkeyRegistrationOptions: () => request<PublicKeyCredentialCreationOptionsJSON>('/passkeys/registration-options', { method: 'POST' }),
     registerPasskey: (credential: unknown, name?: string) => request<void>('/passkeys', json({ credential, name })),
     passkeyLoginOptions: () => request<PasskeyLoginOptions>('/passkeys/login-options', { method: 'POST' }),
-    loginWithPasskey: (ceremony_id: string, credential: unknown) => request<TokenPair>('/passkeys/login', json({ ceremony_id, credential }), false).then(commit),
+    /**
+     * A token pair, or — lukk ≥ 0.7, for a single-factor assertion on an account with confirmed
+     * two-factor — a {@link TwoFactorChallenge}, completed exactly like a password sign-in's.
+     */
+    loginWithPasskey: (ceremony_id: string, credential: unknown) => request<LoginResult>('/passkeys/login', json({ ceremony_id, credential }), false).then(commit),
     listPasskeys: () => request<{ passkeys: PasskeySummary[] }>('/passkeys'),
     deletePasskey: (id: string) => request<void>(`/passkeys/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   }

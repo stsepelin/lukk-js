@@ -1220,6 +1220,37 @@ describe('a logout while a sign-in is on the wire', () => {
     expect(auth.pendingTwoFactor.value).toBe(false)
   })
 
+  it('neither ends a session nor keeps the challenge when a passkey sign-in answers with one after a logout', async () => {
+    // lukk 0.7 can answer a passkey sign-in with a two-factor challenge. Issued after the visitor
+    // logged out, it must not leave them mid-sign-in — and there is no session for a second logout.
+    const response = deferred<void>()
+    wire.client.loginWithPasskey!.mockImplementationOnce(slowSignIn('B', response.promise, () => ({ two_factor: true, challenge_token: 'c' })))
+    vi.stubGlobal('navigator', { credentials: { get: vi.fn(async () => ({ id: 'credential' })) } })
+    const bearers = logoutSpy()
+    boot()
+    const auth = useLukkAuth()
+
+    const signingIn = useLukkPasskeys().login()
+    await macrotask()
+    await auth.logout()
+    response.resolve()
+    await signingIn
+
+    expect(bearers).toEqual([null])
+    expect(auth.pendingTwoFactor.value).toBe(false)
+  })
+
+  it('records a passkey sign-in\'s challenge before anything else has read the challenge state', async () => {
+    // The first reader of the challenge state may be this sign-in, so it must create it.
+    wire.client.loginWithPasskey!.mockImplementationOnce(async () => ({ two_factor: true, challenge_token: 'c' }))
+    vi.stubGlobal('navigator', { credentials: { get: vi.fn(async () => ({ id: 'credential' })) } })
+    boot()
+
+    await useLukkPasskeys().login()
+
+    expect(useState<string | null>(CHALLENGE_KEY).value).toBe('c')
+  })
+
   it('does not end a session that a registration never issued', async () => {
     const response = deferred<void>()
     wire.client.register!.mockImplementationOnce(slowSignIn('B', response.promise, () => ({ registered: true, requires_verification: true })))

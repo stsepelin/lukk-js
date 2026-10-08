@@ -31,6 +31,32 @@ stopped lying, which can fail a typecheck that passed before, and one route-midd
 changed. No runtime API was renamed or removed, so an app that doesn't typecheck its own code
 has only the middleware entry to read.
 
+### lukk 0.7: passkey sign-in can return a two-factor challenge, and `amr` changed values
+
+**Medium impact — if you use passkeys with two-factor, or read `amr`.**
+
+`useLukkPasskeys().login()` now resolves to a `LoginResult`. When lukk answers a single-factor
+passkey with a two-factor challenge, `pendingTwoFactor` turns true and no user is loaded: show the
+same code form as after a password sign-in. `confirm()` asks the new
+`POST /auth/confirm-passkey/options` and falls back to the login options on a 404. The `Amr` type is
+now `'pwd' | 'otp' | 'pop' | 'user' | 'mfa'`; anything comparing against `'webauthn'` must move to
+`'pop'`, or to `'mfa'` for "was this multi-factor".
+
+### The proxies refuse more, and seals expire
+
+**Low impact — check if you relied on the old behaviour.**
+
+- The app-API proxy answers **404** for any target under lukk's own base path, so lukk's routes are
+  reachable only through the auth proxy and its route policy.
+- The BFF auth proxy caps request bodies at the new `bodyLimit` (1 MiB): over it is **413**, and a
+  chunked body without a length is **411**.
+- Sealed sessions carry a lifetime, the new `session.maxAge` (30 days). A seal written before this
+  release has none until it is next re-sealed.
+- In direct mode, SSR forwards the visitor's cookies only to a relative API base. An absolute API
+  no longer receives them; send what it needs explicitly.
+- `useLukkForm` drafts live under `lukk:form:<rememberKey>`, so a draft remembered under the old key
+  is not carried over.
+
 ### Every composable now declares its return type
 
 **High impact — if you run `vue-tsc` / `nuxi typecheck`.**

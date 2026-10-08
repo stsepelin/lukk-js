@@ -104,7 +104,7 @@ form.data = { email: '', remember: true }
 // --- useLukkPasskeys --------------------------------------------------------------------------------
 const passkeys = useLukkPasskeys()
 expectTypeOf(passkeys.register).toEqualTypeOf<(name?: string) => Promise<void>>()
-expectTypeOf(passkeys.login).toEqualTypeOf<() => Promise<void>>()
+expectTypeOf(passkeys.login).toEqualTypeOf<() => Promise<LoginResult>>()
 expectTypeOf(passkeys.confirm).toEqualTypeOf<() => Promise<void>>()
 expectTypeOf(passkeys.list).toEqualTypeOf<() => Promise<{ passkeys: PasskeySummary[] }>>()
 expectTypeOf(passkeys.remove).toEqualTypeOf<(id: string) => Promise<void>>()
