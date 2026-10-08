@@ -6,8 +6,12 @@
  * must not drift from the server. Endpoint paths assume the default `auth` prefix.
  */
 
-/** Authentication methods recorded in the access token's `amr` claim. */
-export type Amr = 'pwd' | 'otp' | 'webauthn'
+/**
+ * Authentication methods recorded in the access token's `amr` claim — only values registered under
+ * RFC 8176. A passkey is `pop` + `user` (possession + presence); `mfa` marks a multi-factor session
+ * (a password with a one-time code, or a user-verifying passkey). lukk < 0.7 sent `webauthn`.
+ */
+export type Amr = 'pwd' | 'otp' | 'pop' | 'user' | 'mfa'
 
 /** A successful login / refresh — the token pair. In cookie/BFF mode the
  *  refresh token is delivered out-of-band (cookie / sealed session), so it is

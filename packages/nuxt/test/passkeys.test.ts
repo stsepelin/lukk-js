@@ -56,7 +56,7 @@ describe('useLukkPasskeys', () => {
 
   it('earns step-up confirmation with a passkey', async () => {
     const $lukk = {
-      passkeyLoginOptions: vi.fn().mockResolvedValue({ ceremony_id: 'cer', options: { challenge: 'c' } }),
+      passkeyConfirmationOptions: vi.fn().mockResolvedValue({ ceremony_id: 'cer', options: { challenge: 'c' } }),
       confirmPasskey: vi.fn().mockResolvedValue({ confirmation_token: 'tok' }),
     }
     __test.nuxtApp = { $lukk }
@@ -82,6 +82,67 @@ describe('useLukkPasskeys', () => {
   })
 })
 
+describe('passkey step-up options', () => {
+  // lukk asks a step-up for `userVerification: required` whenever the account can reach AAL2, and
+  // lists the user's own credentials — only its authenticated options route knows that. The anonymous
+  // login options ask for less, and lukk refuses an assertion made against them on such an account.
+
+  it('asks the step-up options route, not the anonymous login one', async () => {
+    const $lukk = {
+      passkeyConfirmationOptions: vi.fn().mockResolvedValue({ ceremony_id: 'step', options: { challenge: 'c' } }),
+      passkeyLoginOptions: vi.fn(),
+      confirmPasskey: vi.fn().mockResolvedValue({ confirmation_token: 'tok' }),
+    }
+    __test.nuxtApp = { $lukk }
+    withNavigator(vi.fn(), vi.fn().mockResolvedValue({ id: 'cred-6' }))
+
+    await useLukkPasskeys().confirm()
+
+    expect($lukk.passkeyLoginOptions).not.toHaveBeenCalled()
+    expect($lukk.confirmPasskey).toHaveBeenCalledWith('step', { serialized: 'cred-6' })
+  })
+
+  it('falls back to the login options on a lukk that predates the route', async () => {
+    const $lukk = {
+      passkeyConfirmationOptions: vi.fn().mockRejectedValue({ status: 404 }),
+      passkeyLoginOptions: vi.fn().mockResolvedValue({ ceremony_id: 'old', options: { challenge: 'c' } }),
+      confirmPasskey: vi.fn().mockResolvedValue({ confirmation_token: 'tok' }),
+    }
+    __test.nuxtApp = { $lukk }
+    withNavigator(vi.fn(), vi.fn().mockResolvedValue({ id: 'cred-7' }))
+
+    await useLukkPasskeys().confirm()
+
+    expect($lukk.confirmPasskey).toHaveBeenCalledWith('old', { serialized: 'cred-7' })
+  })
+
+  it('does not fall back on any other failure', async () => {
+    const $lukk = {
+      passkeyConfirmationOptions: vi.fn().mockRejectedValue({ status: 429 }),
+      passkeyLoginOptions: vi.fn(),
+      confirmPasskey: vi.fn(),
+    }
+    __test.nuxtApp = { $lukk }
+    withNavigator(vi.fn(), vi.fn())
+
+    await expect(useLukkPasskeys().confirm()).rejects.toMatchObject({ status: 429 })
+    expect($lukk.passkeyLoginOptions).not.toHaveBeenCalled()
+  })
+
+  it('abandons the pending confirmation when the options route itself is forbidden', async () => {
+    // The options route carries the same pinned-ability gate as `confirm-passkey`, so for a machine
+    // token the 403 now arrives one step earlier — and must still release the modal.
+    __test.nuxtApp = { $lukk: { passkeyConfirmationOptions: vi.fn().mockRejectedValue({ status: 403 }), confirmPasskey: vi.fn() } }
+    withNavigator(vi.fn(), vi.fn())
+
+    const { required } = useLukkConfirmation()
+    required.value = true
+
+    await expect(useLukkPasskeys().confirm()).rejects.toMatchObject({ status: 403 })
+    expect(required.value).toBe(false)
+  })
+})
+
 describe('passkey step-up a pinned token cannot earn', () => {
   it('abandons the pending confirmation on a 403, like the password path', async () => {
     // `confirm-passkey` is the OTHER way into step-up, and lukk gates both for a machine token.
@@ -89,7 +150,7 @@ describe('passkey step-up a pinned token cannot earn', () => {
     // waits on a `confirmed` flag that can never flip for a token lacking `lukk.account`.
     __test.nuxtApp = {
       $lukk: {
-        passkeyLoginOptions: vi.fn().mockResolvedValue({ ceremony_id: 'cer', options: { challenge: 'c' } }),
+        passkeyConfirmationOptions: vi.fn().mockResolvedValue({ ceremony_id: 'cer', options: { challenge: 'c' } }),
         confirmPasskey: vi.fn().mockRejectedValue({ status: 403 }),
       },
     }
@@ -106,7 +167,7 @@ describe('passkey step-up a pinned token cannot earn', () => {
   it('leaves a pending confirmation alone when the assertion is merely rejected', async () => {
     __test.nuxtApp = {
       $lukk: {
-        passkeyLoginOptions: vi.fn().mockResolvedValue({ ceremony_id: 'cer', options: { challenge: 'c' } }),
+        passkeyConfirmationOptions: vi.fn().mockResolvedValue({ ceremony_id: 'cer', options: { challenge: 'c' } }),
         confirmPasskey: vi.fn().mockRejectedValue({ status: 422 }),
       },
     }

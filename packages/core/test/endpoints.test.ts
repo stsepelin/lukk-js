@@ -19,6 +19,7 @@ describe('endpoint methods → route + verb', () => {
     ['exportAccount', c => c.exportAccount(), 'https://x/auth/account/export', undefined],
     ['confirmPassword', c => c.confirmPassword('p'), 'https://x/auth/confirm-password', 'POST'],
     ['confirmPasskey', c => c.confirmPasskey('cid', { id: 'c' }), 'https://x/auth/confirm-passkey', 'POST'],
+    ['passkeyConfirmationOptions', c => c.passkeyConfirmationOptions(), 'https://x/auth/confirm-passkey/options', 'POST'],
     ['twoFactorChallenge', c => c.twoFactorChallenge({ challenge_token: 't', code: '1' }), 'https://x/auth/two-factor-challenge', 'POST'],
     ['refreshTokens(token)', c => c.refreshTokens('rt'), 'https://x/auth/refresh', 'POST'],
     ['refreshTokens()', c => c.refreshTokens(), 'https://x/auth/refresh', 'POST'],

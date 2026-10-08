@@ -217,6 +217,13 @@ export function createLukkClient(hooks: LukkClientHooks) {
     // --- step-up confirmation ---
     confirmPassword: (password: string) => request<ConfirmationToken>('/confirm-password', json({ password })),
     confirmPasskey: (ceremony_id: string, credential: unknown) => request<ConfirmationToken>('/confirm-passkey', json({ ceremony_id, credential })),
+    /**
+     * Options for a passkey STEP-UP (lukk ≥ 0.7). Unlike `passkeyLoginOptions`, lukk lists the user's
+     * own credentials and asks for `userVerification: required` when the account can reach AAL2 — and
+     * then enforces it, so an assertion made against the anonymous login options can be refused.
+     * A 404 means a lukk that predates the route.
+     */
+    passkeyConfirmationOptions: () => request<PasskeyLoginOptions>('/confirm-passkey/options', { method: 'POST' }),
 
     // --- 2FA management (behind step-up) ---
     enableTwoFactor: () => request<TwoFactorEnrollment>('/two-factor', { method: 'POST' }),

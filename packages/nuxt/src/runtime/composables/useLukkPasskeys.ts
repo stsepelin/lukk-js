@@ -1,4 +1,4 @@
-import { credentialToJSON, type PasskeySummary, toCreationOptions, toRequestOptions } from 'lukk-core'
+import { credentialToJSON, type PasskeyLoginOptions, type PasskeySummary, toCreationOptions, toRequestOptions } from 'lukk-core'
 import { useNuxtApp } from '#imports'
 import { signIn } from '../utils/restore-state'
 import { useLukkAuth } from './useLukkAuth'
@@ -44,10 +44,10 @@ export function useLukkPasskeys(): LukkPasskeys {
 
   /** Earn step-up confirmation with a passkey (recorded via `useLukkConfirmation`). */
   async function confirm(): Promise<void> {
-    const assertion = await assert()
     const confirmation = useLukkConfirmation()
 
     try {
+      const assertion = await assert(stepUpOptions)
       confirmation.record(await $lukk.confirmPasskey(assertion.ceremony_id, assertion.credential))
     }
     catch (error) {
@@ -68,9 +68,23 @@ export function useLukkPasskeys(): LukkPasskeys {
     return $lukk.deletePasskey(id)
   }
 
+  /**
+   * The step-up's own options, which carry the user-verification requirement lukk will enforce. A
+   * lukk that predates the route answers 404, and only then do the anonymous login options stand in.
+   */
+  async function stepUpOptions(): Promise<PasskeyLoginOptions> {
+    try {
+      return await $lukk.passkeyConfirmationOptions()
+    }
+    catch (error) {
+      if ((error as { status?: number }).status !== 404) throw error
+      return $lukk.passkeyLoginOptions()
+    }
+  }
+
   /** Run the assertion ceremony once (shared by login + confirm). */
-  async function assert(): Promise<{ ceremony_id: string, credential: Record<string, unknown> }> {
-    const { ceremony_id, options } = await $lukk.passkeyLoginOptions()
+  async function assert(options_: () => Promise<PasskeyLoginOptions> = () => $lukk.passkeyLoginOptions()): Promise<{ ceremony_id: string, credential: Record<string, unknown> }> {
+    const { ceremony_id, options } = await options_()
     const credential = await navigator.credentials.get({ publicKey: toRequestOptions(options) }) as PublicKeyCredential
     return { ceremony_id, credential: credentialToJSON(credential) }
   }
