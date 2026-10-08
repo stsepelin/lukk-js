@@ -131,4 +131,55 @@ describe('createLukkFetch through real ofetch', () => {
     expect(seen[0]!.headers.get('authorization')).toBe('Bearer SECRET')
     expect(seen[0]!.credentials).toBe('include')
   })
+
+  it('keeps an Accept the caller set, and asks for JSON only when there is none', async () => {
+    // Forced unconditionally, it clobbered the caller's choice — the documented `api.forceJson: false`
+    // escape hatch for a non-JSON route could not be used through `useLukkFetch` at all.
+    const { api, seen } = drive()
+
+    await api('/report.csv', { headers: { Accept: 'text/csv' } })
+    await api('/me')
+
+    expect(seen[0]!.headers.get('accept')).toBe('text/csv')
+    expect(seen[1]!.headers.get('accept')).toBe('application/json')
+  })
+})
+
+describe('the visitor\'s cookies, on the server', () => {
+  // On SSR, `getCookieHeader` is EVERY cookie the browser sent this app — analytics, CSRF, a co-hosted
+  // app's session. They belong to the app's origin. The only place they may go is the app itself (the
+  // BFF proxy mount, resolved in-process); an absolute API is another host, whose own cookies the browser
+  // never sent here in the first place.
+  const server = { isServer: true, getBearer: () => null, getCookieHeader: () => '_ga=GA1; XSRF-TOKEN=x; other-app-session=s' }
+
+  it('are never sent to an absolute API base (direct mode)', async () => {
+    const { api, seen } = drive({ ...server, baseURL: 'https://api.example.com' })
+
+    await api('/me')
+    await api('https://api.example.com/me')
+
+    expect(seen.map(s => s.url)).toEqual(['https://api.example.com/me', 'https://api.example.com/me'])
+    expect(seen.map(s => s.headers.get('cookie'))).toEqual([null, null])
+  })
+
+  it('go to the app\'s own proxy mount (bff mode)', async () => {
+    const { api, seen } = drive({ ...server, baseURL: '/api' })
+
+    await api('/me')
+
+    expect(seen[0]!.url).toBe('/api/me')
+    expect(seen[0]!.headers.get('cookie')).toBe('_ga=GA1; XSRF-TOKEN=x; other-app-session=s')
+  })
+
+  it('never follow the request\'s own idea of this app\'s origin to an absolute URL', async () => {
+    // On the server, `origin` is read from `Host` / `X-Forwarded-*` — whatever the request said. Trusted,
+    // an absolute URL on a host the request named was cleared as "this app" and handed the sealed session.
+    const { api, seen } = drive({ ...server, baseURL: '/api', origin: 'https://evil.example' })
+
+    await api('https://evil.example/collect')
+    await api('/me', { baseURL: 'https://evil.example/api' })
+
+    expect(seen.map(s => s.headers.get('cookie'))).toEqual([null, null])
+    expect(seen.map(s => s.credentials)).toEqual(['same-origin', 'same-origin'])
+  })
 })
