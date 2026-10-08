@@ -3,7 +3,7 @@ import { isTokenPair } from 'lukk-core'
 import { defineEventHandler, deleteCookie, getCookie, getRequestHeader, readRawBody, setResponseHeader, setResponseStatus, useSession } from 'h3'
 import { useRuntimeConfig } from '#imports'
 import { LUKK_BFF_PREFIX, confirmationHeaderName, logoutCookieName, sessionCookieName, signedOutCookieName } from '../shared'
-import { isForeignOrigin, rejectUnresolvedTarget, reportProxyFailure, resolveTarget, viaHeader, visitorIp } from './proxy-utils'
+import { isForeignOrigin, rejectUnresolvedTarget, reportProxyFailure, resolveTarget, routeWithin, viaHeader, visitorIp } from './proxy-utils'
 import { endSession, newSessionId, sessionEnded, sessionKey, sessionReplaced, withholdSessionCookie } from './ended-sessions'
 import { revokeDroppedSession } from './revoke-dropped'
 import { readSealedSession } from './sealed-session'
@@ -21,6 +21,13 @@ type SessionCookieOptions = { sameSite: 'strict', secure: boolean, httpOnly: tru
 const SIGN_IN_PATHS = new Set(['/login', '/register', '/two-factor-challenge', '/passkeys/login'])
 
 /**
+ * The largest request body this proxy reads, in bytes, unless `runtimeConfig.lukk.bodyLimit` says
+ * otherwise. Generous for anything lukk accepts — a passkey attestation is a few KiB — and a hard
+ * ceiling for what an anonymous caller can make this server hold in memory.
+ */
+export const DEFAULT_BODY_LIMIT = 1024 * 1024
+
+/**
  * The BFF proxy. The browser calls `/api/_lukk/*`; this handler attaches the
  * access token (and step-up confirmation token) from a sealed, server-side
  * session, proxies to the real lukk URL, refreshes server-side on a 401, and
@@ -28,8 +35,11 @@ const SIGN_IN_PATHS = new Set(['/login', '/register', '/two-factor-challenge', '
  * ever holds the opaque session cookie, never a token.
  */
 export default defineEventHandler(async (event) => {
-  const { baseURL, sessionPassword, cookieSecure, cookieNamespace, clientIpHeader } = useRuntimeConfig(event).lukk as { baseURL: string, sessionPassword: string, cookieSecure?: boolean, cookieNamespace?: string, clientIpHeader?: string }
+  const { baseURL, sessionPassword, cookieSecure, cookieNamespace, clientIpHeader, bodyLimit } = useRuntimeConfig(event).lukk as { baseURL: string, sessionPassword: string, cookieSecure?: boolean, cookieNamespace?: string, clientIpHeader?: string, bodyLimit?: number }
   const method = event.method
+
+  // Every response from here is ours, on the APP's origin — never let a browser second-guess its type.
+  setResponseHeader(event, 'x-content-type-options', 'nosniff')
 
   // Secure/`__Host-` in prod + dev-https, relaxed for dev-http (see module cookieSecure). Default to
   // secure when unset so a misread config can never silently drop Secure. The name's `__Host-` prefix
@@ -67,6 +77,13 @@ export default defineEventHandler(async (event) => {
   const subpath = path || '/'
   const target = resolveTarget(baseURL, subpath)
   if (!target) return rejectUnresolvedTarget(event, baseURL, 'lukk `baseURL`', subpath)
+  // Every route rule below is decided on THIS — the route lukk's router will match for `target` — never
+  // on `subpath`. The upstream URL collapses dot segments and Laravel trims a trailing slash, so
+  // `/./refresh`, `/refresh/` and `/a/../refresh` all reach lukk's refresh route while comparing unequal
+  // to '/refresh' as strings: the never-proxy-refresh rule, the sign-in no-retry rule and the logout's
+  // cookie clear were each one dot away from being skipped. (`target` resolved, so the base is usable
+  // and `target` lies under it.)
+  const route = routeWithin(target, baseURL)!
 
   // lukk stamps `Cache-Control: no-store` on every credential-bearing response; this handler
   // returns a body and a status and drops the upstream's headers, so that directive was being
@@ -81,12 +98,18 @@ export default defineEventHandler(async (event) => {
   // The option mirrors lukk's own `confirm.header`, so a rename has to reach lukk too — hardcoding
   // the default here would silently break step-up for anyone who changed it on both sides.
   const confirmationHeader = confirmationHeaderName((useRuntimeConfig(event).public.lukk as { confirmationHeader?: string }).confirmationHeader)
-  const rawBody = method === 'GET' || method === 'HEAD' ? undefined : await readRawBody(event)
+  const rawBody = method === 'GET' || method === 'HEAD' ? undefined : await readBoundedBody(event, bodyLimit ?? DEFAULT_BODY_LIMIT)
+  // Buffered before anything else happens, on routes an anonymous caller can reach: without a ceiling,
+  // one request could make this server hold whatever it cared to send.
+  if (typeof rawBody === 'number') {
+    setResponseStatus(event, rawBody)
+    return { message: rawBody === 413 ? 'Request body too large.' : 'Length required.' }
+  }
 
   // A logout also presents the session's refresh token. lukk releases that accept one end the session
   // with it even when the access token has expired and a refresh is throttled or failing — and without
   // spending a rotation first. Older releases ignore the field and use the bearer, as before.
-  const endsSession = subpath === '/logout'
+  const endsSession = route === '/logout'
   let logoutRefresh = sealed.refresh
 
   function callLukk(access: string | undefined): Promise<Response> {
@@ -123,7 +146,7 @@ export default defineEventHandler(async (event) => {
   // one rotation burned per attempt, and still a 401. `restore()` on app load is exactly this call,
   // so in BFF mode it could never succeed, and two tabs reloading would replay a consumed token
   // past the grace window — the false family revoke this package exists to avoid.
-  if (subpath === '/refresh') {
+  if (route === '/refresh') {
     // Read-only until we know there is something to rotate: opening the session would mint a
     // cookie for an anonymous caller.
     if (!sealed.refresh) {
@@ -171,14 +194,14 @@ export default defineEventHandler(async (event) => {
   // A refresh that failed without lukk rejecting the token (a throttle, an outage): the session is live.
   let stillRefreshable = false
 
-  if (res.status === 401 && sealed.refresh && !SIGN_IN_PATHS.has(subpath)) {
+  if (res.status === 401 && sealed.refresh && !SIGN_IN_PATHS.has(route)) {
     const s = await session()
     // A session a sign-in replaced or a logout ended is neither rotated nor written — before the
     // refresh or after it — and the 401 goes back as it came. See the `/refresh` branch above.
     const ended = () => sessionEnded(sessionKey(s))
     // Except for a logout: it still renews an ended session's token — never writing it back — so that
     // lukk actually revokes it. Skipping it left a replaced session's family alive after the logout.
-    const endingIt = subpath === '/logout'
+    const endingIt = endsSession
 
     if (endingIt || !(await ended())) {
       const { pair, retryable } = await refreshOnce(s, baseURL, clientIp)
@@ -222,7 +245,8 @@ export default defineEventHandler(async (event) => {
   }
 
   const text = await res.text()
-  const data: unknown = text ? safeParse(text) : undefined
+  const parsed = text ? safeParse(text) : undefined
+  const data = parsed?.json
 
   // Reading the body can take as long as the upstream likes. A session re-sealed above that a sign-in or
   // logout ended meanwhile must not leave with this response — the last point before it does.
@@ -283,7 +307,7 @@ export default defineEventHandler(async (event) => {
   const sessionOver = res.ok || ((res.status === 401 || res.status === 403) && !stillRefreshable)
 
   // Only clear an existing cookie — never mint one just to expire it.
-  if (subpath === '/logout' && hasCookie && sessionOver) {
+  if (endsSession && hasCookie && sessionOver) {
     const s = await session()
     const unsealed = Boolean(sealed.access || sealed.refresh)
     // Not for a session a sign-in has ALREADY replaced: the browser holds the newer cookie, and clearing
@@ -306,8 +330,40 @@ export default defineEventHandler(async (event) => {
   // needs a string `access_token`), so a body that ALMOST matches — `{"access_token": null,
   // "refresh_token": "..."}` — skipped the strip and shipped a rotating refresh token to the
   // browser, the one thing BFF mode exists to prevent. Capture on a match; redact regardless.
-  return redactCredentials(data) ?? text
+  //
+  // And say what it is. h3 sends a returned string as `text/html` (and a `null` as an empty 204), so a
+  // non-JSON body — a WAF or proxy error page, anything that echoes the request — rendered as HTML on
+  // the APP's origin, cookies in scope: a reflected-XSS vector. JSON goes out as JSON, serialized here
+  // when it is a bare scalar so it keeps its JSON form; anything else goes out as plain text.
+  if (!parsed) {
+    setResponseHeader(event, 'content-type', 'text/plain; charset=utf-8')
+    return text
+  }
+  setResponseHeader(event, 'content-type', 'application/json; charset=utf-8')
+  const body = redactCredentials(data)
+  return typeof body === 'object' && body !== null ? body : JSON.stringify(body)
 })
+
+/**
+ * The request body as text (`undefined` when there is none), or the status refusing it: 413 over
+ * `limit` bytes, 411 for a body that declares no length at all.
+ *
+ * Bounded BEFORE anything is read, on the declared `Content-Length`. That is sound because Node's
+ * HTTP parser enforces it — it reads exactly that many bytes, and anything after belongs to the next
+ * request — so the one way to send an unbounded body is chunked transfer coding, which declares
+ * nothing; that is refused (RFC 9110 §15.5.12). No browser sends a chunked body for a string or a
+ * `FormData`, and h3 reads no body at all from a request that has neither. Measured again once read,
+ * for a runtime that hands h3 a body some other way (an edge preset buffers it before we get here).
+ */
+async function readBoundedBody(event: H3Event, limit: number): Promise<string | undefined | 411 | 413> {
+  const declared = getRequestHeader(event, 'content-length')
+  if (Number(declared) > limit) return 413
+  if (!declared && /\bchunked\b/i.test(String(getRequestHeader(event, 'transfer-encoding')))) return 411
+
+  const body = await readRawBody(event)
+  // `encode(undefined)` is empty: no body measures 0.
+  return new TextEncoder().encode(body).byteLength > limit ? 413 : body
+}
 
 /** Open the read-write sealed session (h3 mints the cookie if absent — call only when writing). */
 function openSession(event: H3Event, password: string, name: string, cookie: SessionCookieOptions) {
@@ -323,10 +379,11 @@ function isConfirmation(value: unknown): value is { confirmation_token: string }
     && typeof (value as { confirmation_token?: unknown }).confirmation_token === 'string'
 }
 
-function safeParse(text: string): unknown {
-  try { return JSON.parse(text) }
-  // Stryker disable next-line BlockStatement: equivalent — an emptied catch yields undefined, which no capture matches and the handler's final `?? text` turns back into the text.
-  catch { return text }
+/** The parsed JSON, boxed so a body that IS `null` tells apart from one that isn't JSON (`undefined`). */
+function safeParse(text: string): { json: unknown } | undefined {
+  try { return { json: JSON.parse(text) } }
+  // Stryker disable next-line BlockStatement: equivalent — an emptied catch returns undefined, the same value.
+  catch { return undefined }
 }
 
 /**

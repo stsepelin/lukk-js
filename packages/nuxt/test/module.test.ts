@@ -350,6 +350,13 @@ describe('lukk-nuxt module', () => {
     expect(warned({ baseURL: '/auth', mode: 'direct' })).toBe(false)
   })
 
+  it('passes the auth proxy\'s body limit through, defaulting to 1 MiB', () => {
+    const dflt = setup({ baseURL: 'https://api/auth', mode: 'bff' })
+    expect((dflt.options.runtimeConfig.lukk as { bodyLimit: number }).bodyLimit).toBe(1024 * 1024)
+    const set = setup({ baseURL: 'https://api/auth', mode: 'bff', bodyLimit: 4096 })
+    expect((set.options.runtimeConfig.lukk as { bodyLimit: number }).bodyLimit).toBe(4096)
+  })
+
   it('passes clientIpHeader through lower-cased, and defaults to off', () => {
     // Node lower-cases incoming header names, so the runtime lookup only matches lower-case.
     const off = setup({ baseURL: 'https://api/auth', mode: 'bff' })

@@ -193,6 +193,14 @@ export interface ModuleOptions {
    * @default '' (off)
    */
   clientIpHeader: string
+  /**
+   * BFF only: the largest request body, in bytes, the auth proxy (`/api/_lukk/**`) reads. Larger
+   * answers `413`, and a chunked body — which declares no length to check — answers `411`. Its routes
+   * are reachable unauthenticated and the body is buffered, so this bounds what one request can make
+   * the server hold. The app-API proxy streams and is unaffected.
+   * @default 1048576 (1 MiB)
+   */
+  bodyLimit?: number
 }
 
 export default defineNuxtModule<ModuleOptions>({
@@ -301,6 +309,7 @@ export default defineNuxtModule<ModuleOptions>({
         // Canonicalised for readability in the resolved config; h3 lower-cases the lookup itself,
         // so matching does not depend on this.
         clientIpHeader: options.clientIpHeader.toLowerCase(),
+        bodyLimit: options.bodyLimit ?? 1024 * 1024,
       },
     )
 

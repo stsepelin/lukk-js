@@ -1158,3 +1158,163 @@ describe('what the auth proxy sends, and answers', () => {
     expect(body).toEqual({ a: { b: { c: { d: { e: { f: { keep: 1 } } } } } } })
   })
 })
+
+describe('route policy follows the URL lukk receives, not the string the browser sent', () => {
+  // The upstream URL collapses dot segments and drops a fragment, and Laravel trims a trailing slash and
+  // decodes before routing — so each of these reaches lukk's own route while comparing unequal to it as
+  // a string. Policy keyed on the raw string was bypassed by every one of them.
+  it.each(['/api/_lukk/./refresh', '/api/_lukk/refresh/', '/api/_lukk/a/../refresh', '/api/_lukk/refresh//'])('serves %s as the refresh it is — never proxies it', async (path) => {
+    const session = makeSession({ access: 'old', refresh: 'rt-seed' })
+    const fetchMock = vi.fn(async () => jsonRes({ access_token: 'new-at', refresh_token: 'rt-1', expires_in: 900 }))
+    mockFetch().fetch = fetchMock
+
+    const body = await run(makeEvent({ path, method: 'POST', headers: sameOrigin, body: '{}', session }))
+
+    // One upstream call, carrying the SEALED token: proxied, it would have sent the browser's body and
+    // then rotated on the 401 — and the token pair would have come back through the generic path.
+    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(String((fetchMock.mock.calls[0] as unknown[])[0])).toBe('https://lukk/auth/refresh')
+    expect(String(((fetchMock.mock.calls[0] as unknown[])[1] as { body: string }).body)).toContain('rt-seed')
+    expect(body).toEqual({ ok: true, expires_in: 900 })
+  })
+
+  it.each(['/api/_lukk/logout/', '/api/_lukk/./logout', '/api/_lukk/x/../logout'])('ends the session on %s like any logout', async (path) => {
+    const session = makeSession({ access: 'A', refresh: 'rA' })
+    mockFetch().fetch = vi.fn(async () => jsonRes(null, 204))
+
+    await run(makeEvent({ path, method: 'POST', body: 'ignored', headers: sameOrigin, session }))
+
+    const init = mockFetch().fetch.mock.calls[0]![1] as { body: string }
+    expect(JSON.parse(init.body)).toEqual({ refresh_token: 'rA' })
+    expect(session.clear).toHaveBeenCalledOnce()
+  })
+
+  it.each(['/api/_lukk/login/', '/api/_lukk/./register', '/api/_lukk/passkeys/x/../login', '/api/_lukk/two-factor-challenge//'])('passes a 401 from %s straight through, like the sign-in it is', async (path) => {
+    const session = makeSession({ access: 'old', refresh: 'rt' })
+    mockFetch().fetch = vi.fn().mockResolvedValue(jsonRes({ message: 'Unauthenticated.' }, 401))
+
+    const event = makeEvent({ path, method: 'POST', body: '{}', headers: sameOrigin, session })
+    await run(event)
+
+    expect(event.status).toBe(401)
+    expect(mockFetch().fetch).toHaveBeenCalledOnce()
+    expect(session.update).not.toHaveBeenCalled()
+  })
+
+  it('treats an encoded `#` as path data, which neither the policy nor lukk reads as /refresh', async () => {
+    // `%23` arrives decoded; left bare, the URL parser dropped it as a fragment and lukk saw `/refresh`.
+    const session = makeSession({ access: 'A' })
+    mockFetch().fetch = vi.fn(async () => jsonRes({ message: 'Not Found' }, 404))
+
+    await run(makeEvent({ path: '/api/_lukk/refresh#x', method: 'POST', body: '{}', headers: sameOrigin, session }))
+
+    expect(mockFetch().fetch.mock.calls[0]![0]).toBe('https://lukk/auth/refresh%23x')
+  })
+})
+
+describe('response hygiene', () => {
+  it('sends a non-JSON upstream body as text/plain, never as HTML', async () => {
+    // A WAF or proxy error page, or anything echoing the request, went out as `text/html` on the APP's
+    // origin — a reflected-XSS vector with this app's cookies in scope.
+    const event = makeEvent({ path: '/api/_lukk/x', session: makeSession({ access: 'A' }) })
+    mockFetch().fetch = vi.fn(async () => new Response('<script>alert(1)</script>', { status: 502, headers: { 'content-type': 'text/html' } }))
+
+    expect(await run(event)).toBe('<script>alert(1)</script>')
+    expect(event.__res?.['content-type']).toBe('text/plain; charset=utf-8')
+  })
+
+  it('labels a JSON body as JSON, including one h3 would otherwise send as HTML or as no content', async () => {
+    const cases: [string, unknown][] = [['{"a":1}', { a: 1 }], ['"<b>hi</b>"', '"<b>hi</b>"'], ['null', 'null'], ['42', '42'], ['true', 'true']]
+    for (const [text, expected] of cases) {
+      const event = makeEvent({ path: '/api/_lukk/x', session: makeSession({ access: 'A' }) })
+      mockFetch().fetch = vi.fn(async () => new Response(text, { status: 200 }))
+      expect(await run(event), text).toEqual(expected)
+      expect(event.__res?.['content-type'], text).toBe('application/json; charset=utf-8')
+    }
+  })
+
+  it('answers an empty upstream body as empty text', async () => {
+    const event = makeEvent({ path: '/api/_lukk/x', session: makeSession({ access: 'A' }) })
+    mockFetch().fetch = vi.fn(async () => new Response(null, { status: 204 }))
+    expect(await run(event)).toBe('')
+    expect(event.__res?.['content-type']).toBe('text/plain; charset=utf-8')
+  })
+
+  it('forbids MIME sniffing on every response, including the ones it refuses', async () => {
+    const refused = makeEvent({ path: '/api/_lukk/login', method: 'POST', headers: { origin: 'https://evil.example', host: 'app.example.com' }, session: makeSession() })
+    await run(refused)
+    expect(refused.status).toBe(403)
+    expect(refused.__res?.['x-content-type-options']).toBe('nosniff')
+
+    const escaped = makeEvent({ path: '/api/_lukk/../../etc', session: makeSession() })
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    await run(escaped)
+    expect(escaped.status).toBe(400)
+    expect(escaped.__res?.['x-content-type-options']).toBe('nosniff')
+
+    const proxied = makeEvent({ path: '/api/_lukk/x', session: makeSession({ access: 'A' }) })
+    mockFetch().fetch = vi.fn(async () => jsonRes({ ok: true }))
+    await run(proxied)
+    expect(proxied.__res?.['x-content-type-options']).toBe('nosniff')
+  })
+})
+
+describe('request body size', () => {
+  // The body is buffered before anything else happens, on routes an anonymous caller can reach — so an
+  // unbounded read let one request hold as much memory as it cared to send.
+  it('answers 413 to a declared Content-Length over the limit, without reading or calling lukk', async () => {
+    mockFetch().fetch = vi.fn()
+    const event = makeEvent({ path: '/api/_lukk/login', method: 'POST', body: '{}', headers: { ...sameOrigin, 'content-length': String(1024 * 1024 + 1) }, session: makeSession() })
+
+    expect(await run(event)).toEqual({ message: 'Request body too large.' })
+    expect(event.status).toBe(413)
+    expect(mockFetch().fetch).not.toHaveBeenCalled()
+  })
+
+  it('answers 411 to a chunked body, which declares no length to bound it by', async () => {
+    // Node enforces a declared Content-Length, so chunked coding is the one way to send an unbounded
+    // body — and h3 would buffer all of it.
+    mockFetch().fetch = vi.fn()
+    for (const te of ['chunked', 'gzip, Chunked']) {
+      const event = makeEvent({ path: '/api/_lukk/register', method: 'POST', body: '{}', headers: { ...sameOrigin, 'transfer-encoding': te }, session: makeSession() })
+      expect(await run(event)).toEqual({ message: 'Length required.' })
+      expect(event.status).toBe(411)
+    }
+    // A declared length bounds it, whatever else the request says.
+    const declared = makeEvent({ path: '/api/_lukk/register', method: 'POST', body: '{}', headers: { ...sameOrigin, 'transfer-encoding': 'chunked', 'content-length': '2' }, session: makeSession() })
+    mockFetch().fetch = vi.fn(async () => jsonRes({ ok: true }))
+    await run(declared)
+    expect(declared.status).toBe(200)
+  })
+
+  it('answers 413 to a body that turns out larger than the limit once read', async () => {
+    // A runtime that hands h3 the body some other way (an edge preset buffers it first) declares
+    // nothing Node enforced, so the bytes are measured too.
+    mockFetch().fetch = vi.fn()
+    const event = makeEvent({ path: '/api/_lukk/register', method: 'POST', body: 'é'.repeat(512 * 1024) + 'x', headers: sameOrigin, session: makeSession() })
+    await run(event)
+    expect(event.status).toBe(413)
+    expect(mockFetch().fetch).not.toHaveBeenCalled()
+  })
+
+  it('reads a body of exactly the limit, in bytes, and forwards it intact', async () => {
+    mockFetch().fetch = vi.fn(async () => jsonRes({ ok: true }))
+    // Bytes, not characters: 512 Ki two-byte characters is exactly 1 MiB.
+    const body = 'é'.repeat(512 * 1024)
+    const event = makeEvent({ path: '/api/_lukk/register', method: 'POST', body, headers: { ...sameOrigin, 'content-length': String(1024 * 1024) }, session: makeSession() })
+    await run(event)
+    expect(event.status).toBe(200)
+    expect((mockFetch().fetch.mock.calls[0]![1] as { body: string }).body).toBe(body)
+  })
+
+  it('takes a configured limit', async () => {
+    ;(__test.runtimeConfig.lukk as Record<string, unknown>).bodyLimit = 8
+    mockFetch().fetch = vi.fn(async () => jsonRes({ ok: true }))
+    const over = makeEvent({ path: '/api/_lukk/login', method: 'POST', body: '123456789', headers: sameOrigin, session: makeSession() })
+    await run(over)
+    expect(over.status).toBe(413)
+    const at = makeEvent({ path: '/api/_lukk/login', method: 'POST', body: '12345678', headers: sameOrigin, session: makeSession() })
+    await run(at)
+    expect(at.status).toBe(200)
+  })
+})
