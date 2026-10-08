@@ -283,8 +283,8 @@ export default defineNuxtModule<ModuleOptions>({
     }
 
     // The logout note the browser writes and the server reads (BFF). Named from the same `cookieSecure` and
-    // namespace as the session cookie; set `runtimeConfig.public.lukk.logoutCookie` alongside any runtime
-    // override of `cookieSecure`.
+    // namespace as the session cookie. These are the build's names; `finish-logout` restates them per
+    // request from the RUNTIME `cookieSecure`, so a runtime override cannot leave the two sides apart.
     const publicCookies = nuxt.options.runtimeConfig.public.lukk as { logoutCookie?: string, signedOutCookie?: string }
     // What scopes this app's browser-side session bookkeeping: the cross-tab lock, the broadcast channel and
     // the direct-mode notes. The router base alone was not enough — two apps path-routed on one origin with

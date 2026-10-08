@@ -410,3 +410,24 @@ describe('finish-logout middleware (BFF)', () => {
     expect(bare.deleted).toEqual([{ name: 'lukk-admin-logout', options: { path: '/', secure: false, sameSite: 'strict' } }])
   })
 })
+
+describe('the cookie names the browser is told', () => {
+  // The browser writes the logout note under `public.lukk.logoutCookie`, which the module bakes in at BUILD
+  // from the build's `cookieSecure`; the server reads it under a name derived from the RUNTIME one. A
+  // runtime override (`NUXT_LUKK_COOKIE_SECURE=false` on a dev-over-http deploy, say) left the browser
+  // writing a note the server never looked for — and a logout that the next page load never finished.
+  it('tells the browser the names this server reads, whatever the build said', async () => {
+    __test.runtimeConfig.lukk = { sessionPassword: 'p'.repeat(32), cookieSecure: false, cookieNamespace: 'admin' } as unknown as Record<string, unknown>
+    __test.runtimeConfig.public.lukk = { logoutCookie: '__Host-lukk-logout', signedOutCookie: '__Host-lukk-signed-out', mode: 'bff' }
+
+    await run(makeEvent({ cookies: {} }))
+
+    expect(__test.runtimeConfig.public.lukk).toMatchObject({ logoutCookie: 'lukk-admin-logout', signedOutCookie: 'lukk-admin-signed-out' })
+  })
+
+  it('names them Secure-prefixed by default', async () => {
+    __test.runtimeConfig.public.lukk = { logoutCookie: 'stale', signedOutCookie: 'stale' }
+    await run(makeEvent({ cookies: {} }))
+    expect(__test.runtimeConfig.public.lukk).toMatchObject({ logoutCookie: '__Host-lukk-logout', signedOutCookie: '__Host-lukk-signed-out' })
+  })
+})
