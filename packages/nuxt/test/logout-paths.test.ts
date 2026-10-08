@@ -59,22 +59,70 @@ describe('useLukkAuth — logout paths', () => {
   })
 
   it('leaves the newer logout as the one in progress when an older one finishes first', async () => {
+    // Two logouts overlap only where the second ends a session a sign-in issued while the first was out
+    // (a second `logout()` call now joins the first instead — this test used to make the overlap that way,
+    // which is the double-click defect). The guard is the same: the older one finishing must not clear the
+    // newer one's hold.
     let finishFirst!: () => void
+    let land!: () => void
     const logout = vi.fn()
       .mockImplementationOnce(() => new Promise<void>((resolve) => { finishFirst = resolve }))
       .mockImplementationOnce(() => new Promise<void>(() => {}))
-    withApp({ logout })
+    const login = vi.fn(() => new Promise((resolve) => { land = () => resolve({ access_token: 'B', expires_in: 900 }) }))
+    withApp({ logout, login })
     const auth = useLukkAuth()
 
+    void auth.login({ email: 'e', password: 'p' })
+    await vi.waitFor(() => expect(login).toHaveBeenCalledOnce())
     const first = auth.logout()
     await vi.waitFor(() => expect(logout).toHaveBeenCalledOnce())
-    void auth.logout()
+    land()
+    await vi.waitFor(() => expect(logout).toHaveBeenCalledTimes(2))
     const second = restoreState(__test.nuxtApp).ending
     finishFirst()
     await first
 
     expect(restoreState(__test.nuxtApp).ending).toBe(second)
     expect(second).not.toBeNull()
+    // And a `logout()` now joins the newer one rather than starting a third.
+    void auth.logout()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(logout).toHaveBeenCalledTimes(2)
+  })
+
+  it('joins a logout already out — a double click ends the session once, and neither call rejects', async () => {
+    // The second call ran a logout of its own behind the first: by then the session was gone, so it got a
+    // 401 it couldn't renew, rejected — and left the logout note it had just written standing, so the next
+    // page load went to finish a logout that was already done.
+    page()
+    let finish!: () => void
+    const logout = vi.fn()
+      .mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve }))
+      .mockRejectedValue({ status: 401 })
+    withApp({ logout }, { $lukkRefresh: vi.fn(async () => null) }, 'bff')
+    const auth = useLukkAuth()
+
+    const first = auth.logout()
+    await vi.waitFor(() => expect(logout).toHaveBeenCalledOnce())
+    const second = auth.logout()
+    finish()
+
+    await expect(Promise.all([first, second])).resolves.toEqual([undefined, undefined])
+    expect(logout).toHaveBeenCalledOnce()
+    // The note went with the logout it was for — the last write clears it.
+    expect((globalThis as { document: { cookie: string } }).document.cookie).toMatch(/^__Host-lukk-logout=; .*Max-Age=0/)
+    expect(restoreState(__test.nuxtApp).ending).toBeNull()
+  })
+
+  it('runs a fresh one once the earlier has finished', async () => {
+    const logout = vi.fn().mockResolvedValue(undefined)
+    withApp({ logout })
+    const auth = useLukkAuth()
+
+    await auth.logout()
+    await auth.logout()
+
+    expect(logout).toHaveBeenCalledTimes(2)
   })
 
   it('drops a step-up once logged out', async () => {

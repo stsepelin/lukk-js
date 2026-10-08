@@ -544,9 +544,13 @@ describe('gaps found by mutation testing', () => {
 
   it('a finished logout does not release sign-ins held for a second logout still renewing its token', async () => {
     // In the renewal gap nothing but the whole-logout hold keeps a sign-in out; the first logout must
-    // not clear the second one's.
+    // not clear the second one's. The second is the one that ends a session a sign-in issued while the
+    // first was out — a second `logout()` CALL now joins the first, which is how this used to overlap
+    // them and is the double-click defect.
     const first = deferred<void>()
     const renewal = deferred<{ access_token: string }>()
+    const landed = deferred<void>()
+    wire.client.login!.mockImplementationOnce(slowSignIn('B', landed.promise))
     wire.client.logout!
       .mockImplementationOnce(async () => { await first.promise })
       .mockImplementationOnce(async () => { throw { status: 401 } })
@@ -555,23 +559,23 @@ describe('gaps found by mutation testing', () => {
     boot()
     const auth = useLukkAuth()
 
+    const supersededSignIn = auth.login({ email: 'a', password: 'p' }).catch(() => {})
+    await macrotask()
     const firstLogout = auth.logout()
     await macrotask()
-    const secondLogout = auth.logout()
-    await macrotask() // second attempt rejected; its renewal is on the wire
+    landed.resolve()
+    await macrotask() // the sign-in landed after the logout: its own logout's attempt rejected, renewal out
     expect(wire.client.refreshTokens).toHaveBeenCalledOnce()
     first.resolve()
     await firstLogout
 
     const signingIn = auth.login({ email: 'b', password: 'p' })
     await macrotask()
-    expect(wire.client.login).not.toHaveBeenCalled()
+    expect(wire.client.login).toHaveBeenCalledOnce()
 
     renewal.resolve(pairFor('A'))
-    // The first logout ended the generation that renewal belonged to, so the second rejects — the session
-    // was already revoked by the first.
-    await Promise.all([secondLogout.catch(() => {}), signingIn])
-    expect(wire.client.login).toHaveBeenCalledOnce()
+    await Promise.all([supersededSignIn, signingIn.catch(() => {})])
+    expect(wire.client.login).toHaveBeenCalledTimes(2)
   })
 
   it('a registration answered with a two-factor challenge leaves a restore in progress alone', async () => {
@@ -1133,6 +1137,36 @@ describe('a logout while a sign-in is on the wire', () => {
     // A second logout, carrying the session the server just issued — the first could not end it.
     expect(bearers).toEqual([null, 'B'])
     expect(api).not.toHaveBeenCalled()
+    expect(auth.loggedIn.value).toBe(false)
+    expect(access()).toBeNull()
+  })
+
+  it('still ends that session when the sign-in lands while the logout is itself still out', async () => {
+    // A logout already out went out before this session existed, so it cannot end it: joining it — as a
+    // second `logout()` call otherwise does — would leave the session the server just issued alive.
+    const response = deferred<void>()
+    wire.client.login!.mockImplementationOnce(slowSignIn('B', response.promise))
+    const bearers: (string | null)[] = []
+    const first = deferred<void>()
+    wire.client.logout!
+      .mockImplementationOnce(async () => { bearers.push(wire.hooks!.getAccessToken()); await first.promise })
+      .mockImplementation(async () => { bearers.push(wire.hooks!.getAccessToken()) })
+    userEndpoint()
+    boot()
+    const auth = useLukkAuth()
+
+    const signingIn = auth.login({ email: 'b', password: 'p' })
+    await macrotask()
+    const loggingOut = auth.logout()
+    await vi.waitFor(() => expect(bearers).toEqual([null]))
+
+    response.resolve()
+    await macrotask()
+    first.resolve()
+    await loggingOut
+    await signingIn
+
+    expect(bearers).toEqual([null, 'B'])
     expect(auth.loggedIn.value).toBe(false)
     expect(access()).toBeNull()
   })

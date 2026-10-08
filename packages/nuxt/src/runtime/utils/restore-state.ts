@@ -45,6 +45,8 @@ export interface RestoreState {
    * signed the new session out.
    */
   ending: Promise<unknown> | null
+  /** The `logout()` call in progress in this tab, which a second call joins (see `useLukkAuth().logout`). */
+  loggingOut?: Promise<void> | null
   /** Tell other tabs of this app that the session changed. Set by the client plugin where supported. */
   announce?: () => void
   /** The Web Lock shared by this app's tabs. Set by the client plugin where the browser has one. */

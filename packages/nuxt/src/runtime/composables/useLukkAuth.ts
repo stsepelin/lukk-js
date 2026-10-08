@@ -195,11 +195,33 @@ export function useLukkAuth(): LukkAuth {
    * (tokens in direct mode, a sealed cookie in BFF) that nothing on screen reflects. End it too.
    */
   async function endSupersededSignIn<T>(result: T, issuedSession: boolean): Promise<T> {
-    if (issuedSession) await logout()
+    // A logout of its own, never one joined: a logout still out went before this session existed and
+    // cannot end it. Started NOW, alongside that one, while the token this sign-in just stored is still
+    // there to send — the earlier logout's cleanup clears it. A `logout()` called meanwhile joins this one.
+    if (issuedSession) await inProgress(runLogout())
     return result
   }
 
-  async function logout(): Promise<void> {
+  /**
+   * One logout per tab at a time: a call while one is out joins it. Run twice — a double click — the
+   * second went out after the first had ended the session, got a 401 it couldn't renew, rejected, and
+   * left the logout note it had just written standing, so the next page load set out to finish a logout
+   * that was already done.
+   */
+  function logout(): Promise<void> {
+    return state.loggingOut ?? inProgress(runLogout())
+  }
+
+  /** Publish `run` as the logout in progress, until it settles — unless a newer one has replaced it. */
+  function inProgress(run: Promise<void>): Promise<void> {
+    const tracked: Promise<void> = run.finally(() => {
+      if (state.loggingOut === tracked) state.loggingOut = null
+    })
+    state.loggingOut = tracked
+    return tracked
+  }
+
+  async function runLogout(): Promise<void> {
     // Until the logout request itself is on the wire it waits — for another tab's lock, for a refresh
     // already out. A page that navigates away in that moment cancelled it, and the session outlived what
     // the user saw. So if the page starts to unload first, send it right away with `keepalive` (which
