@@ -147,7 +147,8 @@ replacing its hook, and keep authenticated calls on the API's origin.
   request adopting through it (so a hold lasts at most 10 min + 30 s), and cut to 30 s when the rotation of
   the pair it handed out lands. After that its end is only ever brought forward, and never past the end of
   the link after it. A response about to seal an adopted pair re-checks the journal first and seals the
-  newest pair if the session rotated it meanwhile. So the journal can answer a replay up to
+  newest pair if the session rotated it meanwhile — or seals nothing, leaving the browser its newer cookie,
+  if the session has moved past it and the links that led on have expired (a response slower than 30 s). So the journal can answer a replay up to
   a refresh's duration + 30 s after lukk rotated — past lukk's own grace window, on a slow refresh — and such a
   replay never reaches lukk: its reuse detection and `RefreshFamilyForked` do not see it. Both are deliberate
   deviations (the second from RFC 9700 §4.14.2's "replay means theft" signal), bounded to these windows,

@@ -32,8 +32,17 @@ export interface Link {
 /** Per session id: consumed refresh token → link, oldest first. */
 export const refreshJournals: Map<string, Map<string, Link>> = ((globalThis as { __lukkRefreshJournals?: Map<string, Map<string, Link>> }).__lukkRefreshJournals ??= new Map())
 
-/** Drop a session's journal, and every timer it holds. */
+/**
+ * Per session id: the newest refresh token the BFF has produced for it — its HEAD — independent of the links'
+ * short windows. A response that took longer than those windows (a slow upstream, a long render) is about to
+ * seal a pair; if the session has moved past it, the links that led on may be gone, and only this says so.
+ */
+export const refreshHeads: Map<string, { token: string, timer: ReturnType<typeof setTimeout> }> = ((globalThis as { __lukkRefreshHeads?: Map<string, { token: string, timer: ReturnType<typeof setTimeout> }> }).__lukkRefreshHeads ??= new Map())
+
+/** Drop a session's journal and its head, and every timer they hold. */
 export function forgetRefreshJournal(key: string): void {
+  clearTimeout(refreshHeads.get(key)?.timer)
+  refreshHeads.delete(key)
   const journal = refreshJournals.get(key)
   if (!journal) return
   for (const link of journal.values()) clearTimeout(link.timer)

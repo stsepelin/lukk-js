@@ -1126,6 +1126,37 @@ describe('a rotation that lands after the request waiting on it gave up', () => 
     expect(straggler.update).toHaveBeenLastCalledWith({ access: 'a2', refresh: 't2' })
   })
 
+  it('seals nothing when the session moved past the adopted pair and its links expired while the retried call was out', async () => {
+    // As above, but the retried call takes 90 s: the t1 → t2 link (to 35 s) is gone by then. Sealing t1 over
+    // the browser's t2 replayed a spent token on its next refresh; nothing is sealed, the browser keeps t2.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    try {
+      let finishRetry!: () => void
+      mockFetch().fetch = vi.fn(async (url: string, init?: RequestInit) => {
+        const body = String(init?.body ?? '')
+        if (String(url).endsWith('/refresh')) {
+          return body.includes('"t0"') ? jsonRes({ access_token: 'a1', refresh_token: 't1', expires_in: 900 }) : jsonRes({ access_token: 'a2', refresh_token: 't2', expires_in: 900 })
+        }
+        const bearer = new Headers(init?.headers).get('authorization')
+        if (bearer === 'Bearer a1') return new Promise<Response>((resolve) => { finishRetry = () => resolve(jsonRes({ id: 1 })) })
+        return jsonRes({ message: 'Unauthenticated.' }, 401)
+      })
+      const sid = `bff-stale-${Math.random()}`
+      await refreshOnce({ id: 'h3', data: { refresh: 't0', sid } }, 'https://lukk/auth')
+
+      const straggler = makeSession({ access: 'old', refresh: 't0', sid } as TokenSession)
+      const pending = run(makeEvent({ path: '/api/_lukk/user', session: straggler }))
+      await vi.advanceTimersByTimeAsync(5_000)
+      await refreshOnce({ id: 'h3', data: { refresh: 't1', sid } }, 'https://lukk/auth')
+      await vi.advanceTimersByTimeAsync(85_000)
+      finishRetry()
+
+      expect(await pending).toEqual({ id: 1 })
+      expect(straggler.update).not.toHaveBeenCalled()
+    }
+    finally { vi.useRealTimers() }
+  })
+
   it('a rotation a request DID receive is adopted by a straggler\'s 401 retry within the window', async () => {
     // A page's burst: one request renewed the session and carried the new cookie home; another, already out
     // with the old one, comes back seconds later. It is handed that same rotation — never a replay.

@@ -245,11 +245,14 @@ export default defineEventHandler(async (event) => {
         finally {
           if (!(await ended())) {
             // The newest pair, not necessarily the one handed out before the call: the session may have
-            // rotated it meanwhile, and sealing a spent token over the newer cookie invites a revoke.
+            // rotated it meanwhile, and sealing a spent token over the newer cookie invites a revoke. None
+            // at all when the session has moved past it: the browser keeps the newer cookie it holds.
             const newest = currentPair(sessionKey(s), pair)
-            await s.update(newest)
-            warnIfSessionTooLarge(s)
-            resealedTokens = newest
+            if (newest) {
+              await s.update(newest)
+              warnIfSessionTooLarge(s)
+              resealedTokens = newest
+            }
           }
           // The logout is about to revoke it itself.
           else if (!endingIt) {

@@ -136,6 +136,9 @@ export default defineEventHandler(async (event) => {
       resealNewest = async (queued) => {
         const newest = currentPair(sessionKey(session), pair)
         if (newest === pair) return queued
+        // Moved past it, and the links that led on have expired: not this cookie at all — the browser keeps
+        // the newer one it holds.
+        if (!newest) return queued.filter(cookie => cookieName(cookie) !== sessionName)
         // h3 writes the seal into the response's queued `Set-Cookie`, replacing our cookie of that name.
         event.node.res.setHeader('set-cookie', queued)
         await session.update(newest)

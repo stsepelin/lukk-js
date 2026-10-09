@@ -208,4 +208,71 @@ describe('a rotation nobody received, adopted by the next request', () => {
     rw.update.mockRejectedValueOnce(Object.assign(new Error('Cannot set headers after they are sent'), { code: 'ERR_HTTP_HEADERS_SENT' }))
     await expect(withholdIfReplaced(racing)).resolves.toBeUndefined()
   })
+
+  it('withholds a re-seal the session has moved past, when the links that led on expired before the response', async () => {
+    // t0 R (app-API, or a render) rotates tx → t1; its upstream is slow. t1 S adopts t1. t5 another tab
+    // rotates t1 → t2 (that link lasts to 35 s). t90 R's headers arrive: no link for t1 any more, and
+    // sealing t1 over the browser's t2 replayed a spent token on its next refresh. Withheld instead.
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+    const rotations = () => {
+      fetchSpy.mockImplementationOnce(async () => new Response(JSON.stringify({ access_token: 'a1', refresh_token: 't1', expires_in: 900 }), { status: 200 }))
+        .mockImplementationOnce(async () => new Response(JSON.stringify({ access_token: 'a2', refresh_token: 't2', expires_in: 900 }), { status: 200 }))
+    }
+    const otherTab = async (sid: string) => {
+      await vi.advanceTimersByTimeAsync(5_000)
+      await refreshOnce({ id: 'h3', data: { refresh: 't1', sid } }, 'https://lukk.test/auth')
+      await vi.advanceTimersByTimeAsync(85_000)
+    }
+    const sessionOn = (on: H3Event) => ({ id: 'h3', data: { ...sealed }, update: vi.fn(async (pair: TokenSession) => {
+      const res = on.node.res
+      const others = ([] as string[]).concat((res.getHeader('set-cookie') as string[] | undefined) ?? []).filter(cookie => !cookie.startsWith('__Host-lukk-session='))
+      res.setHeader('set-cookie', [...others, `__Host-lukk-session=${pair.refresh}`])
+    }) })
+
+    const apiSid = `stale-api-${Math.random()}`
+    rotations()
+    sealed = { access: expired(), refresh: 'tx', sid: apiSid }
+    const r = event()
+    r.node.res.setHeader('set-cookie', ['other=1'])
+    rw = sessionOn(r)
+    proxyRequest.mockImplementationOnce(async (ev: unknown, _target: string, opts: { onResponse?: (e: unknown, x: unknown) => Promise<void> }) => {
+      await otherTab(apiSid)
+      ;(ev as H3Event).node.res.setHeader('set-cookie', ['upstream=1'])
+      await opts.onResponse!(ev, { status: 200, type: 'basic', headers: new Headers() })
+      return {}
+    })
+    await (apiProxy as unknown as (e: H3Event) => Promise<unknown>)(r)
+    expect(r.node.res.getHeader('set-cookie')).toEqual(['other=1']) // the browser keeps its t2
+
+    const ssrSid = `stale-ssr-${Math.random()}`
+    rotations()
+    sealed = { access: expired(), refresh: 'tx', sid: ssrSid }
+    const page = event('/dashboard')
+    rw = sessionOn(page)
+    expect(await resolveHydrationAccess(page)).toBe('a1')
+    await otherTab(ssrSid)
+    await withholdIfReplaced(page)
+    expect(page.node.res.getHeader('set-cookie') ?? []).toEqual([])
+  })
+
+  it('withholds a render\'s re-seal when the session ended while it was re-sealing', async () => {
+    // The last `sessionEnded` check came before the re-seal: a logout landing during it still left with it.
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+      .mockImplementationOnce(async () => new Response(JSON.stringify({ access_token: 'a1', refresh_token: 't1', expires_in: 900 }), { status: 200 }))
+      .mockImplementationOnce(async () => new Response(JSON.stringify({ access_token: 'a2', refresh_token: 't2', expires_in: 900 }), { status: 200 }))
+    const sid = `ended-reseal-${Math.random()}`
+    sealed = { access: expired(), refresh: 't0', sid }
+    const page = event('/dashboard')
+    rw = { id: 'h3', data: { ...sealed }, update: vi.fn(async (pair: TokenSession) => {
+      page.node.res.setHeader('set-cookie', [`__Host-lukk-session=${pair.refresh}`])
+      if (pair.refresh === 't2') await endSession(sid)
+    }) }
+    await resolveHydrationAccess(page)
+    await refreshOnce({ id: 'h3', data: { refresh: 't1', sid } }, 'https://lukk.test/auth')
+    await withholdIfReplaced(page)
+
+    expect(rw.update).toHaveBeenCalledTimes(2)
+    expect(page.node.res.getHeader('set-cookie') ?? []).toEqual([])
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
+  })
 })

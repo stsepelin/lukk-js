@@ -110,7 +110,9 @@ export async function resolveHydrationAccess(event: H3Event): Promise<string | n
     // The render takes a while, and the cookie only goes out with the page — see `withholdIfReplaced`.
     remember(event, sessionKey(session), name, () => revokeDroppedSession(event, pair, baseURL, visitorIp(event, clientIpHeader)), async () => {
       const newest = currentPair(sessionKey(session), pair)
-      if (newest !== pair) await session.update(newest)
+      // Moved past it, and the links that led on have expired: not this cookie at all.
+      if (!newest) withholdSessionCookie(event.node.res, name)
+      else if (newest !== pair) await session.update(newest)
     })
     const fresh = await sealSession(event, { password: sessionPassword!, name })
     replaceRequestCookie(event, name, fresh)
@@ -160,7 +162,12 @@ export function hydratedSessionEnded(event: H3Event): Promise<boolean> {
  */
 async function resealNewest(event: H3Event, hydrated: HydratedSession): Promise<void> {
   if (!hydrated.reseal || event.node.res.headersSent) return
-  try { await hydrated.reseal() }
+  try {
+    await hydrated.reseal()
+    // Sealing takes a moment, after the last check: a logout or sign-in landing during it must not have the
+    // ended session's cookie leave with the page.
+    if (await sessionEnded(hydrated.key)) withholdSessionCookie(event.node.res, hydrated.name)
+  }
   catch { /* the response started meanwhile; it keeps the seal it had */ }
 }
 
