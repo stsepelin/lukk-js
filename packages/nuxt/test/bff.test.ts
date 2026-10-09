@@ -1191,7 +1191,7 @@ describe('route policy follows the URL lukk receives, not the string the browser
     expect(body).toEqual({ ok: true, expires_in: 900 })
   })
 
-  it.each(['/api/_lukk//logout', '/api/_lukk/x//refresh', '/api/_lukk/refresh%2F%2F', '/api/_lukk/refresh/%2F', '/api/_lukk/x%2F..%2Frefresh', '/api/_lukk/x%5C..%5Crefresh'])('refuses %s, a path lukk has no route for but a slash-merging hop might', async (path) => {
+  it.each(['/api/_lukk//logout', '/api/_lukk/x//refresh', '/api/_lukk/refresh%2F%2F', '/api/_lukk/refresh/%2F', '/api/_lukk/x%2F..%2Frefresh', '/api/_lukk/x%5C..%5Crefresh', '/api/_lukk/logout%252f', '/api/_lukk/refresh%255C'])('refuses %s, a path lukk has no route for but a slash-merging hop might', async (path) => {
     // Policy and forwarding must agree on one URL. Collapsed for the rules but forwarded raw, `//logout`
     // had the sealed refresh token injected and POSTed to a path lukk does not route — to whatever does,
     // an app's fallback route included. lukk has no route with an empty or encoded-slash segment, so

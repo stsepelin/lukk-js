@@ -85,10 +85,11 @@ export default defineEventHandler(async (event) => {
   // and `target` lies under it.)
   const route = routeWithin(target, baseURL)!
   // …and only on a path that reaches lukk AS WRITTEN. lukk routes nothing with an empty segment or an
-  // encoded slash or backslash (trailing slashes are fine: Laravel trims them), but a slash-merging or decoding hop in front of it might turn one into a
+  // encoded slash or backslash, nor an encoded `%` that a second decoding hop could turn into one
+  // (trailing slashes are fine: Laravel trims them), but a slash-merging or decoding hop in front of it might turn one into a
   // real route. Deciding policy on the cleaned path while forwarding the raw one injected the sealed
   // refresh token into a request lukk never received; refusing them keeps the two the same URL.
-  if (/\/{2,}[^/]|%2f|%5c/i.test(new URL(target).pathname)) {
+  if (/\/{2,}[^/]|%2f|%5c|%25/i.test(new URL(target).pathname)) {
     setResponseStatus(event, 404)
     return { message: 'Not found.' }
   }
