@@ -329,13 +329,19 @@ async function parseBody<T>(res: Response): Promise<T> {
  * Build a {@link LukkError} from a status + an already-parsed Laravel error body
  * (`{ message, errors }`). Exported so lukk-nuxt shapes app-API errors identically.
  */
-export function lukkError(status: number, statusText: string, body: { message?: string, errors?: Record<string, string[]> } | null | undefined): LukkError {
+export function lukkError(status: number, statusText: string, body: { message?: string, errors?: Record<string, string[]>, reason?: unknown } | null | undefined): LukkError {
   const b = body ?? {}
-  return { status, message: b.message ?? statusText, ...(b.errors ? { errors: b.errors } : {}) }
+  return {
+    status,
+    message: b.message ?? statusText,
+    ...(b.errors ? { errors: b.errors } : {}),
+    // lukk's machine-readable cause, where it names one (a 423 `confirmation_session_mismatch`).
+    ...(typeof b.reason === 'string' ? { reason: b.reason } : {}),
+  }
 }
 
 async function toLukkError(res: Response): Promise<LukkError> {
-  let body: { message?: string, errors?: Record<string, string[]> } = {}
+  let body: { message?: string, errors?: Record<string, string[]>, reason?: unknown } = {}
   try { body = JSON.parse(await res.text()) }
   catch { /* non-JSON error body */ }
   return lukkError(res.status, res.statusText, body)

@@ -817,3 +817,14 @@ describe('the last client.ts guards', () => {
     expect(refresh).not.toHaveBeenCalled()
   })
 })
+
+describe('the reason lukk names on an error', () => {
+  it('is kept, so a client can branch on it rather than on English text', () => {
+    // lukk answers a confirmation that belongs to another session with 423 and
+    // `reason: "confirmation_session_mismatch"`, distinct from a missing confirmation.
+    expect(lukkError(423, 'Locked', { message: 'This confirmation belongs to a different session.', reason: 'confirmation_session_mismatch' }))
+      .toEqual({ status: 423, message: 'This confirmation belongs to a different session.', reason: 'confirmation_session_mismatch' })
+    expect(lukkError(423, 'Locked', { message: 'This action requires confirmation.' })).not.toHaveProperty('reason')
+    expect(lukkError(423, 'Locked', { reason: 42 } as never)).not.toHaveProperty('reason')
+  })
+})

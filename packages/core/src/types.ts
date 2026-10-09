@@ -173,6 +173,12 @@ export interface LukkError {
   message: string
   /** Laravel validation errors, when present (422). */
   errors?: Record<string, string[]>
+  /**
+   * lukk's machine-readable cause, where it names one — branch on this, not on `message`. A 423 with
+   * `confirmation_session_mismatch` means the step-up belongs to another session: discard it and
+   * confirm again.
+   */
+  reason?: string
 }
 
 /**
