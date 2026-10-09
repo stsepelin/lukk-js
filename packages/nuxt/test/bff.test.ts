@@ -1126,68 +1126,54 @@ describe('a rotation that lands after the request waiting on it gave up', () => 
     expect(straggler.update).toHaveBeenLastCalledWith({ access: 'a2', refresh: 't2' })
   })
 
-  it('seals nothing when the session moved past the adopted pair and its links expired while the retried call was out', async () => {
-    // As above, but the retried call takes 90 s: the t1 → t2 link (to 35 s) is gone by then. Sealing t1 over
-    // the browser's t2 replayed a spent token on its next refresh; nothing is sealed, the browser keeps t2.
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
-    try {
-      let finishRetry!: () => void
-      mockFetch().fetch = vi.fn(async (url: string, init?: RequestInit) => {
-        const body = String(init?.body ?? '')
-        if (String(url).endsWith('/refresh')) {
-          return body.includes('"t0"') ? jsonRes({ access_token: 'a1', refresh_token: 't1', expires_in: 900 }) : jsonRes({ access_token: 'a2', refresh_token: 't2', expires_in: 900 })
-        }
-        const bearer = new Headers(init?.headers).get('authorization')
-        if (bearer === 'Bearer a1') return new Promise<Response>((resolve) => { finishRetry = () => resolve(jsonRes({ id: 1 })) })
-        return jsonRes({ message: 'Unauthenticated.' }, 401)
+  /**
+   * A straggler's retried call held open (it honours the upstream deadline's abort, as real fetch does) while
+   * the session rotates past the pair it adopted: t1 → t2 … t17 → t18, eighteen links in all, so the journal
+   * — capped at REFRESH_JOURNAL_MAX_LINKS — has pruned the t0 and t1 links. Within the 15 s the auth proxy
+   * waits, the links themselves never expire; overflow is the only way `currentPair` can answer stale here.
+   */
+  async function straggleWhileOverflowing(path: string, method: string, answer: unknown) {
+    let finishRetry!: () => void
+    mockFetch().fetch = vi.fn(async (url: string, init?: RequestInit) => {
+      if (String(url).endsWith('/refresh')) {
+        const n = Number(String(init?.body).match(/"t(\d+)"/)![1]) + 1
+        return jsonRes({ access_token: `a${n}`, refresh_token: `t${n}`, expires_in: 900 })
+      }
+      if (new Headers(init?.headers).get('authorization') !== 'Bearer a1') return jsonRes({ message: 'Unauthenticated.' }, 401)
+      return new Promise<Response>((resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal!.reason))
+        finishRetry = () => resolve(jsonRes(answer))
       })
-      const sid = `bff-stale-${Math.random()}`
-      await refreshOnce({ id: 'h3', data: { refresh: 't0', sid } }, 'https://lukk/auth')
+    })
+    const sid = `bff-overflow-${Math.random()}`
+    await refreshOnce({ id: 'h3', data: { refresh: 't0', sid } }, 'https://lukk/auth') // t0 → t1, received
 
-      const straggler = makeSession({ access: 'old', refresh: 't0', sid } as TokenSession)
-      const pending = run(makeEvent({ path: '/api/_lukk/user', session: straggler }))
-      await vi.advanceTimersByTimeAsync(5_000)
-      await refreshOnce({ id: 'h3', data: { refresh: 't1', sid } }, 'https://lukk/auth')
-      await vi.advanceTimersByTimeAsync(85_000)
-      finishRetry()
+    const straggler = makeSession({ access: 'old', refresh: 't0', sid } as TokenSession)
+    const event = makeEvent({ path, method, body: '{"password":"p"}', headers: { ...sameOrigin, 'content-type': 'application/json' }, session: straggler })
+    const pending = run(event)
+    await new Promise(resolve => setTimeout(resolve, 0)) // adopted t1; its retried call is out
+    for (let n = 1; n <= 17; n++) await refreshOnce({ id: 'h3', data: { refresh: `t${n}`, sid } }, 'https://lukk/auth')
+    expect(refreshJournals.get(sid)!.has('t1')).toBe(false)
+    finishRetry()
+    return { event, straggler, result: await pending }
+  }
 
-      expect(await pending).toEqual({ id: 1 })
-      expect(straggler.update).not.toHaveBeenCalled()
-    }
-    finally { vi.useRealTimers() }
+  it('seals nothing when the session moved past the adopted pair while the retried call was out — a backstop', async () => {
+    // Sealing t1 over the browser's t18 replayed a spent token on its next refresh; the browser keeps t18.
+    const { straggler, result } = await straggleWhileOverflowing('/api/_lukk/user', 'GET', { id: 1 })
+
+    expect(result).toEqual({ id: 1 })
+    expect(straggler.update).not.toHaveBeenCalled()
   })
 
-  it('does not seal a step-up onto a session whose pair went stale during the retry — 409, and no cookie', async () => {
+  it('does not record a step-up onto a pair gone stale — 409 asks the user to confirm again, and no cookie', async () => {
     // The confirmation capture re-seals the WHOLE session — here, the arriving tokens with a spent refresh
-    // token, over the browser's newer cookie. The client retries a 409 with the cookie it holds.
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
-    try {
-      let finishRetry!: () => void
-      mockFetch().fetch = vi.fn(async (url: string, init?: RequestInit) => {
-        const body = String(init?.body ?? '')
-        if (String(url).endsWith('/refresh')) {
-          return body.includes('"t0"') ? jsonRes({ access_token: 'a1', refresh_token: 't1', expires_in: 900 }) : jsonRes({ access_token: 'a2', refresh_token: 't2', expires_in: 900 })
-        }
-        const bearer = new Headers(init?.headers).get('authorization')
-        if (bearer === 'Bearer a1') return new Promise<Response>((resolve) => { finishRetry = () => resolve(jsonRes({ confirmation_token: 'c1' })) })
-        return jsonRes({ message: 'Unauthenticated.' }, 401)
-      })
-      const sid = `bff-stale-confirm-${Math.random()}`
-      await refreshOnce({ id: 'h3', data: { refresh: 't0', sid } }, 'https://lukk/auth')
+    // token, over the browser's newer cookie. Nothing retries a 409 on a step-up: the user confirms again.
+    const { event, straggler, result } = await straggleWhileOverflowing('/api/_lukk/confirm-password', 'POST', { confirmation_token: 'c1' })
 
-      const straggler = makeSession({ access: 'old', refresh: 't0', sid } as TokenSession)
-      const event = makeEvent({ path: '/api/_lukk/confirm-password', method: 'POST', body: '{"password":"p"}', headers: { ...sameOrigin, 'content-type': 'application/json' }, session: straggler })
-      const pending = run(event)
-      await vi.advanceTimersByTimeAsync(5_000)
-      await refreshOnce({ id: 'h3', data: { refresh: 't1', sid } }, 'https://lukk/auth')
-      await vi.advanceTimersByTimeAsync(85_000)
-      finishRetry()
-
-      expect(await pending).toEqual({ message: 'The session was replaced.' })
-      expect(event.status).toBe(409)
-      expect(straggler.update).not.toHaveBeenCalled()
-    }
-    finally { vi.useRealTimers() }
+    expect(result).toEqual({ message: 'Your session was renewed meanwhile. Please confirm again.' })
+    expect(event.status).toBe(409)
+    expect(straggler.update).not.toHaveBeenCalled()
   })
 
   it('a rotation a request DID receive is adopted by a straggler\'s 401 retry within the window', async () => {

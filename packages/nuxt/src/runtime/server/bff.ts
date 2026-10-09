@@ -225,7 +225,9 @@ export default defineEventHandler(async (event) => {
   // A refresh that failed without lukk rejecting the token (a throttle, an outage): the session is live.
   let stillRefreshable = false
   // The session moved past the pair this request renewed with while it was out: nothing may be sealed from
-  // here — `s` still holds the arriving tokens, a refresh token already spent.
+  // here — `s` still holds the arriving tokens, a refresh token already spent. A backstop: the retried call
+  // is bounded by the 15 s upstream deadline and a link lasts at least 30 s, so only a journal overflowing
+  // within that time (REFRESH_JOURNAL_MAX_LINKS rotations) gets here.
   let stale = false
 
   if (upstream.res.status === 401 && sealed.refresh && !SIGN_IN_PATHS.has(route)) {
@@ -335,11 +337,17 @@ export default defineEventHandler(async (event) => {
   if (res.ok && isConfirmation(data)) {
     const s = await session()
     // h3 re-seals the WHOLE session on any update — a confirmation answering after a sign-in or logout
-    // would write the replaced session back. It also belongs to that session, so it is not recorded. Nor
-    // over a pair gone stale: the browser holds the newer cookie, and its retry earns the step-up on that.
-    if (stale || await sessionEnded(sessionKey(s))) {
+    // would write the replaced session back. It also belongs to that session, so it is not recorded.
+    if (await sessionEnded(sessionKey(s))) {
       setResponseStatus(event, 409)
       return { message: 'The session was replaced.' }
+    }
+    // Nor over a pair gone stale (see `stale`): the browser holds the newer cookie. Nothing retries a 409 on a
+    // step-up, so the user is asked to confirm again — and that confirmation is earned on the newer cookie.
+    // Only the status is read by the client; the message is for the user.
+    if (stale) {
+      setResponseStatus(event, 409)
+      return { message: 'Your session was renewed meanwhile. Please confirm again.' }
     }
     await s.update({ confirmation: data.confirmation_token })
     warnIfSessionTooLarge(s)

@@ -148,10 +148,11 @@ replacing its hook, and keep authenticated calls on the API's origin.
   the pair it handed out lands. After that its end is only ever brought forward, and never past the end of
   the link after it. A response about to seal an adopted pair re-checks the journal first and seals the
   newest pair if the session rotated it meanwhile — or seals nothing, leaving the browser its newer cookie,
-  if the session has moved past it and the links that led on have expired (a response slower than the
-  links' window: 30 s, up to 10 min 30 s for a rotation nobody received). A step-up confirmation answering
-  on such a request is not recorded: the auth proxy answers `409` (as for a replaced session) and the
-  client confirms again with the cookie it holds. So the journal can answer a replay up to
+  if the session has moved past it and the links that led on are gone: for the app-API proxy and SSR, a
+  response slower than the links' window (30 s, up to 10 min 30 s for a rotation nobody received); for the
+  auth proxy, which gives up on lukk after 15 s, only a journal that overflowed meanwhile. A step-up
+  confirmation answering on such a request is not recorded: the auth proxy answers `409` ("Your session was
+  renewed meanwhile. Please confirm again.") and the user is asked to confirm again. So the journal can answer a replay up to
   a refresh's duration + 30 s after lukk rotated — past lukk's own grace window, on a slow refresh — and such a
   replay never reaches lukk: its reuse detection and `RefreshFamilyForked` do not see it. Both are deliberate
   deviations (the second from RFC 9700 §4.14.2's "replay means theft" signal), bounded to these windows,
