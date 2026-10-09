@@ -36,7 +36,7 @@ interface LukkServerConfig {
  *    streams through the app-API proxy, forwarding the request cookie) unseals the ALREADY-rotated
  *    session, sees a non-expired access token, and injects it — instead of unsealing the stale
  *    cookie and rotating the just-consumed refresh token a second time. Note the SEQUENTIAL order
- *    matters: `refreshOnce`'s single-flight entry is already cleared (its `.finally`) by the time
+ *    matters: `refreshOnce`'s single-flight entry is already cleared (once the refresh settles) by the time
  *    `fetchUser` runs, so the single-flight does NOT backstop this — the mirror alone does. The
  *    single-flight only collapses genuinely CONCURRENT refreshes of one session (e.g. sibling
  *    component fetches) into one `/refresh`.

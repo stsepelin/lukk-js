@@ -124,6 +124,69 @@ describe('client plugin', () => {
   })
 })
 
+describe('client plugin — a refresh the server asks to retry', () => {
+  type Provide = { lukkRefresh: () => Promise<unknown>, lukkRestore: () => Promise<{ pair: unknown, unavailable: boolean }> }
+  const setup = () => {
+    __test.runtimeConfig.public.lukk = { mode: 'bff', baseURL: '', confirmationHeader: 'X' }
+    return (clientPlugin as unknown as () => { provide: Provide })().provide
+  }
+
+  it('retries ONCE after the Retry-After the BFF names — a rotation still out, or landed with nobody to take it', async () => {
+    // The BFF answers 503 + Retry-After when lukk is slow to rotate. Reported straight away as "couldn't
+    // tell", the session's next refresh waited for the user's next action; retried, it joins the rotation
+    // still out or adopts the one that landed, and the restore resolves as signed in.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const provide = setup()
+    captured.client!.refreshTokens.mockRejectedValueOnce({ status: 503, message: 'Unauthenticated.', retryAfter: 5 })
+    captured.client!.refreshTokens.mockResolvedValueOnce({ ok: true, expires_in: 900 })
+
+    const outcome = provide.lukkRestore()
+    await vi.advanceTimersByTimeAsync(4_999)
+    expect(captured.client!.refreshTokens).toHaveBeenCalledOnce()
+    await vi.advanceTimersByTimeAsync(1)
+
+    expect(await outcome).toEqual({ pair: REFRESHED_WITHOUT_TOKEN, unavailable: false })
+    expect(captured.client!.refreshTokens).toHaveBeenCalledTimes(2)
+  })
+
+  it('caps the wait at ten seconds, and retries only once', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const provide = setup()
+    captured.client!.refreshTokens
+      .mockRejectedValueOnce({ status: 503, message: 'x', retryAfter: 3600 })
+      .mockRejectedValueOnce({ status: 503, message: 'x', retryAfter: 1 })
+
+    const outcome = provide.lukkRestore()
+    await vi.advanceTimersByTimeAsync(10_000)
+
+    expect(await outcome).toEqual({ pair: null, unavailable: true })
+    expect(captured.client!.refreshTokens).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not retry a 503 that names no Retry-After, nor another status that does', async () => {
+    const provide = setup()
+    captured.client!.refreshTokens.mockRejectedValueOnce({ status: 503, message: 'x' })
+    expect(await provide.lukkRestore()).toEqual({ pair: null, unavailable: true })
+    captured.client!.refreshTokens.mockRejectedValueOnce({ status: 429, message: 'x', retryAfter: 1 })
+    expect(await provide.lukkRestore()).toEqual({ pair: null, unavailable: true })
+    expect(captured.client!.refreshTokens).toHaveBeenCalledTimes(2)
+  })
+
+  it('drops the retry when a sign-in replaced the session while it waited', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const provide = setup()
+    captured.client!.refreshTokens.mockRejectedValueOnce({ status: 503, message: 'x', retryAfter: 5 })
+
+    const outcome = provide.lukkRestore()
+    await vi.advanceTimersByTimeAsync(1_000)
+    restoreState(__test.nuxtApp).epoch++
+    await vi.advanceTimersByTimeAsync(4_000)
+
+    expect(await outcome).toMatchObject({ pair: null, superseded: true })
+    expect(captured.client!.refreshTokens).toHaveBeenCalledOnce()
+  })
+})
+
 describe('client plugin — $lukkRestore', () => {
   type Provide = { lukkRefresh: () => Promise<unknown>, lukkRestore: () => Promise<{ pair: unknown, unavailable: boolean }> }
   const setup = () => {

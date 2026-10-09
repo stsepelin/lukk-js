@@ -113,6 +113,8 @@ replacing its hook, and keep authenticated calls on the API's origin.
 - **The account calls resolve to `{ status }`.** `forgotPassword`, `resetPassword`, `changePassword` and
   `sendEmailVerification` resolved to `void` in the types; they resolve to the new exported `LukkStatus`
   (`{ status: string }`), which is what lukk always sent. Code that ignored the result is unaffected.
+- **`LukkError.retryAfter` (lukk-core).** An error response carrying `Retry-After` in seconds keeps it, so
+  a binding can come back when the server asked.
 - **`logout({ refreshToken })` (lukk-core).** Presents the refresh token in the logout body, so lukk 0.7
   ends the session even when the access token has expired (RFC 7009 §2.1). Optional; older lukk
   releases ignore it.
@@ -127,8 +129,16 @@ replacing its hook, and keep authenticated calls on the API's origin.
 - **A refresh is never abandoned on a timer.** lukk commits a rotation as soon as it receives the
   request, so giving up after 15 s lost the new token and the next refresh past the grace window revoked
   the whole session. Other upstream calls keep the 15 s deadline, which now also covers reading the body.
-  A request is still not held on a slow refresh: after 15 s `/api/_lukk/refresh` answers `503` with
-  `Retry-After: 5` (the session is kept), and the retry joins the refresh still in flight.
+  No request waits on a slow refresh for longer than 15 s either. What it gets then depends on the
+  caller: `/api/_lukk/refresh` answers `503` with `Retry-After: 5` (the session is kept, and lukk-nuxt's
+  own client retries once after it); a proxied auth call or app-API call goes ahead with the old access
+  token and gets lukk's `401`; an SSR render leaves the session to the client restore. The rotation
+  carries on regardless, and the session's next refresh — any of those callers, any time within ten
+  minutes, as long as it still presents the old token — joins it while it is out or adopts its result
+  once it has landed. **That memory is per process**: behind a multi-instance BFF without sticky
+  sessions, a next request that reaches another instance replays the old token, and only lukk's grace
+  window (`LUKK_GRACE`, 30 s by default) keeps that from revoking the session. Use sticky sessions there,
+  or raise the grace window if your lukk can be slow to rotate.
 - **An unearnable step-up is remembered per app**, not per `useLukkConfirmation()` call: a modal and a
   page using separate instances now both see the refusal, and the action waiting in one is rejected.
 

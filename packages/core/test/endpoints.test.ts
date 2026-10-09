@@ -91,6 +91,23 @@ describe('logout request shape', () => {
   })
 })
 
+describe('the Retry-After an error names', () => {
+  it('is kept as seconds, so a binding can come back when the server asked', async () => {
+    const fetch = vi.fn(async () => new Response(JSON.stringify({ message: 'Unauthenticated.' }), { status: 503, headers: { 'Retry-After': '5' } }))
+    await expect(createLukkClient({ baseURL: 'https://x/auth', fetch }).refreshTokens()).rejects.toEqual({ status: 503, message: 'Unauthenticated.', retryAfter: 5 })
+    const longer = vi.fn(async () => new Response('{}', { status: 503, headers: { 'Retry-After': '120' } }))
+    await expect(createLukkClient({ baseURL: 'https://x/auth', fetch: longer }).refreshTokens()).rejects.toMatchObject({ retryAfter: 120 })
+  })
+
+  it('is left out when absent, or given as a date rather than seconds', async () => {
+    const answer = (headers: Record<string, string>) => vi.fn(async () => new Response('{"message":"x"}', { status: 503, headers }))
+    await expect(createLukkClient({ baseURL: 'https://x/auth', fetch: answer({}) }).refreshTokens()).rejects.not.toHaveProperty('retryAfter')
+    await expect(createLukkClient({ baseURL: 'https://x/auth', fetch: answer({ 'Retry-After': 'Wed, 21 Oct 2026 07:28:00 GMT' }) }).refreshTokens()).rejects.not.toHaveProperty('retryAfter')
+    await expect(createLukkClient({ baseURL: 'https://x/auth', fetch: answer({ 'Retry-After': '5s' }) }).refreshTokens()).rejects.not.toHaveProperty('retryAfter')
+    await expect(createLukkClient({ baseURL: 'https://x/auth', fetch: answer({ 'Retry-After': 'x5' }) }).refreshTokens()).rejects.not.toHaveProperty('retryAfter')
+  })
+})
+
 describe('request behaviour', () => {
   it('returns undefined for an empty/204 body', async () => {
     const fetch = vi.fn(async () => new Response(null, { status: 204 }))

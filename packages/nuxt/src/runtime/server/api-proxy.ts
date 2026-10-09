@@ -142,7 +142,8 @@ export default defineEventHandler(async (event) => {
 
   // Force `Accept: application/json` so auth/validation errors render as JSON (see
   // docs/transport-modes.md). Opt out to forward the browser's Accept for non-JSON routes.
-  const accept = apiForceJson ? 'application/json' : (getRequestHeader(event, 'accept') ?? '')
+  // `undefined` when the browser sent none: then there is nothing to set (see `blanked` below).
+  const accept = apiForceJson ? 'application/json' : getRequestHeader(event, 'accept')
   const forwarded: Record<string, string> = {
     // FIRST, so a pathological `confirmationHeader` rename can never clobber a header set below.
     // Symmetric with `authorization`: the step-up token is a credential the browser must never
@@ -151,7 +152,7 @@ export default defineEventHandler(async (event) => {
     // unreachable; injecting makes it work the same way it does through the auth proxy, from the
     // sealed session rather than from whatever the browser claimed.
     [confirmationHeader.toLowerCase()]: sealed.confirmation ?? '',
-    'accept': accept,
+    ...(accept === undefined ? {} : { accept }),
     // The app's origin is this proxy's to police; the upstream's CORS decision must not apply to it.
     'origin': '',
     'cookie': '',
@@ -185,7 +186,8 @@ export default defineEventHandler(async (event) => {
   // What this proxy blanked — and nothing else: a header the browser itself sent empty is a legitimate
   // value (RFC 9110 §5.5 allows an empty field value) and goes through as sent. (`Headers.delete` matches
   // names case-insensitively, so the bag's spelling needs no normalising.)
-  const blanked = new Set(Object.keys(forwarded).filter(name => forwarded[name] === ''))
+  // Accept is never one: the proxy sets its own or forwards the browser's, so an empty one is the browser's.
+  const blanked = new Set(Object.keys(forwarded).filter(name => forwarded[name] === '' && name !== 'accept'))
 
   // Inject the bearer server-side; strip inbound Cookie/Authorization + spoofable
   // headers; `streamRequest` pipes the body through instead of buffering it.

@@ -15,6 +15,9 @@ class SupersededRefresh extends Error {}
 /** What a restore learned. `superseded`: a newer sign-in or logout decided the session instead. */
 export interface RestoreOutcome { pair: RefreshOutcome, unavailable: boolean, superseded?: boolean }
 
+/** The longest `Retry-After` a refresh honours before its one retry — a request is not held longer. */
+export const MAX_REFRESH_RETRY_AFTER_S = 10
+
 /** How long a restore waits for another tab's sign-in cookie to land before retrying a 409. */
 export const REPLACED_SESSION_RETRY_DELAY_MS = 400
 
@@ -79,7 +82,20 @@ export default defineNuxtPlugin({
           if (epoch !== state.epoch) throw new SupersededRefresh('lukk: a sign-in replaced the session before this refresh was sent')
         }
 
-        const pair = await client.refreshTokens()
+        const pair = await client.refreshTokens().catch(async (error: unknown) => {
+          // The BFF's "lukk is slow to rotate — come back in N s". Once, after that: the retry joins the
+          // rotation still out, or adopts it if it has landed. Left to the user's next action instead, the
+          // session waited for nothing, reported "couldn't tell", and its token sat consumed meanwhile.
+          // Read defensively: a binding's refresh can reject with anything, `null` included.
+          const e = error as { status?: number, retryAfter?: number } | null
+          // Stryker disable next-line OptionalChaining: equivalent — for a `null` rejection the TypeError `e.status` throws is, like `null`, neither a 409, a superseded refresh nor an auth rejection, so every catcher answers the same.
+          const retryAfter = e?.status === 503 ? e.retryAfter : undefined
+          if (retryAfter === undefined) throw error
+          await new Promise(resolve => setTimeout(resolve, Math.min(retryAfter, MAX_REFRESH_RETRY_AFTER_S) * 1000))
+          // Stryker disable next-line StringLiteral: never surfaced — see above.
+          if (epoch !== state.epoch) throw new SupersededRefresh('lukk: the session changed while this refresh waited to retry')
+          return client.refreshTokens()
+        })
         if (epoch !== state.epoch) {
           if (import.meta.client && cfg.mode === 'direct') await endStaleRotation(pair.access_token)
           // Stryker disable next-line StringLiteral: never surfaced — see above.

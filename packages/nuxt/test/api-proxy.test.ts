@@ -273,10 +273,25 @@ describe('app-API proxy', () => {
     }
   })
 
-  it('sends an empty Accept when forceJson is off and the browser sent none', async () => {
+  it('sets no Accept when forceJson is off and the browser sent none', async () => {
     __test.runtimeConfig.lukk = { ...__test.runtimeConfig.lukk, apiForceJson: false } as unknown as Record<string, unknown>
     await run(ev({ path: '/api/x' }))
-    expect(proxyRequest).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ headers: expect.objectContaining({ accept: '' }) }))
+    // Nothing to forward, so nothing set: an empty Accept is not what the browser sent.
+    expect(((proxyRequest.mock.calls[0] as unknown[])[2] as { headers: object }).headers).not.toHaveProperty('accept')
+  })
+
+  it('with forceJson off, forwards an Accept the browser sent EMPTY as it was sent', async () => {
+    // The proxy does not blank Accept — it only ever forwards the browser's, or sets its own — so an
+    // explicitly empty one is the browser's value, not a blank for the fetch wrapper to remove.
+    __test.runtimeConfig.lukk = { ...__test.runtimeConfig.lukk, apiForceJson: false } as unknown as Record<string, unknown>
+    await run(ev({ path: '/api/x', headers: { accept: '' } }))
+    const opts = proxyRequest.mock.calls.at(-1)![2] as { fetch: (input: string, init: RequestInit) => Promise<Response>, headers: Record<string, string> }
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 204 }))
+
+    await opts.fetch('https://laravel.test/x', { headers: new Headers(opts.headers) })
+
+    expect(new Headers(fetchSpy.mock.calls[0]![1]!.headers).get('accept')).toBe('')
+    fetchSpy.mockRestore()
   })
 
   it('streams uploads without clobbering the multipart Content-Type', async () => {

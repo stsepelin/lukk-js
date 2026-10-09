@@ -353,5 +353,9 @@ async function toLukkError(res: Response): Promise<LukkError> {
   let body: { message?: string, errors?: Record<string, string[]>, reason?: unknown } = {}
   try { body = JSON.parse(await res.text()) }
   catch { /* non-JSON error body */ }
-  return lukkError(res.status, res.statusText, body)
+  const error = lukkError(res.status, res.statusText, body)
+  // Delay-seconds only (RFC 9110 §10.2.3); the HTTP-date form is left out rather than guessed at.
+  const retryAfter = res.headers.get('retry-after')
+  if (retryAfter && /^\d+$/.test(retryAfter)) error.retryAfter = Number(retryAfter)
+  return error
 }

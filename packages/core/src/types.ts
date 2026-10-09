@@ -189,6 +189,12 @@ export interface LukkError {
    * confirm again.
    */
   reason?: string
+  /**
+   * The server's `Retry-After`, in seconds, where it gave one as a number. The lukk-nuxt BFF answers a
+   * refresh lukk is slow to rotate with `503` and `Retry-After`: retrying then joins the rotation still in
+   * flight, or adopts it once it has landed, rather than leaving the session for the user's next action.
+   */
+  retryAfter?: number
 }
 
 /**

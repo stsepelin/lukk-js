@@ -1041,6 +1041,59 @@ describe('the /refresh subpath is served, not proxied', () => {
   })
 })
 
+describe('a rotation that lands after the request waiting on it gave up', () => {
+  // lukk rotated, but the request that asked was answered 503 at 15 s. The browser still holds the
+  // consumed token; its next request — whenever the user next acts — must adopt the rotation and seal it,
+  // never replay the token past lukk's grace window and have the family revoked.
+  const late = () => vi.fn(async (url: string, init?: RequestInit) => {
+    if (String(url).endsWith('/refresh')) {
+      return new Promise<Response>(resolve => setTimeout(() => resolve(jsonRes({ access_token: 'late-at', refresh_token: 'late-rt', expires_in: 900 })), 20_000))
+    }
+    const auth = new Headers(init?.headers).get('authorization')
+    return auth === 'Bearer late-at' ? jsonRes({ id: 1 }) : jsonRes({ message: 'Unauthenticated.' }, 401)
+  })
+  const refreshCalls = () => mockFetch().fetch.mock.calls.filter(([url]) => String(url).endsWith('/refresh')).length
+
+  afterEach(() => vi.useRealTimers())
+
+  it('is adopted and sealed by the next /refresh still carrying the old cookie', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    mockFetch().fetch = late()
+    const sid = `bff-late-${Math.random()}`
+    const first = makeEvent({ path: '/api/_lukk/refresh', method: 'POST', headers: { ...sameOrigin }, body: '{}', session: makeSession({ refresh: 'old-rt', sid } as TokenSession) })
+    const answered = run(first)
+    await vi.advanceTimersByTimeAsync(15_000)
+    await answered
+    expect(first.status).toBe(503)
+    await vi.advanceTimersByTimeAsync(60_000) // lands at 20 s; the user comes back much later
+
+    const again = makeSession({ refresh: 'old-rt', sid } as TokenSession)
+    const body = await run(makeEvent({ path: '/api/_lukk/refresh', method: 'POST', headers: { ...sameOrigin }, body: '{}', session: again }))
+
+    expect(body).toEqual({ ok: true, expires_in: 900 })
+    expect(again.update).toHaveBeenCalledWith({ access: 'late-at', refresh: 'late-rt' })
+    expect(refreshCalls()).toBe(1)
+  })
+
+  it('is adopted and sealed by the next proxied call\'s 401 retry', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    mockFetch().fetch = late()
+    const sid = `bff-retry-${Math.random()}`
+    const answered = run(makeEvent({ path: '/api/_lukk/user', session: makeSession({ access: 'old', refresh: 'old-rt', sid } as TokenSession) }))
+    await vi.advanceTimersByTimeAsync(15_000)
+    await answered
+    await vi.advanceTimersByTimeAsync(60_000)
+
+    const again = makeSession({ access: 'old', refresh: 'old-rt', sid } as TokenSession)
+    const event = makeEvent({ path: '/api/_lukk/user', session: again })
+    expect(await run(event)).toEqual({ id: 1 })
+
+    expect(again.update).toHaveBeenCalledWith({ access: 'late-at', refresh: 'late-rt' })
+    expect(again.clear).not.toHaveBeenCalled()
+    expect(refreshCalls()).toBe(1)
+  })
+})
+
 describe('cache directives', () => {
   it('marks every auth response uncacheable, replacing the upstream header it drops', async () => {
     // lukk stamps no-store on credential responses; this handler returns a body and drops upstream

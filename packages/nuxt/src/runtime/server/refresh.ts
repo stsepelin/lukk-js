@@ -17,7 +17,29 @@ export interface TokenSession {
 // On `globalThis`, not module scope: the Nuxt app's server bundle (SSR hydration) gets its own copy of
 // this module, separate from Nitro's handlers, so a module-level Map never collapsed a page render's
 // refresh with a proxy's for the same session.
-const inflightRefresh: Map<string, Promise<RefreshResult>> = ((globalThis as { __lukkInflightRefresh?: Map<string, Promise<RefreshResult>> }).__lukkInflightRefresh ??= new Map())
+const inflightRefresh: Map<string, Flight> = ((globalThis as { __lukkInflightRefresh?: Map<string, Flight> }).__lukkInflightRefresh ??= new Map())
+
+/**
+ * Rotations that landed after every caller waiting on them had given up — see `REFRESH_HOLD_MS`. Keyed by
+ * session, and adoptable only by a request presenting the very token that rotation consumed.
+ *
+ * **Per process**, like the single-flight above. A multi-instance BFF without sticky sessions does not
+ * share it: a retry that lands on another instance replays the consumed token, and lukk's grace window is
+ * then all that stands between it and a family revoke.
+ */
+const heldRefresh: Map<string, Held> = ((globalThis as { __lukkHeldRefresh?: Map<string, Held> }).__lukkHeldRefresh ??= new Map())
+
+/** A refresh on the wire, and how many callers are still waiting on it. */
+interface Flight {
+  run: Promise<RefreshResult>
+  waiting: number
+}
+
+/** A rotation nobody received: its outcome, and the digest of the refresh token it consumed. */
+interface Held {
+  token: Promise<string>
+  result: RefreshResult
+}
 
 /**
  * The outcome of a rotation attempt.
@@ -38,17 +60,14 @@ export type RefreshResult = {
 /**
  * How long one caller waits on a refresh — the rotation itself is never cut short (see `rawRefresh`).
  *
- * The upstream deadline, deliberately, and not something longer. A caller that gives up answers "couldn't
- * tell, retry in `REFRESH_RETRY_AFTER_S`", and while the refresh is still out that retry JOINS it. If it
- * landed meanwhile with nobody left to receive it, the retry replays the old token instead — and lukk's
- * grace window (30 s by default) answers a replay with a sibling, not a revoke, only while it is young.
- * 15 s of waiting plus 5 s before the retry keeps that replay inside the default window; a longer wait
- * would push it out. No settled pair is kept for a late retry: the grace window already covers it, and
- * holding token pairs in memory longer than a request needs them is a cost of its own.
+ * The upstream deadline: a request is not held longer on a refresh than on any other call to lukk. A
+ * caller that gives up answers "couldn't tell, retry in `REFRESH_RETRY_AFTER_S`". Its retry joins the
+ * refresh if it is still out, and adopts the outcome if it landed meanwhile (`REFRESH_HOLD_MS`) — neither
+ * replays the consumed token, so nothing here leans on lukk's grace window being long enough.
  */
 export const REFRESH_WAIT_MS = UPSTREAM_TIMEOUT_MS
 
-/** The `Retry-After` a caller that stopped waiting is told — short, so its replay stays inside lukk's grace window. */
+/** The `Retry-After` a caller that stopped waiting is told. */
 export const REFRESH_RETRY_AFTER_S = 5
 
 /**
@@ -59,36 +78,93 @@ export const REFRESH_RETRY_AFTER_S = 5
  */
 export const REFRESH_INFLIGHT_MAX_MS = 5 * 60_000
 
+/**
+ * How long a rotation that landed with nobody left to receive it is kept for the session's next refresh.
+ *
+ * Dropping it was a release blocker: lukk had rotated, the session still held the consumed token, and its
+ * next refresh came at the user's next action — not after any `Retry-After` — so it replayed that token
+ * long past the grace window, and reuse detection revoked the family as stolen. Kept, the next request
+ * still presenting that token (and only one presenting it: the key is the session, the check a digest of
+ * the token) adopts and seals the rotated pair instead. Every request that does, not just the first — a
+ * page coming back fires several at once with the same old cookie. Ten minutes, then let go: a replay
+ * that late revokes the family whatever we do, and a pair should not sit in memory longer than it helps.
+ */
+export const REFRESH_HOLD_MS = 10 * 60_000
+
 /** Single-flight the server-side refresh per session, returning the rotation outcome. */
 export function refreshOnce(session: { id?: string, data: TokenSession }, baseURL: string, clientIp = ''): Promise<RefreshResult> {
+  const token = session.data.refresh!
   // Keyed by the session's own `sid`, not h3's id: a sign-in re-seals the NEW session under the old h3
   // id, so a refresh for it would otherwise join one still out for the session it replaced, and seal
   // that session's tokens under the new one.
   const id = sessionKey(session)
   // No id → don't key the map (an empty key would collapse distinct sessions).
-  if (!id) return waitOn(rawRefresh(session.data.refresh!, baseURL, clientIp))
+  if (!id) return waitOn({ run: rawRefresh(token, baseURL, clientIp), waiting: 0 })
   const existing = inflightRefresh.get(id)
   if (existing) return waitOn(existing)
 
-  const run = rawRefresh(session.data.refresh!, baseURL, clientIp)
-  inflightRefresh.set(id, run)
+  const held = heldRefresh.get(id)
+  if (!held) return waitOn(fly(id, token, baseURL, clientIp))
+  return Promise.all([held.token, digest(token)]).then(([consumed, presented]) => {
+    if (consumed === presented) return held.result
+    // A different token: the session has moved on. Its own refresh — joined if one started meanwhile.
+    return waitOn(inflightRefresh.get(id) ?? fly(id, token, baseURL, clientIp))
+  })
+}
+
+/** Start the session's refresh, and keep its outcome should it land with nobody waiting. */
+function fly(id: string, token: string, baseURL: string, clientIp: string): Flight {
+  const flight: Flight = { run: rawRefresh(token, baseURL, clientIp), waiting: 0 }
+  inflightRefresh.set(id, flight)
   // Only ever THIS entry: once the backstop has dropped it, a newer refresh may hold the key.
   const forget = () => {
     clearTimeout(backstop)
-    if (inflightRefresh.get(id) === run) inflightRefresh.delete(id)
+    if (inflightRefresh.get(id) === flight) inflightRefresh.delete(id)
   }
-  const backstop = setTimeout(forget, REFRESH_INFLIGHT_MAX_MS)
-  run.then(forget, forget)
-  return waitOn(run)
+  const backstop = unref(setTimeout(forget, REFRESH_INFLIGHT_MAX_MS))
+  // Before `forget`, synchronously: there is no moment when the session has neither a flight nor the
+  // outcome, in which a request with the old token could start a replay.
+  flight.run.then((result) => {
+    if (result.pair && flight.waiting === 0) hold(id, digest(token), result)
+    forget()
+  }, forget)
+  return flight
 }
 
-/** `run`, or "retry shortly" once `REFRESH_WAIT_MS` has passed — `run` itself carries on regardless. */
-function waitOn(run: Promise<RefreshResult>): Promise<RefreshResult> {
+function hold(id: string, token: Promise<string>, result: RefreshResult): void {
+  const held: Held = { token, result }
+  heldRefresh.set(id, held)
+  unref(setTimeout(() => {
+    if (heldRefresh.get(id) === held) heldRefresh.delete(id)
+  }, REFRESH_HOLD_MS))
+}
+
+/** The flight's outcome, or "retry shortly" once `REFRESH_WAIT_MS` has passed — the flight carries on regardless. */
+function waitOn(flight: Flight): Promise<RefreshResult> {
+  flight.waiting++
   let timer: ReturnType<typeof setTimeout> | undefined
   const gaveUp = new Promise<RefreshResult>((resolve) => {
-    timer = setTimeout(() => resolve({ pair: null, retryable: true, retryAfter: REFRESH_RETRY_AFTER_S }), REFRESH_WAIT_MS)
+    timer = unref(setTimeout(() => {
+      flight.waiting--
+      resolve({ pair: null, retryable: true, retryAfter: REFRESH_RETRY_AFTER_S })
+    }, REFRESH_WAIT_MS))
   })
-  return Promise.race([run, gaveUp]).finally(() => clearTimeout(timer))
+  return Promise.race([flight.run, gaveUp]).finally(() => clearTimeout(timer))
+}
+
+/** A refresh token's SHA-256, as a string — compared, never stored as the token itself. */
+async function digest(token: string): Promise<string> {
+  // One character per byte: injective, so two tokens never compare equal unless their digests do.
+  return String.fromCharCode(...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token))))
+}
+
+/**
+ * A timer that never keeps the process alive: a hung lukk must not hold up a shutdown for minutes. On
+ * workerd and Deno a timer is a plain number, with nothing to unref.
+ */
+function unref<T>(timer: T): T {
+  (timer as { unref?: () => void }).unref?.()
+  return timer
 }
 
 async function rawRefresh(refreshToken: string, baseURL: string, clientIp: string): Promise<RefreshResult> {

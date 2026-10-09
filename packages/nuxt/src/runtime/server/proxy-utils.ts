@@ -112,9 +112,16 @@ export function reachesLukk(target: string, base: string): boolean {
   // round produced never equals the path it parses to. Compared that way, `my%20file.pdf` never settled
   // and every download with a space in its name was refused. What the parser REMOVES or rewrites — a tab,
   // a backslash that becomes `/` — still changes the path, and is still followed.
+  //
+  // A `?` or `#` a round decodes is read two ways, and both are checked: a hop that decodes and re-parses
+  // cuts the path there, and one that decodes and forwards the string keeps it as path data — where the
+  // dot segments after it still collapse. Reading only the first let `x%3F/%252e%252e/auth/login` through.
+  const lands = (url: URL) => routeWithin(url.href, b.href) !== null && (routedPath(b.pathname) !== '' || url.origin === b.origin)
   for (let round = 0; round < DECODING_ROUNDS; round++) {
-    if (routeWithin(t.href, b.href) !== null && (routedPath(b.pathname) !== '' || t.origin === b.origin)) return true
-    const next = new URL(`${t.origin}${decodeAscii(t.pathname)}`)
+    if (lands(t)) return true
+    const decoded = decodeAscii(t.pathname)
+    if (lands(new URL(`${t.origin}${decoded}`))) return true
+    const next = new URL(`${t.origin}${decoded.replace(/[?#]/g, encodeURIComponent)}`)
     if (next.pathname === t.pathname) return false
     t = next
   }

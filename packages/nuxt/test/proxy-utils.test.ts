@@ -139,6 +139,24 @@ describe('reachesLukk', () => {
     expect(reachesLukk('https://api.test/x/%252e%252e/login', 'https://auth.test/')).toBe(false)
   })
 
+  it.each([
+    '/api/x%3F/%252e%252e/auth/login', // `%3F` decodes to `?`, which a re-parse would read as the query
+    '/api/x%23/%252e%252e/auth/login', // `#` likewise, as the fragment
+    '/api/x%253F/%25252e%25252e/auth/login', // and the same one round later
+  ])('follows %s past a decoded `?` or `#` — a hop that decodes it may well keep it in the path', (path) => {
+    // Re-parsed, the path was cut at the decoded `?`/`#`, so the dot segments after it never collapsed and
+    // the route lukk would see behind such a hop was never looked at. Both readings are checked now.
+    expect(reachesLukk(`https://api.test${path.slice('/api'.length)}`, 'https://api.test/auth')).toBe(true)
+  })
+
+  it('checks each reading on its own: as lukk routes it now, and cut at a `?` a further round decodes', () => {
+    const base = 'https://api.test/auth'
+    // Under lukk's base as lukk itself decodes it, even though one more round would walk it back out.
+    expect(reachesLukk('https://api.test/auth/%252e%252e/x', base)).toBe(true)
+    // Only a hop that decodes twice and cuts at the `?` lands on lukk's base — the encoded reading settles.
+    expect(reachesLukk('https://api.test/auth%253Flogin', base)).toBe(true)
+  })
+
   it('still follows a decoding round to a control character, or to a backslash the parser reads as a slash', () => {
     const base = 'https://api.test/auth'
     expect(reachesLukk('https://api.test/x%255c..%255cauth/login', base)).toBe(true)
