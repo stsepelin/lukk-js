@@ -194,6 +194,14 @@ describe('api-proxy integration (real h3 + upstream)', () => {
     expect(received.headerNames).toContain('accept')
   })
 
+  it('forwards a header the browser itself sent empty — only the proxy\'s own blanks are removed', async () => {
+    const res = await fetch(`${proxyURL}/api/me`, { headers: { 'x-visitor-country': '' } })
+
+    expect(res.status).toBe(200)
+    expect(received.headerNames).toContain('x-visitor-country')
+    expect(received.visitorCountry).toBe('')
+  })
+
   it('marks every response nosniff, and sandboxes only a document', async () => {
     const json = await fetch(`${proxyURL}/api/me`)
     expect(json.headers.get('x-content-type-options')).toBe('nosniff')

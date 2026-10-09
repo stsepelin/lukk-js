@@ -127,6 +127,24 @@ describe('reachesLukk', () => {
     expect(reachesLukk('https://api.test/%252f%252fauth.test/auth/login', 'https://auth.test')).toBe(false)
   })
 
+  it.each(['my%20file.pdf', '%7Bid%7D', 'a%22b', '%3Cx%3E', 'a%5Eb', 'a%60b', 'a%7Fb'])('lets /files/%s through — an escape the parser puts straight back is settled, not still decoding', (name) => {
+    // `new URL` re-encodes these after a round decodes them, so the decoded STRING never equals the parsed
+    // path. Compared that way the path never settled, ran out of rounds and was refused: every download
+    // with a space in its name answered 404.
+    expect(reachesLukk(`https://api.test/files/${name}`, 'https://api.test/auth')).toBe(false)
+  })
+
+  it('refuses nothing on this host when lukk is mounted at the root of ANOTHER one, whatever the encoding', () => {
+    expect(reachesLukk('https://api.test/files/my%20file.pdf', 'https://auth.test')).toBe(false)
+    expect(reachesLukk('https://api.test/x/%252e%252e/login', 'https://auth.test/')).toBe(false)
+  })
+
+  it('still follows a decoding round to a control character, or to a backslash the parser reads as a slash', () => {
+    const base = 'https://api.test/auth'
+    expect(reachesLukk('https://api.test/x%255c..%255cauth/login', base)).toBe(true)
+    expect(reachesLukk('https://api.test/auth%2509/login', base)).toBe(true)
+  })
+
   it('lets an app path through once decoding settles, and refuses one still decoding after four rounds', () => {
     const base = 'https://api.test/auth'
     // Settles on the fourth look (`/x%252541` → `/x%2541` → `/x%41` → `/xA`), never under /auth.

@@ -1,5 +1,5 @@
 import { sessionKey } from './ended-sessions'
-import { reportUnusableBase, resolveTarget } from './proxy-utils'
+import { reportUnusableBase, resolveTarget, UPSTREAM_TIMEOUT_MS } from './proxy-utils'
 
 export interface TokenSession {
   access?: string
@@ -27,7 +27,37 @@ const inflightRefresh: Map<string, Promise<RefreshResult>> = ((globalThis as { _
  * leaves the refresh token UNCONSUMED and still valid, so a caller must not discard the session over
  * one. Collapsing every failure into "no pair" turned a transient throttle into a permanent logout.
  */
-export type RefreshResult = { pair: TokenSession | null, expiresIn?: number, retryable: boolean }
+export type RefreshResult = {
+  pair: TokenSession | null
+  expiresIn?: number
+  retryable: boolean
+  /** Seconds after which to try again — set only when this caller stopped WAITING on a refresh still out. */
+  retryAfter?: number
+}
+
+/**
+ * How long one caller waits on a refresh — the rotation itself is never cut short (see `rawRefresh`).
+ *
+ * The upstream deadline, deliberately, and not something longer. A caller that gives up answers "couldn't
+ * tell, retry in `REFRESH_RETRY_AFTER_S`", and while the refresh is still out that retry JOINS it. If it
+ * landed meanwhile with nobody left to receive it, the retry replays the old token instead — and lukk's
+ * grace window (30 s by default) answers a replay with a sibling, not a revoke, only while it is young.
+ * 15 s of waiting plus 5 s before the retry keeps that replay inside the default window; a longer wait
+ * would push it out. No settled pair is kept for a late retry: the grace window already covers it, and
+ * holding token pairs in memory longer than a request needs them is a cost of its own.
+ */
+export const REFRESH_WAIT_MS = UPSTREAM_TIMEOUT_MS
+
+/** The `Retry-After` a caller that stopped waiting is told — short, so its replay stays inside lukk's grace window. */
+export const REFRESH_RETRY_AFTER_S = 5
+
+/**
+ * How long a refresh stays joinable if it never settles. undici gives up on its own within minutes, but a
+ * runtime without a transport timeout would keep a hung connection — and with it the session's
+ * single-flight entry, which every later refresh for the session would join — forever. Past this, the
+ * next refresh starts afresh. Long, because dropping it early is exactly the replay the entry prevents.
+ */
+export const REFRESH_INFLIGHT_MAX_MS = 5 * 60_000
 
 /** Single-flight the server-side refresh per session, returning the rotation outcome. */
 export function refreshOnce(session: { id?: string, data: TokenSession }, baseURL: string, clientIp = ''): Promise<RefreshResult> {
@@ -36,12 +66,29 @@ export function refreshOnce(session: { id?: string, data: TokenSession }, baseUR
   // that session's tokens under the new one.
   const id = sessionKey(session)
   // No id → don't key the map (an empty key would collapse distinct sessions).
-  if (!id) return rawRefresh(session.data.refresh!, baseURL, clientIp)
+  if (!id) return waitOn(rawRefresh(session.data.refresh!, baseURL, clientIp))
   const existing = inflightRefresh.get(id)
-  if (existing) return existing
-  const run = rawRefresh(session.data.refresh!, baseURL, clientIp).finally(() => inflightRefresh.delete(id))
+  if (existing) return waitOn(existing)
+
+  const run = rawRefresh(session.data.refresh!, baseURL, clientIp)
   inflightRefresh.set(id, run)
-  return run
+  // Only ever THIS entry: once the backstop has dropped it, a newer refresh may hold the key.
+  const forget = () => {
+    clearTimeout(backstop)
+    if (inflightRefresh.get(id) === run) inflightRefresh.delete(id)
+  }
+  const backstop = setTimeout(forget, REFRESH_INFLIGHT_MAX_MS)
+  run.then(forget, forget)
+  return waitOn(run)
+}
+
+/** `run`, or "retry shortly" once `REFRESH_WAIT_MS` has passed — `run` itself carries on regardless. */
+function waitOn(run: Promise<RefreshResult>): Promise<RefreshResult> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const gaveUp = new Promise<RefreshResult>((resolve) => {
+    timer = setTimeout(() => resolve({ pair: null, retryable: true, retryAfter: REFRESH_RETRY_AFTER_S }), REFRESH_WAIT_MS)
+  })
+  return Promise.race([run, gaveUp]).finally(() => clearTimeout(timer))
 }
 
 async function rawRefresh(refreshToken: string, baseURL: string, clientIp: string): Promise<RefreshResult> {
@@ -68,9 +115,10 @@ async function rawRefresh(refreshToken: string, baseURL: string, clientIp: strin
   // walked away from, and the session still holds the consumed token. Its next refresh replays that token,
   // and once the grace window has passed reuse detection revokes the whole family as stolen (RFC 9700
   // §4.14.2) — a false logout, traded for a faster error. A timeout cannot make a rotation not happen; it
-  // can only make sure we never learn its result. So the wait — body included — is bounded only by the
-  // runtime's own transport timeouts (undici: 300 s for headers, 300 s between body chunks), and a hung
-  // lukk costs one connection per SESSION, not per request: every caller on it shares this one call.
+  // can only make sure we never learn its result. So the call — body included — is bounded only by the
+  // runtime's own transport timeouts (undici: 300 s for headers, 300 s between body chunks) and the
+  // single-flight backstop; the CALLERS waiting on it are bounded separately (`REFRESH_WAIT_MS`), and a
+  // hung lukk costs one connection per SESSION, not per request: every caller on it shares this one call.
   let res: Response
   try {
     res = await fetch(target, {
@@ -92,7 +140,11 @@ async function rawRefresh(refreshToken: string, baseURL: string, clientIp: strin
 
   // Only lukk actually rejecting the token ends the session. Anything else — a throttle, an outage,
   // a redirect we refused — left it unconsumed, so report it retryable and keep the session.
-  if (!res.ok) return { pair: null, retryable: res.status !== 401 && res.status !== 403 }
+  if (!res.ok) {
+    // Unread, so cancelled: left alone it holds the connection until the runtime collects it.
+    void res.body?.cancel().catch(() => {})
+    return { pair: null, retryable: res.status !== 401 && res.status !== 403 }
+  }
 
   const pair = await res.json() as { access_token: string, refresh_token?: string, expires_in?: number }
 

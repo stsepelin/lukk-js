@@ -147,9 +147,14 @@ export default defineEventHandler(async (event) => {
     // stalls would otherwise hold this request for as long as the runtime's socket timeout allows.
     // lukk unreachable, the connection dropped, or the deadline passed: answer 502 like any other
     // upstream failure, rather than letting the error escape as a 500 with a stack trace in the log.
-    // A redirect's body is never read — it is refused below — so it is not waited for either.
-    // Stryker disable next-line StringLiteral: equivalent — the text of a redirect is never read: the 3xx check below returns before it.
-    return fetchUpstream<Upstream>(target!, { method, headers, body, redirect: 'manual' }, async res => ({ res, text: isRedirect(res) ? '' : await res.text() })).catch((error: unknown) => {
+    // A redirect's body is never read — it is refused below — so it is cancelled rather than waited for,
+    // which also releases the connection.
+    return fetchUpstream<Upstream>(target!, { method, headers, body, redirect: 'manual' }, async (res) => {
+      if (!isRedirect(res)) return { res, text: await res.text() }
+      await res.body?.cancel()
+      // Stryker disable next-line StringLiteral: equivalent — the text of a redirect is never read: the 3xx check below returns before it.
+      return { res, text: '' }
+    }).catch((error: unknown) => {
       reportProxyFailure(target!, error)
       // No headers: only the status and body of this Response are read below.
       return { res: new Response(null, { status: 502 }), text: JSON.stringify({ message: 'lukk could not be reached.' }) }
@@ -188,7 +193,7 @@ export default defineEventHandler(async (event) => {
     }
     if (await sessionEnded(sessionKey(s))) return replaced()
 
-    const { pair, expiresIn, retryable } = await refreshOnce(s, baseURL, clientIp)
+    const { pair, expiresIn, retryable, retryAfter } = await refreshOnce(s, baseURL, clientIp)
     if (await sessionEnded(sessionKey(s))) {
       revokeDroppedSession(event, { access: pair?.access, refresh: pair?.refresh }, baseURL, clientIp)
       return replaced()
@@ -196,6 +201,8 @@ export default defineEventHandler(async (event) => {
 
     if (!pair) {
       if (!retryable) await clearSession(event, s, sessionName, cookieOptions)
+      // The rotation is still out: come back shortly, and the retry joins it (see `REFRESH_WAIT_MS`).
+      if (retryAfter) setResponseHeader(event, 'retry-after', String(retryAfter))
       setResponseStatus(event, retryable ? 503 : 401)
       return { message: 'Unauthenticated.' }
     }

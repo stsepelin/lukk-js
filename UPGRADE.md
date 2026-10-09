@@ -117,13 +117,18 @@ replacing its hook, and keep authenticated calls on the API's origin.
   ends the session even when the access token has expired (RFC 7009 §2.1). Optional; older lukk
   releases ignore it.
 - **In BFF mode `user.endpoint` resolves under `app.baseURL`**, like every other BFF route. An app mounted
-  under a base path that worked around this with an absolute endpoint can drop the workaround.
+  under a base path that worked around this with an absolute endpoint can drop the workaround. **Action
+  needed** if it worked around it with a base-prefixed RELATIVE endpoint instead — `user.endpoint:
+  '/admin/api/me'` under `app.baseURL: '/admin/'` now resolves to `/admin/admin/api/me` and 404s, which
+  signs everyone out on load. Drop the prefix: `user.endpoint: '/api/me'`.
 - **Direct mode no longer prefixes a relative `api.target` with `app.baseURL`** in `useLukkFetch`. The
   prefix came in earlier in this release cycle and never shipped; only a direct-mode app tracking the
   branch would notice.
 - **A refresh is never abandoned on a timer.** lukk commits a rotation as soon as it receives the
   request, so giving up after 15 s lost the new token and the next refresh past the grace window revoked
   the whole session. Other upstream calls keep the 15 s deadline, which now also covers reading the body.
+  A request is still not held on a slow refresh: after 15 s `/api/_lukk/refresh` answers `503` with
+  `Retry-After: 5` (the session is kept), and the retry joins the refresh still in flight.
 - **An unearnable step-up is remembered per app**, not per `useLukkConfirmation()` call: a modal and a
   page using separate instances now both see the refusal, and the action waiting in one is rejected.
 

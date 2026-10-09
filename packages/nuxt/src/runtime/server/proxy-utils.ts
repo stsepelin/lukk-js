@@ -106,11 +106,17 @@ export function reachesLukk(target: string, base: string): boolean {
   // `%252e%252e/auth/login` into `../auth/login` and `%2561uth/login` into `/auth/login`. So each round
   // of decoding is checked as well, re-parsed so that a dot segment it produced collapses as it would
   // there. Re-parsed under the TARGET's origin, so a leading `//` it produced stays a path.
+  //
+  // Settled is judged on the RE-PARSED path, never on the decoded string: the parser puts some escapes
+  // straight back (`%20`, `%22`, `%3C`, `%7B`, … — characters a path may not hold bare), so the string a
+  // round produced never equals the path it parses to. Compared that way, `my%20file.pdf` never settled
+  // and every download with a space in its name was refused. What the parser REMOVES or rewrites — a tab,
+  // a backslash that becomes `/` — still changes the path, and is still followed.
   for (let round = 0; round < DECODING_ROUNDS; round++) {
     if (routeWithin(t.href, b.href) !== null && (routedPath(b.pathname) !== '' || t.origin === b.origin)) return true
-    const decoded = decodeAscii(t.pathname)
-    if (decoded === t.pathname) return false
-    t = new URL(`${t.origin}${decoded}`)
+    const next = new URL(`${t.origin}${decodeAscii(t.pathname)}`)
+    if (next.pathname === t.pathname) return false
+    t = next
   }
 
   // Still decoding to something new after that many rounds: no route of an app is encoded that deep on

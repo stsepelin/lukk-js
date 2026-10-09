@@ -315,13 +315,16 @@ describe('app-API proxy', () => {
     const opts = proxyRequest.mock.calls.at(-1)![2] as { fetch?: (input: string, init: RequestInit) => Promise<Response> }
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 204 }))
 
-    await opts.fetch!('https://laravel.test/me', { headers: new Headers({ origin: '', cookie: '', authorization: 'Bearer tok', accept: 'application/json' }) })
+    await opts.fetch!('https://laravel.test/me', { headers: new Headers({ 'origin': '', 'cookie': '', 'authorization': 'Bearer tok', 'accept': 'application/json', 'x-app-flag': '' }) })
 
     const sent = new Headers(fetchSpy.mock.calls[0]![1]!.headers)
     expect(sent.has('origin')).toBe(false)
     expect(sent.has('cookie')).toBe(false)
     expect(sent.get('authorization')).toBe('Bearer tok')
     expect(sent.get('accept')).toBe('application/json')
+    // Only what the PROXY blanked: a header the browser itself sent empty is a legitimate value (RFC 9110
+    // §5.5 allows an empty field value) and goes through as sent.
+    expect(sent.get('x-app-flag')).toBe('')
 
     // h3 always hands it an init; called without one it still forwards rather than throwing.
     await opts.fetch!('https://laravel.test/me', undefined as never)
@@ -871,7 +874,9 @@ describe('lukk\'s own routes, reached through the app-API proxy', () => {
     await run(ev({ path: '/api/users/auth' }))
     // A literal `%` in the app's own data decodes to nothing that reaches lukk, and is forwarded as sent.
     await run(ev({ path: '/api/search/100%25', url: '/api/search/100%25' }))
-    expect(proxyRequest.mock.calls.map(call => call[1])).toEqual(['https://api.example.com/authors', 'https://api.example.com/users/auth', 'https://api.example.com/search/100%25'])
+    // Nor does a name with a space in it, which the URL parser keeps re-encoding — it settles at once.
+    await run(ev({ path: '/api/files/Annual Report.pdf', url: '/api/files/Annual%20Report.pdf' }))
+    expect(proxyRequest.mock.calls.map(call => call[1])).toEqual(['https://api.example.com/authors', 'https://api.example.com/users/auth', 'https://api.example.com/search/100%25', 'https://api.example.com/files/Annual%20Report.pdf'])
   })
 
   it('refuses everything when lukk is mounted at the root of the same origin', async () => {

@@ -51,21 +51,83 @@ describe('refreshOnce when lukk can\'t be reached', () => {
     expect(fetchSpy).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ redirect: 'manual' }))
   })
 
-  it('never abandons a rotation in flight, however slowly lukk answers it', async () => {
+  it('never abandons a rotation in flight, but bounds how long each caller waits on it', async () => {
     // A refresh is the one call whose loss cannot be retried. Once lukk has the token it rotates it, and
-    // cutting the connection does not undo that: the replacement exists only in a response nobody would
-    // read, the session keeps the consumed token, and its next refresh — past the grace window — is the
-    // replay reuse detection punishes with a family revoke. So it is never aborted, at 15 s or otherwise.
+    // cutting the connection does not undo that — so the fetch itself is never aborted. A CALLER is not
+    // held past the deadline, though: it answers "couldn't tell, retry shortly", and its retry, still
+    // carrying the old token, joins the very same call rather than replaying that token to lukk.
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-    vi.spyOn(globalThis, 'fetch').mockImplementation((_input, init) => new Promise((resolve, reject) => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((_input, init) => new Promise((resolve, reject) => {
       init?.signal?.addEventListener('abort', () => reject(init.signal!.reason))
       setTimeout(() => resolve(new Response(JSON.stringify({ access_token: 'slow-at', refresh_token: 'slow-rt', expires_in: 900 }), { status: 200 })), 20_000)
     }))
+    const session = { id: 'slow', data: { refresh: 'rt', sid: `slow-${Math.random()}` } }
 
-    const result = refreshOnce({ id: 'slow', data: { refresh: 'rt' } }, 'https://api.example.com/auth')
-    await vi.advanceTimersByTimeAsync(20_000)
+    const first = refreshOnce(session, 'https://api.example.com/auth')
+    await vi.advanceTimersByTimeAsync(15_000)
+    await expect(first).resolves.toEqual({ pair: null, retryable: true, retryAfter: 5 })
 
-    await expect(result).resolves.toEqual({ pair: { access: 'slow-at', refresh: 'slow-rt' }, expiresIn: 900, retryable: false })
+    const retry = refreshOnce(session, 'https://api.example.com/auth')
+    await vi.advanceTimersByTimeAsync(5_000)
+
+    await expect(retry).resolves.toEqual({ pair: { access: 'slow-at', refresh: 'slow-rt' }, expiresIn: 900, retryable: false })
+    expect(fetchSpy).toHaveBeenCalledOnce()
+    vi.useRealTimers()
+  })
+
+  it('bounds the wait of a refresh with no session identity too', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() => new Promise(() => {}))
+
+    const result = refreshOnce({ data: { refresh: 'rt' } }, 'https://api.example.com/auth')
+    await vi.advanceTimersByTimeAsync(15_000)
+
+    await expect(result).resolves.toEqual({ pair: null, retryable: true, retryAfter: 5 })
+    vi.useRealTimers()
+  })
+
+  it('stops sharing a refresh that never settles after five minutes, so a hung connection cannot wedge the session', async () => {
+    // On a runtime with no transport timeout of its own, a connection that hangs forever kept the session's
+    // single-flight entry forever, and every later refresh for it joined a call that would never answer.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(() => new Promise(() => {}))
+    const session = { id: 'hung', data: { refresh: 'rt', sid: `hung-${Math.random()}` } }
+
+    void refreshOnce(session, 'https://api.example.com/auth')
+    await vi.advanceTimersByTimeAsync(5 * 60_000 - 1)
+    void refreshOnce(session, 'https://api.example.com/auth')
+    expect(fetchSpy).toHaveBeenCalledOnce() // still shared just before the backstop
+
+    await vi.advanceTimersByTimeAsync(1)
+    void refreshOnce(session, 'https://api.example.com/auth')
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
+    vi.useRealTimers()
+  })
+
+  it('never lets a dropped refresh that settles late evict the one that replaced it', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const answers: ((r: Response) => void)[] = []
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(() => new Promise((resolve) => { answers.push(resolve) }))
+    const session = { id: 'late', data: { refresh: 'rt', sid: `late-${Math.random()}` } }
+
+    void refreshOnce(session, 'https://api.example.com/auth')
+    await vi.advanceTimersByTimeAsync(5 * 60_000)
+    void refreshOnce(session, 'https://api.example.com/auth') // the replacement, now in flight
+    answers[0]!(new Response('{}', { status: 503 })) // the dropped one finally answers
+    await vi.advanceTimersByTimeAsync(0)
+
+    void refreshOnce(session, 'https://api.example.com/auth')
+    expect(fetchSpy).toHaveBeenCalledTimes(2) // joined the replacement, not a third call
+    vi.useRealTimers()
+  })
+
+  it('leaves no timer behind once a refresh settles', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ access_token: 'a' }), { status: 200 }))
+
+    await refreshOnce({ id: 'quick', data: { refresh: 'rt', sid: `quick-${Math.random()}` } }, 'https://api.example.com/auth')
+
+    expect(vi.getTimerCount()).toBe(0)
     vi.useRealTimers()
   })
 
@@ -75,6 +137,24 @@ describe('refreshOnce when lukk can\'t be reached', () => {
     const result = await refreshOnce({ id: `h3-${Math.random()}`, data: { refresh: 'rt', sid: `s-${Math.random()}` } }, 'https://lukk/auth')
 
     expect(result).toEqual({ pair: null, retryable: true })
+  })
+})
+
+describe('refreshOnce on an answer it does not read', () => {
+  it('cancels the body of a refusal, so the connection is released', async () => {
+    const cancel = vi.fn()
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(new ReadableStream({ cancel }), { status: 429 }))
+
+    const result = await refreshOnce({ id: `s-${Math.random()}`, data: { refresh: 'rt' } }, 'https://lukk/auth')
+
+    expect(result).toEqual({ pair: null, retryable: true })
+    expect(cancel).toHaveBeenCalled()
+  })
+
+  it('copes with a refusal that has no body at all', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 401 }))
+
+    await expect(refreshOnce({ id: `s-${Math.random()}`, data: { refresh: 'rt' } }, 'https://lukk/auth')).resolves.toEqual({ pair: null, retryable: false })
   })
 })
 

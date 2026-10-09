@@ -143,6 +143,50 @@ export default defineEventHandler(async (event) => {
   // Force `Accept: application/json` so auth/validation errors render as JSON (see
   // docs/transport-modes.md). Opt out to forward the browser's Accept for non-JSON routes.
   const accept = apiForceJson ? 'application/json' : (getRequestHeader(event, 'accept') ?? '')
+  const forwarded: Record<string, string> = {
+    // FIRST, so a pathological `confirmationHeader` rename can never clobber a header set below.
+    // Symmetric with `authorization`: the step-up token is a credential the browser must never
+    // hold, so a client-set one is replaced — with the SERVER-held token when the session has one.
+    // Blanking alone would have made an app-API route behind lukk's confirm middleware
+    // unreachable; injecting makes it work the same way it does through the auth proxy, from the
+    // sealed session rather than from whatever the browser claimed.
+    [confirmationHeader.toLowerCase()]: sealed.confirmation ?? '',
+    'accept': accept,
+    // The app's origin is this proxy's to police; the upstream's CORS decision must not apply to it.
+    'origin': '',
+    'cookie': '',
+    'authorization': access ? `Bearer ${access}` : '',
+    // The visitor when a trusted `clientIpHeader` is set, else our socket address — this proxy has
+    // always asserted something, and the socket is first-hand fact about this hop. Read straight
+    // off the socket rather than via `getRequestIP`: that consults `event.context.clientAddress`
+    // BEFORE honouring `xForwardedFor: false`, so any middleware populating it from a header
+    // would silently reinstate spoofing. (On non-Node presets the mock socket is empty and this
+    // yields '' — there, `clientIpHeader` is the only way the upstream learns the caller.)
+    // `x-forwarded-for` is deliberately NOT in SPOOFABLE_FORWARDING: the spread must not blank it,
+    // and h3 REPLACES the client's own header with this value rather than appending to it.
+    'x-forwarded-for': clientIp || event.node.req.socket?.remoteAddress || '',
+    // RFC 9110 §7.6.3: a proxy adds itself to Via. A pseudonym, not the internal hostname.
+    'via': viaHeader(event),
+    // h3 will read a sealed session from `x-<cookie name>-session` unless told not to (see the
+    // `sessionHeader: false` on every useSession call). Blank it on the way upstream too, so the
+    // app API can never be handed one either.
+    [`x-${sessionName.toLowerCase()}-session`]: '',
+    ...SPOOFABLE_FORWARDING,
+    // Last, so it can blank anything the client named in `Connection` (RFC 9110 §7.6.1) — but
+    // never the headers this proxy sets itself, or a client could use `Connection` to strip its
+    // own `authorization` and the step-up token on the way through.
+    // Stryker disable next-line StringLiteral: `'cookie'` is inert in this list — the bag already
+    // set `cookie: ''` above, so blanking it writes the identical value under the identical key,
+    // and no input can tell the two apart. (Line-granular, so the other five names are ignored
+    // with it; each stays pinned by the Connection-strip test, which asserts that the value this
+    // proxy set still reaches the upstream when the client names that header in `Connection`.)
+    ...hopByHopHeaders(event, ['authorization', 'cookie', 'x-forwarded-for', 'via', 'accept', 'content-type', confirmationHeader]),
+  }
+  // What this proxy blanked — and nothing else: a header the browser itself sent empty is a legitimate
+  // value (RFC 9110 §5.5 allows an empty field value) and goes through as sent. (`Headers.delete` matches
+  // names case-insensitively, so the bag's spelling needs no normalising.)
+  const blanked = new Set(Object.keys(forwarded).filter(name => forwarded[name] === ''))
+
   // Inject the bearer server-side; strip inbound Cookie/Authorization + spoofable
   // headers; `streamRequest` pipes the body through instead of buffering it.
   // `sendProxy` swallows a failed fetch into an opaque 502 with the reason only on `error.cause`,
@@ -156,49 +200,11 @@ export default defineEventHandler(async (event) => {
     // opaque redirect (status 0), or — Node's undici, workerd, Deno — the real 3xx with its headers.
     // onResponse turns either into a clean 502 (matching the BFF proxy).
     fetchOptions: { redirect: 'manual' },
-    // h3 merges the bag below OVER the client's headers, so blanking is the only way to override one — and
+    // h3 merges `forwarded` OVER the client's headers, so blanking is the only way to override one — and
     // a blank is still a header: `Origin:` with no value is an Origin a CORS layer upstream sees as present
     // and judges, and `Cookie:` an empty cookie list. What this proxy blanked, it means to remove.
-    fetch: (input, init) => globalThis.fetch(input, { ...init, headers: withoutBlanks(init?.headers) }),
-    headers: {
-      // FIRST, so a pathological `confirmationHeader` rename can never clobber a header set below.
-      // Symmetric with `authorization`: the step-up token is a credential the browser must never
-      // hold, so a client-set one is replaced — with the SERVER-held token when the session has one.
-      // Blanking alone would have made an app-API route behind lukk's confirm middleware
-      // unreachable; injecting makes it work the same way it does through the auth proxy, from the
-      // sealed session rather than from whatever the browser claimed.
-      [confirmationHeader.toLowerCase()]: sealed.confirmation ?? '',
-      'accept': accept,
-      // The app's origin is this proxy's to police; the upstream's CORS decision must not apply to it.
-      'origin': '',
-      'cookie': '',
-      'authorization': access ? `Bearer ${access}` : '',
-      // The visitor when a trusted `clientIpHeader` is set, else our socket address — this proxy has
-      // always asserted something, and the socket is first-hand fact about this hop. Read straight
-      // off the socket rather than via `getRequestIP`: that consults `event.context.clientAddress`
-      // BEFORE honouring `xForwardedFor: false`, so any middleware populating it from a header
-      // would silently reinstate spoofing. (On non-Node presets the mock socket is empty and this
-      // yields '' — there, `clientIpHeader` is the only way the upstream learns the caller.)
-      // `x-forwarded-for` is deliberately NOT in SPOOFABLE_FORWARDING: the spread must not blank it,
-      // and h3 REPLACES the client's own header with this value rather than appending to it.
-      'x-forwarded-for': clientIp || event.node.req.socket?.remoteAddress || '',
-      // RFC 9110 §7.6.3: a proxy adds itself to Via. A pseudonym, not the internal hostname.
-      'via': viaHeader(event),
-      // h3 will read a sealed session from `x-<cookie name>-session` unless told not to (see the
-      // `sessionHeader: false` on every useSession call). Blank it on the way upstream too, so the
-      // app API can never be handed one either.
-      [`x-${sessionName.toLowerCase()}-session`]: '',
-      ...SPOOFABLE_FORWARDING,
-      // Last, so it can blank anything the client named in `Connection` (RFC 9110 §7.6.1) — but
-      // never the headers this proxy sets itself, or a client could use `Connection` to strip its
-      // own `authorization` and the step-up token on the way through.
-      // Stryker disable next-line StringLiteral: `'cookie'` is inert in this list — the bag already
-      // set `cookie: ''` above, so blanking it writes the identical value under the identical key,
-      // and no input can tell the two apart. (Line-granular, so the other five names are ignored
-      // with it; each stays pinned by the Connection-strip test, which asserts that the value this
-      // proxy set still reaches the upstream when the client names that header in `Connection`.)
-      ...hopByHopHeaders(event, ['authorization', 'cookie', 'x-forwarded-for', 'via', 'accept', 'content-type', confirmationHeader]),
-    },
+    fetch: (input, init) => globalThis.fetch(input, { ...init, headers: without(init?.headers, blanked) }),
+    headers: forwarded,
     // Not a cookie/cache passthrough: strip upstream Set-Cookie, restore the rotated session,
     // and (opt-in) re-emit only allow-listed app-API cookies. Keep it out of shared caches.
     async onResponse(ev, response) {
@@ -289,12 +295,10 @@ export default defineEventHandler(async (event) => {
 /** JSON (`application/json`, `application/*+json`) and PDF — the response types left unsandboxed. */
 const UNSANDBOXED_TYPE = /^application\/(?:(?:[\w.-]+\+)?json|pdf)\s*(?:;|$)/i
 
-/** The outgoing headers minus every one left blank — see the `fetch` option above. */
-function withoutBlanks(init: HeadersInit | undefined): Headers {
+/** The outgoing headers minus the named ones — see the `fetch` option above. */
+function without(init: HeadersInit | undefined, names: ReadonlySet<string>): Headers {
   const headers = new Headers(init)
-  for (const [name, value] of [...headers]) {
-    if (value === '') headers.delete(name)
-  }
+  for (const name of names) headers.delete(name)
   return headers
 }
 

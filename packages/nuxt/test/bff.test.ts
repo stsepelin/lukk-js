@@ -548,6 +548,15 @@ describe('BFF proxy', () => {
     expect(event.status).toBe(502)
   })
 
+  it('cancels the body of a redirect it refuses, so the connection is released', async () => {
+    const cancel = vi.fn()
+    mockFetch().fetch = vi.fn().mockResolvedValue(new Response(new ReadableStream({ cancel }), { status: 302, headers: { location: 'https://evil.example/x' } }))
+    const event = makeEvent({ path: '/api/_lukk/x', method: 'POST', headers: { ...sameOrigin }, session: makeSession({ access: 'a' }) })
+
+    expect(await run(event)).toEqual({ message: 'Upstream redirect rejected.' })
+    expect(cancel).toHaveBeenCalled()
+  })
+
   it('rejects a 3xx upstream response without chasing the Location', async () => {
     const session = makeSession({ access: 'a', refresh: 'r' })
     mockFetch().fetch = vi.fn().mockResolvedValue(new Response(null, { status: 302, headers: { location: 'https://evil.example/x' } }))
@@ -1009,6 +1018,26 @@ describe('the /refresh subpath is served, not proxied', () => {
     await run(ev2)
     expect(ev2.status).toBe(401)
     expect(rejected.data).toEqual({})
+    // Only a wait that ran out says when to come back; a throttle's own timing is lukk's to give.
+    expect((ev1 as { __res?: Record<string, string> }).__res?.['retry-after']).toBeUndefined()
+  })
+
+  it('answers a refresh lukk is slow to rotate with a retryable 503 and Retry-After, keeping the session', async () => {
+    // The rotation itself is never aborted, but the browser is not held on it: it is told to come back,
+    // and its retry joins the call still out rather than replaying the token lukk may already have rotated.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const slow = makeSession({ refresh: 'rt', sid: `slow-${Math.random()}` } as TokenSession)
+    mockFetch().fetch = vi.fn(() => new Promise(() => {}))
+    const event = makeEvent({ path: '/api/_lukk/refresh', method: 'POST', headers: { ...sameOrigin }, body: '{}', session: slow })
+
+    const result = run(event)
+    await vi.advanceTimersByTimeAsync(15_000)
+
+    expect(await result).toEqual({ message: 'Unauthenticated.' })
+    expect(event.status).toBe(503)
+    expect((event as { __res?: Record<string, string> }).__res?.['retry-after']).toBe('5')
+    expect(slow.clear).not.toHaveBeenCalled()
+    vi.useRealTimers()
   })
 })
 
