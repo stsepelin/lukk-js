@@ -116,8 +116,20 @@ export function reachesLukk(target: string, base: string): boolean {
   // A `?` or `#` a round decodes is read two ways, and both are checked: a hop that decodes and re-parses
   // cuts the path there, and one that decodes and forwards the string keeps it as path data — where the
   // dot segments after it still collapse. Reading only the first let `x%3F/%252e%252e/auth/login` through.
+  //
+  // And simulating hops has a limit: a CHAIN of them — merge slashes, then decode, then collapse — lands
+  // where no single reading here does (`/x//%252e%252e/auth/login`). So a `.` or `..` segment that only
+  // decoding reveals is refused outright, wherever it would land: the URL parser already collapsed every
+  // one written plainly or encoded once, so what remains was encoded at least twice, which no app path is
+  // on purpose. Unless the path cannot matter — lukk at the ROOT owns every path or none: of its own host
+  // the loop below refuses everything anyway, and of another host nothing here reaches it.
+  if (routedPath(b.pathname) !== '' && revealsDotSegment(t.pathname)) return true
   const lands = (url: URL) => routeWithin(url.href, b.href) !== null && (routedPath(b.pathname) !== '' || url.origin === b.origin)
   for (let round = 0; round < DECODING_ROUNDS; round++) {
+    // lukk's own reading. Defence in depth since the dot-segment refusal above: whatever it catches, the cut
+    // reading below catches too — that one decodes once more, which never strips a decoded `/auth/` prefix,
+    // and the dot segments that could are refused above.
+    // Stryker disable next-line ConditionalExpression: equivalent, for the reason just given.
     if (lands(t)) return true
     const decoded = decodeAscii(t.pathname)
     if (lands(new URL(`${t.origin}${decoded}`))) return true
@@ -133,6 +145,21 @@ export function reachesLukk(target: string, base: string): boolean {
 
 /** How many rounds of percent-decoding `reachesLukk` follows a path through. */
 const DECODING_ROUNDS = 4
+
+/**
+ * Whether some round of decoding `pathname` turns a whole segment into `.` or `..` — split on `/` and `\`,
+ * which every decoding hop worth worrying about treats alike. A dot inside a segment (`v1.2`, `.well-known`,
+ * `..y`) is a name, not a step.
+ */
+function revealsDotSegment(pathname: string): boolean {
+  let path = pathname
+  // Stryker disable next-line EqualityOperator: equivalent — a fifth round only reveals a dot in a segment still decoding after four, which keeps `reachesLukk`'s own loop changing too, and its cap refuses that path anyway. (`round--` never ends: that timeout is a synchronous loop, the detection.)
+  for (let round = 0; round < DECODING_ROUNDS; round++) {
+    path = decodeAscii(path)
+    if (path.split(/[/\\]/).some(segment => segment === '.' || segment === '..')) return true
+  }
+  return false
+}
 
 /** Bases already reported, so a broken deploy logs once per value instead of once per request. */
 const reportedBases = new Set<string>()

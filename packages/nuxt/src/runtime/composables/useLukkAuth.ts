@@ -318,6 +318,9 @@ export function useLukkAuth(): LukkAuth {
       return true
     }, () => { renewalFailed = true }))
     state.ending = ending
+    // A refresh waiting out a Retry-After would hold this logout for the rest of the wait, then renew the
+    // session it is ending. Wake it: it sees `ending` and stands down.
+    state.wakeRefreshRetry?.()
     try {
       await ending
       // Standing down, the note isn't this logout's to clear: a newer `logout()` may have just written it.

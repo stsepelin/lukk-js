@@ -623,3 +623,60 @@ describe('logout() with an access token lukk rejects', () => {
     expect(Date.now() - started).toBeLessThan(1_000)
   })
 })
+
+describe('a refresh waiting to retry when logout() starts', () => {
+  it('stands down at once rather than renew the session the logout is ending', async () => {
+    // The BFF answered 503 + Retry-After (lukk slow to rotate), and the client waits to retry. A logout
+    // then waits for that refresh to settle before it ends the generation — so a check on the generation
+    // alone could never fire, and the retry renewed the very session being logged out.
+    vi.useFakeTimers()
+    let refreshes = 0
+    const calls = boot('bff', (path) => {
+      if (path === '/refresh') {
+        refreshes++
+        return new Response(JSON.stringify({ message: 'Unauthenticated.' }), { status: 503, headers: { 'content-type': 'application/json', 'retry-after': '5' } })
+      }
+      return json(undefined, 204)
+    })
+    const restoring = (__test.nuxtApp as { $lukkRestore: () => Promise<{ pair: unknown, unavailable: boolean, superseded?: boolean }> }).$lukkRestore()
+    await vi.advanceTimersByTimeAsync(1_000)
+
+    let done = false
+    const loggingOut = useLukkAuth().logout().then(() => { done = true })
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(done).toBe(true) // not held behind the remaining four seconds
+    await loggingOut
+    expect(await restoring).toMatchObject({ pair: null, superseded: true })
+    expect(refreshes).toBe(1)
+    expect(calls.map(call => call.path)).toEqual(['/refresh', '/logout'])
+    expect(vi.getTimerCount()).toBe(0) // the retry's own timer went with it
+  })
+
+  it('does not even start the wait when the logout began while the refresh was on the wire', async () => {
+    vi.useFakeTimers()
+    let answer!: (r: Response) => void
+    let refreshes = 0
+    const calls = boot('bff', (path) => {
+      if (path === '/refresh') {
+        refreshes++
+        return new Promise<Response>((resolve) => { answer = resolve }) as unknown as Response
+      }
+      return json(undefined, 204)
+    })
+    const restoring = (__test.nuxtApp as { $lukkRestore: () => Promise<{ pair: unknown, superseded?: boolean }> }).$lukkRestore()
+    await vi.advanceTimersByTimeAsync(0)
+
+    let done = false
+    const loggingOut = useLukkAuth().logout().then(() => { done = true })
+    await vi.advanceTimersByTimeAsync(0)
+    answer(new Response(JSON.stringify({ message: 'x' }), { status: 503, headers: { 'content-type': 'application/json', 'retry-after': '5' } }))
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(done).toBe(true)
+    await loggingOut
+    expect(await restoring).toMatchObject({ pair: null, superseded: true })
+    expect(refreshes).toBe(1)
+    expect(calls.map(call => call.path)).toEqual(['/refresh', '/logout'])
+  })
+})

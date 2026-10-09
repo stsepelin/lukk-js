@@ -1,4 +1,5 @@
-import { sessionKey } from './ended-sessions'
+import { isSessionEnded, sessionEnded, sessionKey } from './ended-sessions'
+import { forgetHeldRefresh, type Held, heldRefresh } from './held-refresh'
 import { reportUnusableBase, resolveTarget, UPSTREAM_TIMEOUT_MS } from './proxy-utils'
 
 export interface TokenSession {
@@ -18,27 +19,12 @@ export interface TokenSession {
 // this module, separate from Nitro's handlers, so a module-level Map never collapsed a page render's
 // refresh with a proxy's for the same session.
 const inflightRefresh: Map<string, Flight> = ((globalThis as { __lukkInflightRefresh?: Map<string, Flight> }).__lukkInflightRefresh ??= new Map())
-
-/**
- * Rotations that landed after every caller waiting on them had given up — see `REFRESH_HOLD_MS`. Keyed by
- * session, and adoptable only by a request presenting the very token that rotation consumed.
- *
- * **Per process**, like the single-flight above. A multi-instance BFF without sticky sessions does not
- * share it: a retry that lands on another instance replays the consumed token, and lukk's grace window is
- * then all that stands between it and a family revoke.
- */
-const heldRefresh: Map<string, Held> = ((globalThis as { __lukkHeldRefresh?: Map<string, Held> }).__lukkHeldRefresh ??= new Map())
+// The rotations that landed with nobody left to receive them live in `held-refresh.ts`.
 
 /** A refresh on the wire, and how many callers are still waiting on it. */
 interface Flight {
   run: Promise<RefreshResult>
   waiting: number
-}
-
-/** A rotation nobody received: its outcome, and the digest of the refresh token it consumed. */
-interface Held {
-  token: Promise<string>
-  result: RefreshResult
 }
 
 /**
@@ -79,17 +65,31 @@ export const REFRESH_RETRY_AFTER_S = 5
 export const REFRESH_INFLIGHT_MAX_MS = 5 * 60_000
 
 /**
- * How long a rotation that landed with nobody left to receive it is kept for the session's next refresh.
+ * How long a rotation that landed with nobody left to receive it is kept for its FIRST taker.
  *
  * Dropping it was a release blocker: lukk had rotated, the session still held the consumed token, and its
  * next refresh came at the user's next action — not after any `Retry-After` — so it replayed that token
  * long past the grace window, and reuse detection revoked the family as stolen. Kept, the next request
- * still presenting that token (and only one presenting it: the key is the session, the check a digest of
- * the token) adopts and seals the rotated pair instead. Every request that does, not just the first — a
- * page coming back fires several at once with the same old cookie. Ten minutes, then let go: a replay
- * that late revokes the family whatever we do, and a pair should not sit in memory longer than it helps.
+ * still presenting that token (only that token, for that session) adopts and seals the rotated pair.
+ *
+ * Only for as long as it can still help, and no longer than it must: ten minutes untaken (a replay that
+ * late revokes the family whatever we do); `REFRESH_STRAGGLER_MS` once taken; at once when the session
+ * presents any other token (it has moved on — the pair handed out, or a newer one) or ends.
+ *
+ * The consumed token is kept as it is, not as a digest: comparing it synchronously leaves no `await`
+ * between "nothing held, no refresh out" and starting one, in which a concurrent request could replay it.
+ * It is spent anyway, and anyone who could present it already holds the sealed cookie it came from.
  */
 export const REFRESH_HOLD_MS = 10 * 60_000
+
+/**
+ * How long a held rotation stays adoptable once taken: for the burst of requests that were already out
+ * with the old cookie (a page coming back fires several at once). At least a caller's wait plus its
+ * `Retry-After`, and comparable to lukk's own grace window. Past it, a request presenting the consumed
+ * token is not this browser catching up — it is an old cookie somewhere else, and lukk's reuse detection
+ * is the right answer to it.
+ */
+export const REFRESH_STRAGGLER_MS = 30_000
 
 /** Single-flight the server-side refresh per session, returning the rotation outcome. */
 export function refreshOnce(session: { id?: string, data: TokenSession }, baseURL: string, clientIp = ''): Promise<RefreshResult> {
@@ -100,43 +100,63 @@ export function refreshOnce(session: { id?: string, data: TokenSession }, baseUR
   const id = sessionKey(session)
   // No id → don't key the map (an empty key would collapse distinct sessions).
   if (!id) return waitOn({ run: rawRefresh(token, baseURL, clientIp), waiting: 0 })
-  const existing = inflightRefresh.get(id)
-  if (existing) return waitOn(existing)
 
   const held = heldRefresh.get(id)
-  if (!held) return waitOn(fly(id, token, baseURL, clientIp))
-  return Promise.all([held.token, digest(token)]).then(([consumed, presented]) => {
-    if (consumed === presented) return held.result
-    // A different token: the session has moved on. Its own refresh — joined if one started meanwhile.
-    return waitOn(inflightRefresh.get(id) ?? fly(id, token, baseURL, clientIp))
-  })
+  if (held?.consumed === token) return Promise.resolve(take(id, held))
+  // Any other token: the session has moved on, and the held rotation with it.
+  forgetHeldRefresh(id)
+
+  // Joined only by a request presenting the token it is rotating — the flight is keyed by both. One with
+  // another token is lukk's to rule on: joined, it was handed a pair its own token never earned.
+  return waitOn(inflightRefresh.get(flightKey(id, token)) ?? fly(id, token, baseURL, clientIp))
+}
+
+/** A session's refresh of one particular token. */
+function flightKey(id: string, token: string): string {
+  return `${id}\n${token}`
 }
 
 /** Start the session's refresh, and keep its outcome should it land with nobody waiting. */
 function fly(id: string, token: string, baseURL: string, clientIp: string): Flight {
   const flight: Flight = { run: rawRefresh(token, baseURL, clientIp), waiting: 0 }
-  inflightRefresh.set(id, flight)
+  const key = flightKey(id, token)
+  inflightRefresh.set(key, flight)
   // Only ever THIS entry: once the backstop has dropped it, a newer refresh may hold the key.
   const forget = () => {
     clearTimeout(backstop)
-    if (inflightRefresh.get(id) === flight) inflightRefresh.delete(id)
+    if (inflightRefresh.get(key) === flight) inflightRefresh.delete(key)
   }
   const backstop = unref(setTimeout(forget, REFRESH_INFLIGHT_MAX_MS))
   // Before `forget`, synchronously: there is no moment when the session has neither a flight nor the
-  // outcome, in which a request with the old token could start a replay.
+  // outcome, in which a request with the old token could start a replay. Never for a session that ended
+  // while it was out — a logout or sign-in lets go of a held one too (`markSessionEnded`).
   flight.run.then((result) => {
-    if (result.pair && flight.waiting === 0) hold(id, digest(token), result)
+    if (result.pair && flight.waiting === 0 && !isSessionEnded(id)) hold(id, token, result)
     forget()
   }, forget)
   return flight
 }
 
-function hold(id: string, token: Promise<string>, result: RefreshResult): void {
-  const held: Held = { token, result }
+function hold(id: string, consumed: string, result: RefreshResult): void {
+  const held: Held = { consumed, result, landedAt: Date.now(), taken: false }
+  held.timer = unref(setTimeout(() => forgetHeldRefresh(id, held), REFRESH_HOLD_MS))
   heldRefresh.set(id, held)
-  unref(setTimeout(() => {
-    if (heldRefresh.get(id) === held) heldRefresh.delete(id)
-  }, REFRESH_HOLD_MS))
+  // And not one another instance ended: the shared store answers asynchronously, so it is let go after.
+  void sessionEnded(id).then((ended) => {
+    if (ended) forgetHeldRefresh(id, held)
+  })
+}
+
+/** Adopt a held rotation: its pair, with what is LEFT of the access token's lifetime. */
+function take(id: string, held: Held): RefreshResult {
+  if (!held.taken) {
+    held.taken = true
+    clearTimeout(held.timer)
+    held.timer = unref(setTimeout(() => forgetHeldRefresh(id, held), REFRESH_STRAGGLER_MS))
+  }
+  const { expiresIn, ...rest } = held.result
+  if (expiresIn === undefined) return rest
+  return { ...rest, expiresIn: Math.max(0, expiresIn - Math.floor((Date.now() - held.landedAt) / 1000)) }
 }
 
 /** The flight's outcome, or "retry shortly" once `REFRESH_WAIT_MS` has passed — the flight carries on regardless. */
@@ -150,12 +170,6 @@ function waitOn(flight: Flight): Promise<RefreshResult> {
     }, REFRESH_WAIT_MS))
   })
   return Promise.race([flight.run, gaveUp]).finally(() => clearTimeout(timer))
-}
-
-/** A refresh token's SHA-256, as a string — compared, never stored as the token itself. */
-async function digest(token: string): Promise<string> {
-  // One character per byte: injective, so two tokens never compare equal unless their digests do.
-  return String.fromCharCode(...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token))))
 }
 
 /**

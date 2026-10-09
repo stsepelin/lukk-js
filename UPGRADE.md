@@ -76,6 +76,9 @@ now `'pwd' | 'otp' | 'pop' | 'user' | 'mfa'`; anything comparing against `'webau
 - Every BFF auth-proxy response carries `X-Content-Type-Options: nosniff`, and a non-JSON upstream body
   goes out as `text/plain`.
 - Route checks collapse repeated slashes, so `/api//auth/login` is refused like `/api/auth/login`.
+- The app-API proxy refuses (`404`) any path in which a round of percent-decoding reveals a whole `.` or
+  `..` segment (`/api/x/%252e%252e/y`), wherever it would lead. A dot inside a segment name
+  (`v1.2`, `.well-known`) is unaffected.
 - The app-API proxy also refuses a path that a further round of percent-decoding would turn into one
   of lukk's routes (`/api/x/%252e%252e/auth/login`, `/api/%2561uth/login`) with **404**.
 - Both proxies refuse a cross-site or same-site GET that is not a **top-level** navigation with **403** —
@@ -133,9 +136,11 @@ replacing its hook, and keep authenticated calls on the API's origin.
   caller: `/api/_lukk/refresh` answers `503` with `Retry-After: 5` (the session is kept, and lukk-nuxt's
   own client retries once after it); a proxied auth call or app-API call goes ahead with the old access
   token and gets lukk's `401`; an SSR render leaves the session to the client restore. The rotation
-  carries on regardless, and the session's next refresh — any of those callers, any time within ten
-  minutes, as long as it still presents the old token — joins it while it is out or adopts its result
-  once it has landed. **That memory is per process**: behind a multi-instance BFF without sticky
+  carries on regardless, and the session's next refresh — any of those callers, as long as it still
+  presents the old token — joins it while it is out or adopts its result once it has landed. A landed
+  result waits up to ten minutes for its first taker; once taken, it stays only 30 s more, for the
+  requests that were already out with the old cookie. It is let go at once when the session presents any
+  other refresh token, and when the session ends — a logout or a sign-in never has it re-sealed. **That memory is per process**: behind a multi-instance BFF without sticky
   sessions, a next request that reaches another instance replays the old token, and only lukk's grace
   window (`LUKK_GRACE`, 30 s by default) keeps that from revoking the session. Use sticky sessions there,
   or raise the grace window if your lukk can be slow to rotate.

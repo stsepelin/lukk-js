@@ -163,6 +163,45 @@ describe('client plugin — a refresh the server asks to retry', () => {
     expect(captured.client!.refreshTokens).toHaveBeenCalledTimes(2)
   })
 
+  it('stands down when a logout wakes the wait — its half of what logout-expired.test.ts drives end to end', async () => {
+    // `logout()` sets `ending` and wakes the wait before the generation moves on, so `ending` is all there
+    // is to see here. (The ordering itself is pinned with the real composable in logout-expired.test.ts.)
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const provide = setup()
+    captured.client!.refreshTokens.mockRejectedValueOnce({ status: 503, message: 'x', retryAfter: 5 })
+
+    const outcome = provide.lukkRestore()
+    await vi.advanceTimersByTimeAsync(1_000)
+    const state = restoreState(__test.nuxtApp)
+    state.ending = new Promise(() => {})
+    state.wakeRefreshRetry!()
+
+    expect(await outcome).toMatchObject({ pair: null, superseded: true })
+    expect(captured.client!.refreshTokens).toHaveBeenCalledOnce()
+  })
+
+  it('stands down when a sign-in began a new session while it waited', async () => {
+    // A sign-in waits on a refresh in flight only so long (REFRESH_SETTLE_TIMEOUT); one that stopped
+    // waiting can land while the refresh is still answering, or sitting out its Retry-After. The retry
+    // would then renew the session that sign-in replaced.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const provide = setup()
+    let refuse!: (error: unknown) => void
+    captured.client!.refreshTokens.mockImplementationOnce(() => new Promise((_resolve, reject) => { refuse = reject }))
+
+    const outcome = provide.lukkRestore()
+    await vi.advanceTimersByTimeAsync(1_000)
+    const { signIn } = await import('../src/runtime/utils/restore-state')
+    const signingIn = signIn(__test.nuxtApp, async () => ({ access_token: 'new' }), () => true)
+    await vi.advanceTimersByTimeAsync(10_000) // it stops waiting on the refresh, and lands
+    await signingIn
+    refuse({ status: 503, message: 'x', retryAfter: 5 })
+    await vi.advanceTimersByTimeAsync(5_000)
+
+    expect(await outcome).toMatchObject({ pair: null, superseded: true })
+    expect(captured.client!.refreshTokens).toHaveBeenCalledOnce()
+  })
+
   it('does not retry a 503 that names no Retry-After, nor another status that does', async () => {
     const provide = setup()
     captured.client!.refreshTokens.mockRejectedValueOnce({ status: 503, message: 'x' })
@@ -170,20 +209,6 @@ describe('client plugin — a refresh the server asks to retry', () => {
     captured.client!.refreshTokens.mockRejectedValueOnce({ status: 429, message: 'x', retryAfter: 1 })
     expect(await provide.lukkRestore()).toEqual({ pair: null, unavailable: true })
     expect(captured.client!.refreshTokens).toHaveBeenCalledTimes(2)
-  })
-
-  it('drops the retry when a sign-in replaced the session while it waited', async () => {
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-    const provide = setup()
-    captured.client!.refreshTokens.mockRejectedValueOnce({ status: 503, message: 'x', retryAfter: 5 })
-
-    const outcome = provide.lukkRestore()
-    await vi.advanceTimersByTimeAsync(1_000)
-    restoreState(__test.nuxtApp).epoch++
-    await vi.advanceTimersByTimeAsync(4_000)
-
-    expect(await outcome).toMatchObject({ pair: null, superseded: true })
-    expect(captured.client!.refreshTokens).toHaveBeenCalledOnce()
   })
 })
 

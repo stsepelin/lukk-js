@@ -157,6 +157,26 @@ describe('reachesLukk', () => {
     expect(reachesLukk('https://api.test/auth%253Flogin', base)).toBe(true)
   })
 
+  it.each([
+    '/x//%252e%252e/auth/login', // a slash-merging hop, then a decoding one
+    '/login/%25252e%25252e/%252e%252e/auth/login', // dot segments decoding at different depths
+    '/x/%252e/../%252e%252e%255cauth/login', // a backslash a decoding round reveals
+    '/x/%252E%252E/y', // whatever it would reach — the case of the escape does not matter
+    '/x/%252e/y', // a lone `.` too
+  ])('refuses %s: a decoding round reveals a dot segment, and no chain of hops is simulated to see where it lands', (path) => {
+    // Simulating hops misses chains — merge slashes, then decode, then collapse — so a `.` or `..` segment
+    // that only DECODING reveals is refused outright: no app path is written that way on purpose.
+    expect(reachesLukk(`https://api.test${path}`, 'https://api.test/auth')).toBe(true)
+  })
+
+  it('refuses a revealed dot segment for a non-root lukk on another host too — the path decides there', () => {
+    expect(reachesLukk('https://api.test/x/%252e%252e/y', 'http://internal:8000/auth')).toBe(true)
+  })
+
+  it.each(['/search%3Fq', '/files/my%20file.pdf', '/x%2520', '/a;b', '/q/%23tag', '/authors', '//x', '/a%253Fb', '/v1.2/x', '/file.tar.gz', '/.well-known/x', '/x/..y', '/x/.../y', '/x/%252e%252ey'])('lets %s through: no decoding round reveals a whole `.` or `..` segment', (path) => {
+    expect(reachesLukk(`https://api.test${path}`, 'https://api.test/auth')).toBe(false)
+  })
+
   it('still follows a decoding round to a control character, or to a backslash the parser reads as a slash', () => {
     const base = 'https://api.test/auth'
     expect(reachesLukk('https://api.test/x%255c..%255cauth/login', base)).toBe(true)

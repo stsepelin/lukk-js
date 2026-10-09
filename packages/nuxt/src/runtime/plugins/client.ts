@@ -91,9 +91,21 @@ export default defineNuxtPlugin({
           // Stryker disable next-line OptionalChaining: equivalent — for a `null` rejection the TypeError `e.status` throws is, like `null`, neither a 409, a superseded refresh nor an auth rejection, so every catcher answers the same.
           const retryAfter = e?.status === 503 ? e.retryAfter : undefined
           if (retryAfter === undefined) throw error
-          await new Promise(resolve => setTimeout(resolve, Math.min(retryAfter, MAX_REFRESH_RETRY_AFTER_S) * 1000))
+          // Not while a logout is ending the session, nor once one starts: `logout()` waits for this refresh
+          // to settle BEFORE it moves the generation on, so the generation alone never shows it — and the
+          // retry renewed the session being logged out. A logout that starts wakes the wait (see `logout`).
+          if (!state.ending) {
+            await new Promise<void>((resolve) => {
+              const timer = setTimeout(resolve, Math.min(retryAfter, MAX_REFRESH_RETRY_AFTER_S) * 1000)
+              state.wakeRefreshRetry = () => {
+                clearTimeout(timer)
+                resolve()
+              }
+            })
+            state.wakeRefreshRetry = undefined
+          }
           // Stryker disable next-line StringLiteral: never surfaced — see above.
-          if (epoch !== state.epoch) throw new SupersededRefresh('lukk: the session changed while this refresh waited to retry')
+          if (state.ending || epoch !== state.epoch) throw new SupersededRefresh('lukk: the session changed while this refresh waited to retry')
           return client.refreshTokens()
         })
         if (epoch !== state.epoch) {
