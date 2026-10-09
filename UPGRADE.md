@@ -138,18 +138,20 @@ replacing its hook, and keep authenticated calls on the API's origin.
   caller: `/api/_lukk/refresh` answers `503` with `Retry-After: 5` (the session is kept, and lukk-nuxt's
   own client retries once after it); a proxied auth call or app-API call goes ahead with the old access
   token and gets lukk's `401`; an SSR render leaves the session to the client restore. The rotation
-  carries on regardless, and the session's next refresh — any of those callers, as long as it still
-  presents the old token — joins it while it is out or adopts its result once it has landed. A landed
-  result waits up to ten minutes for its first taker; once taken, it stays only 30 s more, for the
-  requests that were already out with the old cookie — even if the taker refreshes the token it was handed
-  meanwhile, in which case those requests receive the taker's NEW pair rather than the one it just spent
-  (never past the original 30 s). It is let go at once when the session presents any other refresh token, and when the session
-  ends — a logout or a sign-in never has it re-sealed. One limit is accepted: if the first taker's response
-  is lost (a navigation aborts it), the browser keeps the consumed token, and its next refresh after the
-  30 s revokes the session — the same exposure as any rotation whose response is lost. **That memory is per process**: behind a multi-instance BFF without sticky
-  sessions, a next request that reaches another instance replays the old token, and only lukk's grace
-  window (`LUKK_GRACE`, 30 s by default) keeps that from revoking the session. Use sticky sessions there,
-  or raise the grace window if your lukk can be slow to rotate.
+  carries on regardless, and what it produces is journalled per session: a link from the refresh token
+  it consumed to the pair it produced. A request still presenting a consumed token — any of those callers
+  — is handed the newest pair in that chain and seals it, rather than replaying a spent token; if that
+  pair's own token is being rotated right then, it waits and is handed the result. A link lives ten minutes
+  for its first taker when nobody received the rotation, and 30 s from the moment someone did (received
+  when it landed, or taken since), for the requests already out with the old cookie. The journal is
+  dropped when the session presents a token outside it, when lukk refuses one of its tokens outright, and
+  when the session is logged out or replaced; a throttle or an outage keeps it. One limit is accepted: if
+  the response carrying a pair is lost (a navigation aborts it) and the link's window closes first, the
+  browser's replay of the consumed token revokes the session — the same exposure as any rotation whose
+  response is lost. **The journal is per process**: behind a multi-instance BFF without sticky sessions,
+  a next request that reaches another instance replays the old token, and only lukk's grace window
+  (`LUKK_GRACE`, 30 s by default) keeps that from revoking the session. Use sticky sessions there, or
+  raise the grace window if your lukk can be slow to rotate.
 - **An unearnable step-up is remembered per app**, not per `useLukkConfirmation()` call: a modal and a
   page using separate instances now both see the refusal, and the action waiting in one is rejected.
 

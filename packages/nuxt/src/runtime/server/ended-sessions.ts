@@ -21,7 +21,7 @@
  * Deliberately NOT under `server/utils`, so it is not auto-imported into the app.
  */
 
-import { forgetHeldRefresh } from './held-refresh'
+import { forgetRefreshJournal } from './refresh-journal'
 
 /** Longer than any request that could still be carrying a replaced session. */
 export const ENDED_SESSION_TTL_MS = 10 * 60_000
@@ -71,9 +71,9 @@ export function markSessionEnded(key: string | undefined, now = Date.now()): voi
 
   ended.delete(key)
   ended.set(key, now + ENDED_SESSION_TTL_MS)
-  // A rotation held for it would otherwise outlive this record: the old cookie, coming back once the
-  // record has expired, adopted and re-sealed a session that was logged out or replaced.
-  forgetHeldRefresh(key)
+  // Its rotation journal would otherwise outlive this record: the old cookie, coming back once the record
+  // has expired, adopted and re-sealed a session that was logged out or replaced.
+  forgetRefreshJournal(key)
 }
 
 export function isSessionEnded(key: string | undefined, now = Date.now()): boolean {

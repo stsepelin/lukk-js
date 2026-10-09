@@ -29,6 +29,8 @@ vi.mock('h3', () => ({
 import handler from '../src/runtime/server/bff'
 // eslint-disable-next-line import/first
 import { endSession, forgetEndedSessions, markSessionEnded, sessionEnded, useSharedEndedSessions } from '../src/runtime/server/ended-sessions'
+// eslint-disable-next-line import/first
+import { forgetRefreshJournal, refreshJournals } from '../src/runtime/server/refresh-journal'
 
 interface TokenSession { access?: string, refresh?: string, confirmation?: string, sid?: string }
 
@@ -68,6 +70,8 @@ beforeEach(() => {
   h3state.lastSessionName = undefined
   h3state.lastSessionConfig = undefined
   forgetEndedSessions()
+  // Sessions here share ids and tokens across tests; a rotation one test journalled must not answer another.
+  for (const key of [...refreshJournals.keys()]) forgetRefreshJournal(key)
 })
 afterEach(() => { __test.reset(); vi.restoreAllMocks() })
 

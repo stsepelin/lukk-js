@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { refreshOnce } from '../src/runtime/server/refresh'
 import { endSession, forgetEndedSessions, markSessionEnded, useSharedEndedSessions } from '../src/runtime/server/ended-sessions'
-import { heldRefresh } from '../src/runtime/server/held-refresh'
+import { refreshJournals } from '../src/runtime/server/refresh-journal'
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -123,14 +123,20 @@ describe('refreshOnce when lukk can\'t be reached', () => {
     vi.useRealTimers()
   })
 
-  it('leaves no timer behind once a refresh settles', async () => {
+  it('leaves only its journal link\'s timer once a refresh settles, and that ends with the straggler window', async () => {
+    // The caller received it, so it is journalled for the requests already out with the old cookie — for
+    // thirty seconds, no longer. Nothing else outlives the refresh: not its wait, not its backstop.
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ access_token: 'a' }), { status: 200 }))
+    try {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ access_token: 'a', refresh_token: 'r' }), { status: 200 }))
 
-    await refreshOnce({ id: 'quick', data: { refresh: 'rt', sid: `quick-${Math.random()}` } }, 'https://api.example.com/auth')
+      await refreshOnce({ id: 'quick', data: { refresh: 'rt', sid: `quick-${Math.random()}` } }, 'https://api.example.com/auth')
 
-    expect(vi.getTimerCount()).toBe(0)
-    vi.useRealTimers()
+      expect(vi.getTimerCount()).toBe(1)
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(vi.getTimerCount()).toBe(0)
+    }
+    finally { vi.useRealTimers() }
   })
 
   it('reports it retryable instead of throwing out of the handler as a 500', async () => {
@@ -308,7 +314,7 @@ describe('a rotation that lands after every caller gave up', () => {
   it('is never even held for a session already ended when it lands — not for a moment', async () => {
     // Let go a tick later, it was adoptable in between by any request reaching `refreshOnce` first.
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
-    const set = vi.spyOn(heldRefresh, 'set')
+    const set = vi.spyOn(refreshJournals, 'set')
     vi.spyOn(globalThis, 'fetch').mockImplementation(() => new Promise((resolve) => {
       setTimeout(() => resolve(new Response(JSON.stringify(rotated), { status: 200 })), 20_000)
     }))
@@ -344,17 +350,16 @@ describe('a rotation that lands after every caller gave up', () => {
     await expect(refreshOnce({ id: 'h3', data: { refresh: 't0', sid } }, base)).resolves.toEqual({ pair: { access: 'a2', refresh: 't2' }, expiresIn: 299, retryable: false })
     expect(fetchSpy).toHaveBeenCalledTimes(2)
 
-    // T1 again — part of the chain: it goes to lukk as before (inside grace), and the hold stays.
-    fetchSpy.mockResolvedValue(new Response(JSON.stringify({ access_token: 'a2b', refresh_token: 't2b', expires_in: 300 }), { status: 200 }))
-    await expect(refreshOnce({ id: 'h3', data: { refresh: 't1', sid } }, base)).resolves.toMatchObject({ pair: { refresh: 't2b' } })
-    expect(fetchSpy).toHaveBeenCalledTimes(3)
-    await expect(refreshOnce({ id: 'h3', data: { refresh: 't0', sid } }, base)).resolves.toMatchObject({ pair: { refresh: 't2' } })
+    // T1 again — the taker's rotation of it is journalled too: a request still carrying it adopts the head,
+    // and lukk is not asked to rotate a spent token a second time.
+    await expect(refreshOnce({ id: 'h3', data: { refresh: 't1', sid } }, base)).resolves.toMatchObject({ pair: { refresh: 't2' } })
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
 
     // Any token outside the chain still lets it go at once.
     fetchSpy.mockResolvedValue(new Response('{}', { status: 401 }))
     await refreshOnce({ id: 'h3', data: { refresh: 'tX', sid } }, base)
     await refreshOnce({ id: 'h3', data: { refresh: 't0', sid } }, base)
-    expect(fetchSpy).toHaveBeenCalledTimes(5)
+    expect(fetchSpy).toHaveBeenCalledTimes(4)
   })
 
   it('forwards even when the taker\'s own rotation lands after it gave up — never replaced by a fresh hold', async () => {
@@ -423,7 +428,7 @@ describe('a rotation that lands after every caller gave up', () => {
     await endSession(ended)
     land(new Response(JSON.stringify({ access_token: 'a2', refresh_token: 't2' }), { status: 200 }))
     await rotating
-    expect(heldRefresh.has(ended)).toBe(false)
+    expect(refreshJournals.has(ended)).toBe(false)
   })
 
   it('is let go by the taker\'s next refresh once the straggler window has closed', async () => {
@@ -498,7 +503,7 @@ describe('a rotation that lands after every caller gave up', () => {
     expect(fetchSpy).toHaveBeenCalledOnce()
   })
 
-  it('is not kept when a caller was still there to receive it', async () => {
+  it('keeps a rotation a caller received only for the straggler window', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(() => new Promise((resolve) => {
       setTimeout(() => resolve(new Response(JSON.stringify(rotated), { status: 200 })), 10_000)
@@ -508,12 +513,13 @@ describe('a rotation that lands after every caller gave up', () => {
     const first = refreshOnce({ id: 'h3', data: { refresh: 'old-rt', sid } }, base)
     await vi.advanceTimersByTimeAsync(10_000)
     await expect(first).resolves.toEqual(adopted())
+    await vi.advanceTimersByTimeAsync(30_000)
     void refreshOnce({ id: 'h3', data: { refresh: 'old-rt', sid } }, base)
 
-    expect(fetchSpy).toHaveBeenCalledTimes(2) // delivered once — nothing held for a second taker
+    expect(fetchSpy).toHaveBeenCalledTimes(2) // thirty seconds after it was received, lukk's to rule on
   })
 
-  it('is not kept when one of two callers gave up but the other still received it', async () => {
+  it('counts a rotation received by one of two callers as received', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(() => new Promise((resolve) => {
       setTimeout(() => resolve(new Response(JSON.stringify(rotated), { status: 200 })), 20_000)
@@ -525,6 +531,7 @@ describe('a rotation that lands after every caller gave up', () => {
     const second = refreshOnce({ id: 'h3', data: { refresh: 'old-rt', sid } }, base) // waits until 25 s
     await vi.advanceTimersByTimeAsync(10_000)
     await expect(second).resolves.toEqual(adopted())
+    await vi.advanceTimersByTimeAsync(30_000) // not the ten minutes a rotation nobody received gets
     void refreshOnce({ id: 'h3', data: { refresh: 'old-rt', sid } }, base)
 
     expect(fetchSpy).toHaveBeenCalledTimes(2)
@@ -542,6 +549,198 @@ describe('a rotation that lands after every caller gave up', () => {
     void refreshOnce({ id: 'h3', data: { refresh: 'old-rt', sid } }, base)
 
     expect(fetchSpy).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('the session\'s rotation journal', () => {
+  const base = 'https://api.example.com/auth'
+  const pair = (n: number, expiresIn = 300) => ({ access_token: `a${n}`, refresh_token: `t${n}`, expires_in: expiresIn })
+  /** lukk answering `/refresh` with `body` after `lagMs`. */
+  const answers = (body: object | number, lagMs: number) => () => new Promise<Response>((resolve) => {
+    setTimeout(() => resolve(typeof body === 'number' ? new Response('{}', { status: body }) : new Response(JSON.stringify(body), { status: 200 })), lagMs)
+  })
+  const present = (sid: string, token: string) => refreshOnce({ id: 'h3', data: { refresh: token, sid } }, base)
+  let fetchSpy: ReturnType<typeof vi.spyOn<typeof globalThis, 'fetch'>>
+
+  /** T0 → T1 lands at 20 s with nobody waiting (the caller gave up at 15 s). */
+  async function unreceivedRotation(sid: string) {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(answers(pair(1), 20_000))
+    void present(sid, 't0')
+    await vi.advanceTimersByTimeAsync(20_000)
+  }
+
+  afterEach(() => { vi.useRealTimers(); forgetEndedSessions(); useSharedEndedSessions(undefined) })
+
+  it('(1) adopts a rotation the taker\'s own refresh left unreceived — and lets the taken link expire', async () => {
+    // Previously revoked: the hold followed only the taker's rotation it saw land with someone waiting.
+    const sid = `j1-${Math.random()}`
+    await unreceivedRotation(sid)
+    await expect(present(sid, 't0')).resolves.toMatchObject({ pair: { refresh: 't1' } }) // taken at 20 s
+    await vi.advanceTimersByTimeAsync(1_000)
+    fetchSpy.mockImplementation(answers(pair(2), 20_000))
+    const taker = present(sid, 't1') // leaves at 21 s, gives up at 36 s, lands at 41 s unreceived
+    await vi.advanceTimersByTimeAsync(15_000)
+    await expect(taker).resolves.toMatchObject({ pair: null, retryAfter: 5 })
+    await vi.advanceTimersByTimeAsync(120_000 - 36_000)
+
+    await expect(present(sid, 't1')).resolves.toEqual({ pair: { access: 'a2', refresh: 't2' }, expiresIn: 300 - 79, retryable: false })
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
+    // T0's own link was taken at 20 s and lived thirty seconds: at 120 s it is lukk's to rule on.
+    fetchSpy.mockResolvedValue(new Response('{}', { status: 401 }))
+    await expect(present(sid, 't0')).resolves.toEqual({ pair: null, retryable: false })
+    expect(fetchSpy).toHaveBeenCalledTimes(3)
+  })
+
+  it('(2) makes a straggler wait for the head\'s rotation in flight, and hands it the result — never the token being rotated', async () => {
+    const sid = `j2-${Math.random()}`
+    await unreceivedRotation(sid)
+    await present(sid, 't0') // taken at 20 s
+    fetchSpy.mockImplementation(answers(pair(2), 2_000))
+    const taker = present(sid, 't1') // 20–22 s
+    await vi.advanceTimersByTimeAsync(1_000)
+    const straggler = present(sid, 't0') // 21 s
+    await vi.advanceTimersByTimeAsync(1_000)
+
+    await expect(taker).resolves.toMatchObject({ pair: { refresh: 't2' } })
+    await expect(straggler).resolves.toMatchObject({ pair: { access: 'a2', refresh: 't2' } })
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
+  })
+
+  it('(3) gives a straggler nothing once lukk refused the chain — waiting on that refusal, or after it', async () => {
+    const sid = `j3-${Math.random()}`
+    await unreceivedRotation(sid)
+    await present(sid, 't0')
+    fetchSpy.mockImplementation(answers(401, 2_000))
+    const taker = present(sid, 't1')
+    await vi.advanceTimersByTimeAsync(1_000)
+    const waiting = present(sid, 't0')
+    await vi.advanceTimersByTimeAsync(1_000)
+
+    await expect(taker).resolves.toEqual({ pair: null, retryable: false })
+    await expect(waiting).resolves.toEqual({ pair: null, retryable: false })
+    // And one arriving after: the journal is gone, so the old token goes to lukk — which refuses it too.
+    fetchSpy.mockResolvedValue(new Response('{}', { status: 401 }))
+    await expect(present(sid, 't0')).resolves.toEqual({ pair: null, retryable: false })
+    expect(fetchSpy).toHaveBeenCalledTimes(3)
+  })
+
+  it('(3b) keeps the chain through a refresh that failed but may be retried', async () => {
+    const sid = `j3b-${Math.random()}`
+    await unreceivedRotation(sid)
+    await present(sid, 't0')
+    fetchSpy.mockResolvedValue(new Response('{}', { status: 429 }))
+    await present(sid, 't1')
+    await expect(present(sid, 't0')).resolves.toMatchObject({ pair: { refresh: 't1' } })
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
+  })
+
+  it('(4) links a sibling lukk issued for the head\'s token, and a later straggler adopts it', async () => {
+    // lukk answers a replay inside its grace window with a sibling (T1 → T3). That is the chain going on,
+    // not the session moving away from it.
+    const sid = `j4-${Math.random()}`
+    await unreceivedRotation(sid)
+    await present(sid, 't0') // taken at 20 s: T0's link lasts to 50 s
+    fetchSpy.mockResolvedValue(new Response(JSON.stringify(pair(3)), { status: 200 }))
+    await expect(present(sid, 't1')).resolves.toMatchObject({ pair: { refresh: 't3' } })
+    await vi.advanceTimersByTimeAsync(10_000)
+
+    await expect(present(sid, 't0')).resolves.toEqual({ pair: { access: 'a3', refresh: 't3' }, expiresIn: 290, retryable: false })
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
+  })
+
+  it('hands an old cookie a live pair only within its link\'s window — ten minutes untaken, thirty seconds once taken', async () => {
+    const sid = `jw-${Math.random()}`
+    await unreceivedRotation(sid)
+    await vi.advanceTimersByTimeAsync(10 * 60_000 - 1)
+    await expect(present(sid, 't0')).resolves.toMatchObject({ pair: { refresh: 't1' } })
+    await vi.advanceTimersByTimeAsync(30_000 - 1)
+    await expect(present(sid, 't0')).resolves.toMatchObject({ pair: { refresh: 't1' } }) // a second taking extends nothing
+    fetchSpy.mockResolvedValue(new Response('{}', { status: 401 }))
+    await vi.advanceTimersByTimeAsync(1)
+    expect(refreshJournals.has(sid)).toBe(false) // its last link gone, the journal goes too
+    await expect(present(sid, 't0')).resolves.toEqual({ pair: null, retryable: false })
+  })
+
+  it('survives an upstream that hands back the token it consumed — the chain loops, the process does not', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ access_token: 'a', refresh_token: 't0' }), { status: 200 }))
+    const sid = `jl-${Math.random()}`
+    await present(sid, 't0')
+
+    await expect(present(sid, 't0')).resolves.toMatchObject({ pair: { refresh: 't0' } })
+    expect(fetchSpy).toHaveBeenCalledOnce()
+  })
+
+  it('keeps a received rotation thirty seconds for the requests already out with the old cookie', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(answers(pair(1), 1_000))
+    const sid = `jr-${Math.random()}`
+    const received = present(sid, 't0')
+    await vi.advanceTimersByTimeAsync(1_000)
+    await expect(received).resolves.toMatchObject({ pair: { refresh: 't1' } })
+
+    await vi.advanceTimersByTimeAsync(30_000 - 1)
+    await expect(present(sid, 't0')).resolves.toMatchObject({ pair: { refresh: 't1' }, expiresIn: 271 })
+    fetchSpy.mockResolvedValue(new Response('{}', { status: 401 }))
+    await vi.advanceTimersByTimeAsync(1)
+    await expect(present(sid, 't0')).resolves.toEqual({ pair: null, retryable: false })
+  })
+
+  it('is dropped when the session presents a token outside it — and nothing is handed out after', async () => {
+    const sid = `jx-${Math.random()}`
+    await unreceivedRotation(sid)
+    // A token lukk accepts, even: the journal goes because the session moved away from it, not because of
+    // any refusal.
+    fetchSpy.mockResolvedValue(new Response(JSON.stringify(pair(9)), { status: 200 }))
+    await present(sid, 'tX')
+    fetchSpy.mockResolvedValue(new Response('{}', { status: 401 }))
+    await expect(present(sid, 't0')).resolves.toEqual({ pair: null, retryable: false })
+    expect(fetchSpy).toHaveBeenCalledTimes(3)
+  })
+
+  it('is never consulted for another session, and dropped when the session ends', async () => {
+    const sid = `je-${Math.random()}`
+    await unreceivedRotation(sid)
+    fetchSpy.mockResolvedValue(new Response('{}', { status: 401 }))
+    await expect(present(`other-${Math.random()}`, 't0')).resolves.toEqual({ pair: null, retryable: false })
+    markSessionEnded(sid)
+    forgetEndedSessions()
+    await expect(present(sid, 't0')).resolves.toEqual({ pair: null, retryable: false })
+    expect(fetchSpy).toHaveBeenCalledTimes(3)
+  })
+
+  it('replaces a link when a second rotation of the same token lands — a hung one the backstop let go', async () => {
+    // The first never answered within five minutes, so a second went out; then both answered. The newer
+    // link stands, on its own lifetime — the first one's expiry must not take it.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    const lands: ((r: Response) => void)[] = []
+    fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(() => new Promise((resolve) => { lands.push(resolve) }))
+    const sid = `jd-${Math.random()}`
+    void present(sid, 't0')
+    await vi.advanceTimersByTimeAsync(5 * 60_000)
+    void present(sid, 't0')
+    await vi.advanceTimersByTimeAsync(15_000)
+    lands[0]!(new Response(JSON.stringify(pair(1)), { status: 200 }))
+    await vi.advanceTimersByTimeAsync(60_000)
+    lands[1]!(new Response(JSON.stringify(pair(2)), { status: 200 }))
+    await vi.advanceTimersByTimeAsync(9 * 60_000 + 1_000) // past the first link's ten minutes
+
+    await expect(present(sid, 't0')).resolves.toMatchObject({ pair: { refresh: 't2' } })
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps at most sixteen links per session, the oldest going first', async () => {
+    const sid = `jc-${Math.random()}`
+    await unreceivedRotation(sid) // t0 → t1
+    for (let n = 1; n <= 16; n++) {
+      fetchSpy.mockResolvedValueOnce(new Response(JSON.stringify(pair(n + 1)), { status: 200 }))
+      await present(sid, `t${n}`) // t1 → t2 … t16 → t17: seventeen links in all
+    }
+    expect(refreshJournals.get(sid)!.size).toBe(16)
+    expect(vi.getTimerCount()).toBe(16) // the pruned link's timer went with it
+    fetchSpy.mockResolvedValue(new Response('{}', { status: 401 }))
+    await expect(present(sid, 't0')).resolves.toEqual({ pair: null, retryable: false }) // pruned: lukk's to rule on
   })
 })
 

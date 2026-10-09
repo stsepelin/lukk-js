@@ -1,5 +1,5 @@
 import { isSessionEnded, sessionEnded, sessionKey } from './ended-sessions'
-import { forgetHeldRefresh, type Held, heldRefresh } from './held-refresh'
+import { forgetRefreshJournal, type Link, refreshJournals } from './refresh-journal'
 import { reportUnusableBase, resolveTarget, UPSTREAM_TIMEOUT_MS } from './proxy-utils'
 
 export interface TokenSession {
@@ -19,7 +19,7 @@ export interface TokenSession {
 // this module, separate from Nitro's handlers, so a module-level Map never collapsed a page render's
 // refresh with a proxy's for the same session.
 const inflightRefresh: Map<string, Flight> = ((globalThis as { __lukkInflightRefresh?: Map<string, Flight> }).__lukkInflightRefresh ??= new Map())
-// The rotations that landed with nobody left to receive them live in `held-refresh.ts`.
+// What each rotation produced is journalled in `refresh-journal.ts`.
 
 /** A refresh on the wire, and how many callers are still waiting on it. */
 interface Flight {
@@ -48,7 +48,7 @@ export type RefreshResult = {
  *
  * The upstream deadline: a request is not held longer on a refresh than on any other call to lukk. A
  * caller that gives up answers "couldn't tell, retry in `REFRESH_RETRY_AFTER_S`". Its retry joins the
- * refresh if it is still out, and adopts the outcome if it landed meanwhile (`REFRESH_HOLD_MS`) — neither
+ * refresh if it is still out, and adopts the outcome from the session's rotation journal if it landed meanwhile — neither
  * replays the consumed token, so nothing here leans on lukk's grace window being long enough.
  */
 export const REFRESH_WAIT_MS = UPSTREAM_TIMEOUT_MS
@@ -65,35 +65,50 @@ export const REFRESH_RETRY_AFTER_S = 5
 export const REFRESH_INFLIGHT_MAX_MS = 5 * 60_000
 
 /**
- * How long a rotation that landed with nobody left to receive it is kept for its FIRST taker.
+ * THE ROTATION JOURNAL. Every rotation that lands with a pair is recorded per session as a link from the
+ * refresh token it consumed to the pair it produced; following links from any recorded token reaches the
+ * chain's HEAD, the newest pair. A request still presenting a token that has a live link is handed that
+ * head — sealed by whichever caller it reached (the auth proxy's `/refresh` or 401 retry, the app-API
+ * proxy, SSR hydration) — rather than replaying a spent token to lukk.
  *
- * Dropping it was a release blocker: lukk had rotated, the session still held the consumed token, and its
- * next refresh came at the user's next action — not after any `Retry-After` — so it replayed that token
- * long past the grace window, and reuse detection revoked the family as stolen. Kept, the next request
- * still presenting that token (only that token, for that session) adopts and seals the rotated pair.
+ * Why it exists: a refresh is never aborted, but its callers stop waiting after `REFRESH_WAIT_MS`. A
+ * rotation that then landed with nobody left to receive it was lost — the session kept the consumed token,
+ * its next refresh came at the user's next action, long past lukk's grace window, and reuse detection
+ * revoked the family as stolen. The same happened to a page's burst of requests still carrying the old
+ * cookie after one of them had rotated it, and to a straggler handed a pair whose token the session was
+ * rotating at that very moment (it now waits on that rotation and is handed what it produced).
  *
- * Only for as long as it can still help, and no longer than it must: ten minutes untaken (a replay that
- * late revokes the family whatever we do); `REFRESH_STRAGGLER_MS` once taken; at once when the session
- * presents any other token (it has moved on — the pair handed out, or a newer one) or ends.
+ * Each link lives on its own: `REFRESH_HOLD_MS` for its first taker when no caller received it, and
+ * `REFRESH_STRAGGLER_MS` from the moment one did — received when it landed, or taken since. Taking one link
+ * never extends another. The whole journal goes when the session presents a token outside it (it has moved
+ * on), when lukk refuses one of its tokens outright, and when the session ends; a retryable failure keeps
+ * it. Never recorded for a session that has ended. At most `REFRESH_JOURNAL_MAX_LINKS` per session.
  *
- * The consumed token is kept as it is, not as a digest: comparing it synchronously leaves no `await`
- * between "nothing held, no refresh out" and starting one, in which a concurrent request could replay it.
- * It is spent anyway, and anyone who could present it already holds the sealed cookie it came from.
+ * Tokens are kept as they are, not as digests: comparing synchronously leaves no `await` between "nothing
+ * recorded, no refresh out" and starting one, in which a concurrent request could replay a spent token.
+ * They are spent anyway, and anyone who could present one already holds the sealed cookie it came from.
+ *
+ * **Per process.** A multi-instance BFF without sticky sessions does not share it; there, a retry reaching
+ * another instance replays the consumed token, and only lukk's grace window stands between it and a revoke.
+ *
+ * An accepted limit: a link's window can close before the browser has the pair — the response that carried
+ * it was lost (a navigation aborts it). Its replay then revokes the family, the same exposure an ordinary
+ * rotation has when its response is lost. A longer window would widen the time in which an old cookie
+ * somewhere else is answered with a live pair.
  */
 export const REFRESH_HOLD_MS = 10 * 60_000
 
 /**
- * How long a held rotation stays adoptable once taken: for the burst of requests that were already out
+ * How long a link stays adoptable once a caller has received or taken it: for the requests already out
  * with the old cookie (a page coming back fires several at once). At least a caller's wait plus its
- * `Retry-After`, and comparable to lukk's own grace window. Past it, a request presenting the consumed
- * token is not this browser catching up — it is an old cookie somewhere else, and lukk's reuse detection
- * is the right answer to it.
+ * `Retry-After`, and comparable to lukk's own grace window. Past it, a request presenting the consumed token
+ * is not this browser catching up — it is an old cookie somewhere else, and lukk's reuse detection is the
+ * right answer to it.
  */
 export const REFRESH_STRAGGLER_MS = 30_000
-// An accepted limit: the FIRST taker's response can be lost (a navigation aborts it), leaving the browser on
-// the consumed token after the window has closed. Its replay then revokes the family — the same exposure an
-// ordinary rotation has when the response carrying it is lost. Holding longer would widen the window in
-// which an old cookie somewhere else is answered with a live pair.
+
+/** The most links a session's journal keeps; the oldest goes first. */
+export const REFRESH_JOURNAL_MAX_LINKS = 16
 
 /** Single-flight the server-side refresh per session, returning the rotation outcome. */
 export function refreshOnce(session: { id?: string, data: TokenSession }, baseURL: string, clientIp = ''): Promise<RefreshResult> {
@@ -105,38 +120,91 @@ export function refreshOnce(session: { id?: string, data: TokenSession }, baseUR
   // No id → don't key the map (an empty key would collapse distinct sessions).
   if (!id) return waitOn({ run: rawRefresh(token, baseURL, clientIp), waiting: 0 })
 
-  const held = heldRefresh.get(id)
-  if (held?.consumed === token) return Promise.resolve(take(id, held))
-  // Any other token: the session has moved on, and the held rotation with it — except the session's own
-  // chain, presented while the straggler window is open. The token the hold handed out is the taker
-  // refreshing (an access token that ran out while the hold waited comes back already expired), and the
-  // burst it belongs to may still have requests with the consumed token on the way; dropped, they reached
-  // lukk long past its grace window. The window's own timer ends it. (Only a rotation that produced a pair
-  // is ever held.)
-  const handedOut = held?.taken === true && held.result.pair!.refresh === token
-  if (!handedOut && !(held?.taken && held.superseded.has(token))) forgetHeldRefresh(id)
+  const journal = refreshJournals.get(id)
+  const link = journal?.get(token)
+  if (link) {
+    take(id, token, link)
+    return adopt(id, token)
+  }
+  // The head's own token is the chain going on (and lukk's to rule on); any other token means the session
+  // has moved on, and its journal with it.
+  if (journal && ![...journal.values()].some(recorded => recorded.pair.refresh === token)) forgetRefreshJournal(id)
 
   // Joined only by a request presenting the token it is rotating — the flight is keyed by both. One with
   // another token is lukk's to rule on: joined, it was handed a pair its own token never earned.
-  const flight = inflightRefresh.get(flightKey(id, token)) ?? fly(id, token, baseURL, clientIp)
-  if (handedOut) void flight.run.then(result => forwardHeld(held!, token, result))
-  return waitOn(flight)
+  return waitOn(inflightRefresh.get(flightKey(id, token)) ?? fly(id, token, baseURL, clientIp))
 }
 
 /**
- * The session rotated the token a hold handed out: forward the hold to that rotation, so a straggler still
- * presenting the consumed token adopts the CURRENT pair. Left on the handed-out one, it re-sealed a token
- * lukk had just rotated, and the browser's next refresh replayed it — past lukk's grace window, as long as
- * the straggler window itself, it revoked the family. The window is never extended: the timer set at the
- * first taking still ends it. A session that ended meanwhile has no hold left to forward: `markSessionEnded`
- * let it go, so forwarding the detached object reaches no request. Every forward for one rotation runs
- * when it lands, with the same result, so a second one changes nothing.
+ * The head of the chain `token`'s link starts, for a request presenting it. While the head's own token is
+ * being rotated, the request waits for that rotation and is handed what it produced — which is the new head,
+ * journalled as it lands; handing out the head as it stood gave the straggler a token the session was
+ * spending at that moment. A refusal ends the chain, and the refusal is what it gets; a caller that stops
+ * waiting, or a throttle, is told so, and retrying finds the chain where it was.
  */
-function forwardHeld(held: Held, rotated: string, result: RefreshResult): void {
-  if (!result.pair) return
-  held.superseded.add(rotated)
-  held.result = result
-  held.landedAt = Date.now()
+function adopt(id: string, token: string): Promise<RefreshResult> {
+  const head = headOf(refreshJournals.get(id)!, token)
+  const rotating = inflightRefresh.get(flightKey(id, head.pair.refresh!))
+  return rotating ? waitOn(rotating) : Promise.resolve(handOut(head))
+}
+
+/** The newest link reachable from `token`'s, which the caller knows to be in `journal`. */
+function headOf(journal: Map<string, Link>, token: string): Link {
+  let head = journal.get(token)!
+  // Bounded by the journal's size, which only matters for an upstream that handed back a token it had
+  // already consumed: the chain would loop, and the process with it.
+  // Stryker disable next-line EqualityOperator: equivalent — one more hop around a loop lands on a link of the same loop, and lukk never issues a token it consumed, so outside a loop the `break` ends it first.
+  for (let hops = 0; hops < journal.size; hops++) {
+    const next = journal.get(head.pair.refresh!)
+    if (!next) break
+    head = next
+  }
+  return head
+}
+
+/** A link's pair, with what is LEFT of its access token's lifetime. */
+function handOut(link: Link): RefreshResult {
+  const result: RefreshResult = { pair: link.pair, retryable: false }
+  if (link.expiresIn !== undefined) result.expiresIn = Math.max(0, link.expiresIn - Math.floor((Date.now() - link.landedAt) / 1000))
+  return result
+}
+
+/** Record that rotating `consumed` produced `result` — received by a caller, or for a first taker to come. */
+function record(id: string, consumed: string, result: RefreshResult, received: boolean): void {
+  const journal = refreshJournals.get(id) ?? new Map<string, Link>()
+  refreshJournals.set(id, journal)
+  // A second rotation of the same token (one the in-flight backstop gave up on, then both answered): the
+  // newer one stands, on its own lifetime.
+  clearTimeout(journal.get(consumed)?.timer)
+  const link: Link = { pair: result.pair!, expiresIn: result.expiresIn, landedAt: Date.now(), taken: received, timer: lifetime(id, consumed, received ? REFRESH_STRAGGLER_MS : REFRESH_HOLD_MS) }
+  journal.set(consumed, link)
+  if (journal.size > REFRESH_JOURNAL_MAX_LINKS) {
+    const [oldest, dropped] = journal.entries().next().value!
+    clearTimeout(dropped.timer)
+    journal.delete(oldest)
+  }
+  // And not for a session another instance ended: the shared store answers asynchronously.
+  void sessionEnded(id).then((ended) => {
+    if (ended) forgetRefreshJournal(id)
+  })
+}
+
+/** A request took `link`: from now, it lasts only the straggler window — however long it had left. */
+function take(id: string, token: string, link: Link): void {
+  if (link.taken) return
+  link.taken = true
+  clearTimeout(link.timer)
+  link.timer = lifetime(id, token, REFRESH_STRAGGLER_MS)
+}
+
+/** The timer that ends one link — that link only, and the journal with its last. */
+function lifetime(id: string, token: string, ms: number): ReturnType<typeof setTimeout> {
+  return unref(setTimeout(() => {
+    // Every way a journal goes clears its timers first, so this one's is still there.
+    const journal = refreshJournals.get(id)!
+    journal.delete(token)
+    if (journal.size === 0) refreshJournals.delete(id)
+  }, ms))
 }
 
 /** A session's refresh of one particular token. */
@@ -144,7 +212,7 @@ function flightKey(id: string, token: string): string {
   return `${id}\n${token}`
 }
 
-/** Start the session's refresh, and keep its outcome should it land with nobody waiting. */
+/** Start the session's refresh, and journal what it produced. */
 function fly(id: string, token: string, baseURL: string, clientIp: string): Flight {
   const flight: Flight = { run: rawRefresh(token, baseURL, clientIp), waiting: 0 }
   const key = flightKey(id, token)
@@ -156,37 +224,18 @@ function fly(id: string, token: string, baseURL: string, clientIp: string): Flig
   }
   const backstop = unref(setTimeout(forget, REFRESH_INFLIGHT_MAX_MS))
   // Before `forget`, synchronously: there is no moment when the session has neither a flight nor the
-  // outcome, in which a request with the old token could start a replay. Never for a session that ended
-  // while it was out — a logout or sign-in lets go of a held one too (`markSessionEnded`).
+  // journal entry, in which a request with the old token could start a replay. Never for a session that
+  // ended while it was out. A refusal ends the chain; a retryable failure leaves it be.
   flight.run.then((result) => {
-    // Nor when it rotated the token a hold handed out: `forwardHeld` moves that hold on instead, keeping
-    // the straggler window it already has — a fresh hold would drop the consumed token's stragglers.
-    if (result.pair && flight.waiting === 0 && !isSessionEnded(id) && heldRefresh.get(id)?.result.pair!.refresh !== token) hold(id, token, result)
+    if (result.pair) {
+      if (!isSessionEnded(id)) record(id, token, result, flight.waiting > 0)
+    }
+    else if (!result.retryable) {
+      forgetRefreshJournal(id)
+    }
     forget()
   }, forget)
   return flight
-}
-
-function hold(id: string, consumed: string, result: RefreshResult): void {
-  const held: Held = { consumed, result, landedAt: Date.now(), taken: false, superseded: new Set() }
-  held.timer = unref(setTimeout(() => forgetHeldRefresh(id, held), REFRESH_HOLD_MS))
-  heldRefresh.set(id, held)
-  // And not one another instance ended: the shared store answers asynchronously, so it is let go after.
-  void sessionEnded(id).then((ended) => {
-    if (ended) forgetHeldRefresh(id, held)
-  })
-}
-
-/** Adopt a held rotation: its pair, with what is LEFT of the access token's lifetime. */
-function take(id: string, held: Held): RefreshResult {
-  if (!held.taken) {
-    held.taken = true
-    clearTimeout(held.timer)
-    held.timer = unref(setTimeout(() => forgetHeldRefresh(id, held), REFRESH_STRAGGLER_MS))
-  }
-  const { expiresIn, ...rest } = held.result
-  if (expiresIn === undefined) return rest
-  return { ...rest, expiresIn: Math.max(0, expiresIn - Math.floor((Date.now() - held.landedAt) / 1000)) }
 }
 
 /** The flight's outcome, or "retry shortly" once `REFRESH_WAIT_MS` has passed — the flight carries on regardless. */

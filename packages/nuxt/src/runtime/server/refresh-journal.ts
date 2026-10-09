@@ -1,0 +1,34 @@
+import type { TokenSession } from './refresh'
+
+/**
+ * Each session's recent rotations, as links from the refresh token a rotation consumed to the pair it
+ * produced — so a request still presenting a consumed token can be handed the session's CURRENT pair
+ * instead of replaying that token to lukk. The policy (what is recorded, for how long, who may adopt) lives
+ * in `refresh.ts`; this module only holds the data, apart from it so `ended-sessions` can drop a session's
+ * journal without importing the refresh machinery, which imports it.
+ *
+ * **Per process**, on `globalThis` like the single-flight: Nitro's handlers and the Nuxt app's server bundle
+ * each get their own copy of a module, and a multi-instance BFF without sticky sessions does not share it.
+ */
+export interface Link {
+  /** The pair the rotation produced. */
+  pair: TokenSession
+  /** lukk's `expires_in` for its access token, counted down from `landedAt` when handed out. */
+  expiresIn?: number
+  landedAt: number
+  /** Received by a caller, or taken since: what remains is the straggler window. */
+  taken: boolean
+  /** Ends this link's life — `REFRESH_HOLD_MS` untaken, `REFRESH_STRAGGLER_MS` once taken. */
+  timer: ReturnType<typeof setTimeout>
+}
+
+/** Per session id: consumed refresh token → link, oldest first. */
+export const refreshJournals: Map<string, Map<string, Link>> = ((globalThis as { __lukkRefreshJournals?: Map<string, Map<string, Link>> }).__lukkRefreshJournals ??= new Map())
+
+/** Drop a session's journal, and every timer it holds. */
+export function forgetRefreshJournal(key: string): void {
+  const journal = refreshJournals.get(key)
+  if (!journal) return
+  for (const link of journal.values()) clearTimeout(link.timer)
+  refreshJournals.delete(key)
+}
