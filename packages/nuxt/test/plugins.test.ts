@@ -56,8 +56,8 @@ describe('client plugin', () => {
   })
 
   it('targets the local proxy under the app\'s own base path', () => {
-    // Nitro mounts every server route under \`app.baseURL\`, so with \`/admin/\` the proxy lives at
-    // \`/admin/api/_lukk\`. A root-relative \`/api/_lukk\` sent every sign-in, refresh and logout to the
+    // Nitro mounts every server route under `app.baseURL`, so with `/admin/` the proxy lives at
+    // `/admin/api/_lukk`. A root-relative `/api/_lukk` sent every sign-in, refresh and logout to the
     // origin root — a 404, or another app's route.
     __test.runtimeConfig.public.lukk = { mode: 'bff', baseURL: '', confirmationHeader: 'X-Lukk-Confirmation' }
     ;(__test.runtimeConfig as { app?: unknown }).app = { baseURL: '/admin/' }

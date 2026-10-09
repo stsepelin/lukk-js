@@ -55,10 +55,10 @@ export function sessionSeal(maxAge: number | undefined): SessionConfig['seal'] {
 }
 
 /**
- * The cookie every sealed session is WRITTEN with: \`__Host-\`-safe, and persistent for the seal's own
+ * The cookie every sealed session is WRITTEN with: `__Host-`-safe, and persistent for the seal's own
  * lifetime. With no Max-Age it was a session cookie, dropped when the browser closed, so a BFF user was
  * signed out on every restart while a direct-mode one, holding lukk's persistent refresh cookie, was not.
- * Max-Age rather than h3's \`maxAge\` option: that becomes an Expires counted from the session's FIRST
+ * Max-Age rather than h3's `maxAge` option: that becomes an Expires counted from the session's FIRST
  * creation, while Max-Age restarts on every write, as the seal does.
  */
 export function sessionCookie(secure: boolean, maxAge: number | undefined): { sameSite: 'strict', secure: boolean, httpOnly: true, path: '/', maxAge: number } {

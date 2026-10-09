@@ -163,7 +163,7 @@ describe('finish-logout middleware (BFF)', () => {
   })
 
   it('ends the session through the proxy under the app\'s own base path', async () => {
-    // Nitro routes a local fetch through the app mounted at \`app.baseURL\`; a root-relative path misses it.
+    // Nitro routes a local fetch through the app mounted at `app.baseURL`; a root-relative path misses it.
     ;(__test.runtimeConfig as { app?: unknown }).app = { baseURL: '/admin/' }
     const event = makeEvent()
     await run(event)

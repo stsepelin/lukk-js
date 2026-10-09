@@ -57,7 +57,7 @@ export default defineEventHandler(async (event) => {
 
   // CSRF: reject a state-changing request riding the session cookie from a foreign origin — and a GET
   // from another site or a same-site sibling unless it is a top-level navigation (a link in an email).
-  // A sibling's no-cors GET (an \`<img>\` at \`account/export\`) was answered with the sealed session and
+  // A sibling's no-cors GET (an `<img>` at `account/export`) was answered with the sealed session and
   // confirmation token; no page needs a cross-site subresource GET from the auth proxy.
   if (isForeignOrigin(event, secure) || isForeignSubresource(event)) {
     setResponseStatus(event, 403)

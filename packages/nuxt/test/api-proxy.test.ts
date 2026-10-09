@@ -288,7 +288,7 @@ describe('app-API proxy', () => {
 
   it('keeps the app origin\'s CORS policy its own: no upstream CORS headers, no client Origin upstream', async () => {
     // The proxy serves the app's own origin. Passing the upstream's Access-Control-* through let the
-    // UPSTREAM's CORS policy decide who may read this origin: an upstream echoing \`*.example.com\` with
+    // UPSTREAM's CORS policy decide who may read this origin: an upstream echoing `*.example.com` with
     // credentials let a sibling subdomain read any authenticated GET, the bearer injected by this proxy.
     upstreamResponse = { status: 200, type: 'basic', headers: new Headers({
       'access-control-allow-origin': 'https://evil.example.com',

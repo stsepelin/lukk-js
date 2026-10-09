@@ -177,7 +177,7 @@ describe('BFF proxy', () => {
   it('keeps the session cookie across a browser restart for the same lifetime as its seal', async () => {
     // With no Max-Age the cookie was a session cookie, dropped when the browser closed — so a BFF user was
     // signed out on every restart while a direct-mode user, holding lukk's persistent refresh cookie, was
-    // not. Max-Age, not h3's \`maxAge\` (an Expires counted from the session's first creation): it restarts
+    // not. Max-Age, not h3's `maxAge` (an Expires counted from the session's first creation): it restarts
     // on every write, as the seal's own lifetime does.
     mockFetch().fetch = vi.fn(async () => jsonRes({ access_token: 'a', refresh_token: 'r', expires_in: 900 }))
     await run(makeEvent({ path: '/api/_lukk/login', method: 'POST', headers: sameOrigin, session: makeSession() }))
@@ -190,8 +190,8 @@ describe('BFF proxy', () => {
   })
 
   it('deletes the session cookie outright when it clears the session, rather than leaving an empty one standing', async () => {
-    // h3's \`clear()\` rewrites the cookie empty with the session's own options — with a Max-Age, that kept
-    // an empty \`__Host-\` cookie for the whole lifetime instead of removing it.
+    // h3's `clear()` rewrites the cookie empty with the session's own options — with a Max-Age, that kept
+    // an empty `__Host-` cookie for the whole lifetime instead of removing it.
     const session = makeSession({ access: 'A', refresh: 'rA' })
     mockFetch().fetch = vi.fn(async () => jsonRes(null, 204))
     const event = makeEvent({ path: '/api/_lukk/logout', method: 'POST', body: '{}', headers: sameOrigin, session })
@@ -1118,7 +1118,7 @@ describe('what the auth proxy sends, and answers', () => {
 
   it.each(['same-site', 'cross-site'])('refuses a %s GET that is not a navigation', async (site) => {
     // GETs skipped the cross-site check. A same-site sibling could then fire credentialed no-cors GETs —
-    // an \`<img>\` at \`/api/_lukk/account/export\` — that this proxy answered with the sealed session and
+    // an `<img>` at `/api/_lukk/account/export` — that this proxy answered with the sealed session and
     // confirmation token, spending the user's step-up throttle. No page needs a cross-site subresource
     // GET from the auth proxy.
     const fetchMock = vi.fn(async () => jsonRes({}))

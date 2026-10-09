@@ -198,13 +198,14 @@ export interface AccountExport {
   two_factor: { enabled: boolean, confirmed_at: string | null }
   /**
    * The account-lockout counters held against this account — the rows erasure also removes. Sent by
-   * lukk releases after 0.6.0 (absent before). Timestamps are unix seconds.
+   * lukk releases after 0.6.0 (absent before). Timestamps are ISO-8601 strings, like `generated_at` —
+   * unlike `passkeys[].last_used_at`, which lukk sends as unix seconds.
    */
   lockouts?: Array<{
     purpose: 'login' | 'two_factor' | 'confirm'
     attempts: number
-    locked_at: number | null
-    first_failed_at: number | null
-    last_failed_at: number | null
+    locked_at: string | null
+    first_failed_at: string | null
+    last_failed_at: string | null
   }>
 }

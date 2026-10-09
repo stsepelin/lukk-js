@@ -269,7 +269,7 @@ export function beginSession(nuxtApp: object, sentAt: number): void {
 }
 
 /**
- * Cancel a `withConfirmation()` still waiting for a step-up: it rejects as soon as \`required\` goes false.
+ * Cancel a `withConfirmation()` still waiting for a step-up: it rejects as soon as `required` goes false.
  * Called when the session it was asked for ends — at logout, and when a sign-in replaces it.
  */
 export function cancelPendingStepUp(): void {

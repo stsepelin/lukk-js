@@ -378,6 +378,13 @@ describe(`lukk conformance (algo=${ALGORITHM}, cookie_mode=${COOKIE_MODE}, feat=
       expect(Object.keys(exported.sessions[0]!).sort())
         .toEqual(['created_at', 'expires_at', 'last_rotated_at', 'revoked_at', 'session'])
       expect(Object.keys(exported.two_factor).sort()).toEqual(['confirmed_at', 'enabled'])
+      // Each lockout entry's shape, timestamps as ISO strings: typed as numbers, they were wrong.
+      for (const lockout of exported.lockouts ?? []) {
+        expect(Object.keys(lockout).sort()).toEqual(['attempts', 'first_failed_at', 'last_failed_at', 'locked_at', 'purpose'])
+        for (const at of [lockout.locked_at, lockout.first_failed_at, lockout.last_failed_at]) {
+          expect(at === null || typeof at === 'string').toBe(true)
+        }
+      }
     })
 
     it('erases a disposable account end to end', async () => {
