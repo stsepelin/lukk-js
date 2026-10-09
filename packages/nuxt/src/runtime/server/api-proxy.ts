@@ -7,7 +7,7 @@ import { sessionEnded, sessionKey } from './ended-sessions'
 import { logoutNoted, withholdSignedOut } from './logout-note'
 import { revokeDroppedSession } from './revoke-dropped'
 import { readSealedSession, sessionCookie as sessionCookieOptions, sessionSeal } from './sealed-session'
-import { refreshOnce, type TokenSession } from './utils/refresh'
+import { refreshOnce, type TokenSession } from './refresh'
 
 /**
  * Optional BFF app-API proxy. Forwards same-origin `${apiPath}/**` to the fixed

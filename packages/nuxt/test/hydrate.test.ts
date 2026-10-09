@@ -1,7 +1,7 @@
 import type { H3Event } from 'h3'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { __test } from './mocks/imports'
-import type { TokenSession } from '../src/runtime/server/utils/refresh'
+import type { TokenSession } from '../src/runtime/server/refresh'
 
 // The sealed session the read-only unseal returns, and the read-write handle `useSession` opens.
 let cookieValue: string | undefined // getCookie's return (present seal vs anonymous)
@@ -27,7 +27,7 @@ vi.mock('h3', () => ({
 }))
 
 const refreshOnce = vi.fn<(s: unknown, b: string) => Promise<TokenSession | null>>()
-vi.mock('../src/runtime/server/utils/refresh', () => ({ refreshOnce: (...a: unknown[]) => refreshOnce(...(a as [unknown, string])) }))
+vi.mock('../src/runtime/server/refresh', () => ({ refreshOnce: (...a: unknown[]) => refreshOnce(...(a as [unknown, string])) }))
 const revokeDroppedSession = vi.fn()
 vi.mock('../src/runtime/server/revoke-dropped', () => ({ revokeDroppedSession: (...a: unknown[]) => revokeDroppedSession(...a) }))
 

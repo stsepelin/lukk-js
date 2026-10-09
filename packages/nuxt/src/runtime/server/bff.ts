@@ -8,7 +8,7 @@ import { endSession, newSessionId, sessionEnded, sessionKey, sessionReplaced, wi
 import { revokeDroppedSession } from './revoke-dropped'
 import { readSealedSession, sessionCookie, sessionSeal } from './sealed-session'
 import { warnIfSessionTooLarge } from './session-size'
-import { refreshOnce, type TokenSession } from './utils/refresh'
+import { refreshOnce, type TokenSession } from './refresh'
 
 type SessionCookieOptions = ReturnType<typeof sessionCookie>
 

@@ -1,6 +1,6 @@
 import type { H3Event, SessionConfig } from 'h3'
 import { getCookie, unsealSession } from 'h3'
-import type { TokenSession } from './utils/refresh'
+import type { TokenSession } from './refresh'
 
 /**
  * Read-only unseal of the sealed BFF token session (access + refresh + confirmation).

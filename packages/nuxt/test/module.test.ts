@@ -109,6 +109,9 @@ describe('lukk-nuxt module', () => {
     expect(contents).toContain('$lukkRefresh: () => Promise<RefreshOutcome>')
     // Provided by the plugin all along, and missing from the types.
     expect(contents).toContain('$lukkRestore: () => Promise<{ pair: RefreshOutcome, unavailable: boolean, superseded?: boolean }>')
+    // And in templates, where `$lukk` was untyped: Vue reads globals from ComponentCustomProperties.
+    expect(contents).toContain(`declare module 'vue'`)
+    expect(contents).toMatch(/interface ComponentCustomProperties \{[^}]*\$lukk: LukkClient/)
   })
 
   it('registers the streaming-render marker alongside SSR hydration, and not without it', () => {
@@ -352,6 +355,9 @@ describe('lukk-nuxt module', () => {
     expect(warned({ baseURL: 'https://api.example.com/auth', mode: 'bff' })).toBe(false)
     // A root-relative direct-mode base has no hostname to inspect — must not warn or throw.
     expect(warned({ baseURL: '/auth', mode: 'direct' })).toBe(false)
+    // Nor while generating types (`nuxi prepare`/`typecheck`), which is not a deploy: the warning there
+    // was noise on every developer's machine.
+    expect(warned({ baseURL: 'http://localhost:8000/auth', mode: 'bff' }, { _prepare: true })).toBe(false)
   })
 
   it('passes the sealed session\'s lifetime through, defaulting to lukk\'s 30-day refresh_ttl', () => {
@@ -540,6 +546,13 @@ describe('lukk-nuxt module — what it registers, and when it speaks up', () => 
       `    $lukkRefresh: () => Promise<RefreshOutcome>`,
       `    /** The same refresh, reporting why it failed: \`unavailable\` for "couldn't tell", not "signed out". */`,
       `    $lukkRestore: () => Promise<{ pair: RefreshOutcome, unavailable: boolean, superseded?: boolean }>`,
+      `  }`,
+      `}`,
+      `// Templates read globals from here, not from NuxtApp, so \`$lukk\` in a <template> was untyped.`,
+      `declare module 'vue' {`,
+      `  interface ComponentCustomProperties {`,
+      `    $lukk: LukkClient`,
+      `    $lukkRefresh: () => Promise<RefreshOutcome>`,
       `  }`,
       `}`,
       `export {}`,

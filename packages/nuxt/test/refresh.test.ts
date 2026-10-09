@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { refreshOnce } from '../src/runtime/server/utils/refresh'
+import { refreshOnce } from '../src/runtime/server/refresh'
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -85,7 +85,7 @@ describe('refreshOnce single-flight identity', () => {
     let answer!: (r: Response) => void
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(() => new Promise((resolve) => { answer = resolve }))
     vi.resetModules()
-    const copy = await import('../src/runtime/server/utils/refresh')
+    const copy = await import('../src/runtime/server/refresh')
     const session = { id: `h3-${Math.random()}`, data: { refresh: 'rA', sid: `s-${Math.random()}` } }
 
     const fromProxy = refreshOnce(session, 'https://lukk/auth')

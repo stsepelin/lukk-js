@@ -1,5 +1,5 @@
-import { sessionKey } from '../ended-sessions'
-import { reportUnusableBase, resolveTarget } from '../proxy-utils'
+import { sessionKey } from './ended-sessions'
+import { reportUnusableBase, resolveTarget } from './proxy-utils'
 
 export interface TokenSession {
   access?: string

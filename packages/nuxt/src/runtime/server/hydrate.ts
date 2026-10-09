@@ -9,7 +9,7 @@ import { logoutNoted } from './logout-note'
 import { revokeDroppedSession } from './revoke-dropped'
 import { readSealedSessionWithId, sessionCookie, sessionSeal } from './sealed-session'
 import { warnIfSessionTooLarge } from './session-size'
-import { refreshOnce, type TokenSession } from './utils/refresh'
+import { refreshOnce, type TokenSession } from './refresh'
 
 interface LukkServerConfig {
   sessionPassword?: string

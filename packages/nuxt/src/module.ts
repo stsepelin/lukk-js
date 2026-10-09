@@ -372,7 +372,7 @@ export default defineNuxtModule<ModuleOptions>({
       // Legitimate for local prod-mode testing, but also the shape of a dev `.env` reaching a real
       // deploy — where SSR then calls the server's own loopback. Only the operator can tell those
       // apart, so warn rather than throw.
-      if (!nuxt.options.dev && isLoopback(effectiveBase)) {
+      if (!nuxt.options.dev && !nuxt.options._prepare && isLoopback(effectiveBase)) {
         console.warn(`[lukk-nuxt] \`baseURL\` points at ${originOf(effectiveBase)} in a production build — a dev value may have leaked into this deploy.`)
       }
     }
@@ -434,6 +434,13 @@ export default defineNuxtModule<ModuleOptions>({
         `    $lukkRefresh: () => Promise<RefreshOutcome>`,
         `    /** The same refresh, reporting why it failed: \`unavailable\` for "couldn't tell", not "signed out". */`,
         `    $lukkRestore: () => Promise<{ pair: RefreshOutcome, unavailable: boolean, superseded?: boolean }>`,
+        `  }`,
+        `}`,
+        `// Templates read globals from here, not from NuxtApp, so \`$lukk\` in a <template> was untyped.`,
+        `declare module 'vue' {`,
+        `  interface ComponentCustomProperties {`,
+        `    $lukk: LukkClient`,
+        `    $lukkRefresh: () => Promise<RefreshOutcome>`,
         `  }`,
         `}`,
         `export {}`,

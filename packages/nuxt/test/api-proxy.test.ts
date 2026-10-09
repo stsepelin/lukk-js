@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { __test } from './mocks/imports'
-import type { TokenSession } from '../src/runtime/server/utils/refresh'
+import type { TokenSession } from '../src/runtime/server/refresh'
 
 // Upstream (app-API) Set-Cookie the proxy would receive; the mock appends it like h3 does.
 let upstreamSetCookie: string | string[] | undefined
@@ -64,7 +64,7 @@ vi.mock('h3', () => ({
 }))
 
 const refreshOnce = vi.fn<(s: unknown, b: string) => Promise<TokenSession | null>>()
-vi.mock('../src/runtime/server/utils/refresh', () => ({ refreshOnce: (...a: unknown[]) => refreshOnce(...(a as [unknown, string])) }))
+vi.mock('../src/runtime/server/refresh', () => ({ refreshOnce: (...a: unknown[]) => refreshOnce(...(a as [unknown, string])) }))
 const revokeDroppedSession = vi.fn()
 vi.mock('../src/runtime/server/revoke-dropped', () => ({ revokeDroppedSession: (...a: unknown[]) => revokeDroppedSession(...a) }))
 
