@@ -1086,6 +1086,38 @@ describe('what the auth proxy sends, and answers', () => {
     expect(Object.keys(headers)).not.toContain('X-Lukk-Confirmation')
   })
 
+  it.each(['same-site', 'cross-site'])('refuses a %s GET that is not a navigation', async (site) => {
+    // GETs skipped the cross-site check. A same-site sibling could then fire credentialed no-cors GETs —
+    // an \`<img>\` at \`/api/_lukk/account/export\` — that this proxy answered with the sealed session and
+    // confirmation token, spending the user's step-up throttle. No page needs a cross-site subresource
+    // GET from the auth proxy.
+    const fetchMock = vi.fn(async () => jsonRes({}))
+    mockFetch().fetch = fetchMock
+    const event = makeEvent({ path: '/api/_lukk/account/export', headers: { 'sec-fetch-site': site, 'sec-fetch-mode': 'no-cors' }, session: makeSession({ access: 'A' }) })
+
+    expect(await run(event)).toEqual({ message: 'Cross-origin request rejected.' })
+    expect(event.status).toBe(403)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('still lets a top-level navigation through, such as a link clicked in an email', async () => {
+    const fetchMock = vi.fn(async () => jsonRes({}))
+    mockFetch().fetch = fetchMock
+
+    await run(makeEvent({ path: '/api/_lukk/user', headers: { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate' }, session: makeSession({ access: 'A' }) }))
+
+    expect(fetchMock).toHaveBeenCalled()
+  })
+
+  it('still serves its own app\'s GETs', async () => {
+    const fetchMock = vi.fn(async () => jsonRes({}))
+    mockFetch().fetch = fetchMock
+
+    await run(makeEvent({ path: '/api/_lukk/user', headers: { 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'cors' }, session: makeSession({ access: 'A' }) }))
+
+    expect(fetchMock).toHaveBeenCalled()
+  })
+
   it('tells a cross-origin caller why it was refused', async () => {
     const event = makeEvent({ path: '/api/_lukk/sessions', method: 'DELETE', headers: { origin: 'https://evil.com', host: 'app.example.com' }, session: makeSession({ access: 'A' }) })
     expect(await run(event)).toEqual({ message: 'Cross-origin request rejected.' })

@@ -3,7 +3,7 @@ import { isTokenPair } from 'lukk-core'
 import { defineEventHandler, deleteCookie, getCookie, getRequestHeader, readRawBody, setResponseHeader, setResponseStatus, useSession } from 'h3'
 import { useRuntimeConfig } from '#imports'
 import { LUKK_BFF_PREFIX, confirmationHeaderName, logoutCookieName, sessionCookieName, signedOutCookieName } from '../shared'
-import { isForeignOrigin, rejectUnresolvedTarget, reportProxyFailure, resolveTarget, routeWithin, viaHeader, visitorIp } from './proxy-utils'
+import { isForeignOrigin, isForeignSubresource, rejectUnresolvedTarget, reportProxyFailure, resolveTarget, routeWithin, viaHeader, visitorIp } from './proxy-utils'
 import { endSession, newSessionId, sessionEnded, sessionKey, sessionReplaced, withholdSessionCookie } from './ended-sessions'
 import { revokeDroppedSession } from './revoke-dropped'
 import { readSealedSession, sessionSeal } from './sealed-session'
@@ -55,8 +55,11 @@ export default defineEventHandler(async (event) => {
     deleteCookie(event, signedOutCookieName(secure, cookieNamespace), options)
   }
 
-  // CSRF: reject a state-changing request riding the session cookie from a foreign origin.
-  if (isForeignOrigin(event, secure)) {
+  // CSRF: reject a state-changing request riding the session cookie from a foreign origin — and a GET
+  // from another site or a same-site sibling unless it is a top-level navigation (a link in an email).
+  // A sibling's no-cors GET (an \`<img>\` at \`account/export\`) was answered with the sealed session and
+  // confirmation token; no page needs a cross-site subresource GET from the auth proxy.
+  if (isForeignOrigin(event, secure) || isForeignSubresource(event)) {
     setResponseStatus(event, 403)
     return { message: 'Cross-origin request rejected.' }
   }

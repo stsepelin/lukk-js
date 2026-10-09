@@ -187,6 +187,17 @@ export function rejectUnresolvedTarget(event: H3Event, base: string, label: stri
 }
 
 /**
+ * A GET or HEAD sent by another site, or a same-site sibling, that is not a top-level navigation — a
+ * subresource or fetch riding the session cookie. Only browsers send `Sec-Fetch-*`, so a non-browser
+ * caller (no cookie to ride) is never caught.
+ */
+export function isForeignSubresource(event: H3Event): boolean {
+  return (event.method === 'GET' || event.method === 'HEAD')
+    && ['cross-site', 'same-site'].includes(getRequestHeader(event, 'sec-fetch-site') ?? '')
+    && getRequestHeader(event, 'sec-fetch-mode') !== 'navigate'
+}
+
+/**
  * CSRF guard: true when a state-changing (non-GET/HEAD) request carries an
  * `Origin` whose host isn't this app's. The proxies are same-origin by design,
  * so a foreign Origin means a cross-site request riding the session cookie.

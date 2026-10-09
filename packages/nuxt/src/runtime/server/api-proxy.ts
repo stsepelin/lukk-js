@@ -17,6 +17,9 @@ import { refreshOnce, type TokenSession } from './utils/refresh'
  * Security (SSRF/CSRF containment, header stripping) is documented in
  * docs/transport-modes.md.
  */
+/** RFC 9110 §7.6.1 connection-specific response fields, which end at this hop. */
+const HOP_BY_HOP_RESPONSE = new Set(['connection', 'keep-alive', 'proxy-authenticate', 'proxy-connection', 'trailer', 'transfer-encoding', 'upgrade'])
+
 export default defineEventHandler(async (event) => {
   const { apiPath, apiTarget, apiForceJson, baseURL, sessionPassword, apiForwardSetCookie, cookieSecure, cookieNamespace, clientIpHeader, sessionMaxAge } = useRuntimeConfig(event).lukk as {
     apiPath: string
@@ -159,6 +162,8 @@ export default defineEventHandler(async (event) => {
       // sealed session rather than from whatever the browser claimed.
       [confirmationHeader.toLowerCase()]: sealed.confirmation ?? '',
       'accept': accept,
+      // The app's origin is this proxy's to police; the upstream's CORS decision must not apply to it.
+      'origin': '',
       'cookie': '',
       'authorization': access ? `Bearer ${access}` : '',
       // The visitor when a trusted `clientIpHeader` is set, else our socket address — this proxy has
@@ -198,6 +203,16 @@ export default defineEventHandler(async (event) => {
       // below) reached the browser and a just-rotated session cookie was dropped, stranding it on a
       // consumed refresh token.
       const redirected = response.type === 'opaqueredirect' || (response.status >= 300 && response.status < 400)
+
+      // Headers that describe the upstream hop, not this response. CORS: this proxy serves the app's own
+      // origin, so the upstream's Access-Control-* would let ITS policy decide who reads this origin —
+      // one echoing `*.example.com` with credentials let a sibling subdomain read authenticated GETs,
+      // the bearer injected here. Hop-by-hop (RFC 9110 §7.6.1), including any the upstream's own
+      // `Connection` names: they end at this hop.
+      const named = (response.headers.get('connection') ?? '').split(',').map(name => name.trim().toLowerCase()).filter(Boolean)
+      for (const [name] of response.headers) {
+        if (name.startsWith('access-control-') || HOP_BY_HOP_RESPONSE.has(name) || named.includes(name)) ev.node.res.removeHeader(name)
+      }
 
       const upstream = toCookieArray(ev.node.res.getHeader('set-cookie'))
       ev.node.res.removeHeader('set-cookie')

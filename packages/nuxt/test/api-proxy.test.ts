@@ -7,6 +7,11 @@ let upstreamSetCookie: string | string[] | undefined
 // The fetch Response h3 hands to onResponse; a test can make it a redirect to exercise the guard.
 let upstreamResponse: { status: number, type: string, headers: Headers }
 const proxyRequest = vi.fn(async (event: { node: { res: { statusCode: number, getHeader: (k: string) => unknown, setHeader: (k: string, v: unknown) => void, removeHeader: unknown } } }, target: string, opts?: { headers?: Record<string, string>, onResponse?: (e: unknown, r: unknown) => void }) => {
+  // Like h3's `sendProxy`: every upstream response header is copied onto the response, except
+  // content-encoding/-length and Set-Cookie (handled below).
+  for (const [key, value] of upstreamResponse.headers.entries()) {
+    if (!['content-encoding', 'content-length', 'set-cookie'].includes(key)) event.node.res.setHeader(key, value)
+  }
   // Simulate h3 appending the upstream Set-Cookie to whatever's already queued (the session).
   if (upstreamSetCookie !== undefined) {
     const arr = (v: unknown): unknown[] => (v === undefined ? [] : Array.isArray(v) ? v : [v])
@@ -279,6 +284,45 @@ describe('app-API proxy', () => {
     const opts = (proxyRequest.mock.calls[0] as unknown[])[2] as { streamRequest?: boolean, headers?: Record<string, string> }
     expect(opts.streamRequest).toBe(true) // body streamed, not buffered
     expect(opts.headers).not.toHaveProperty('content-type') // forwarded by h3, not overridden
+  })
+
+  it('keeps the app origin\'s CORS policy its own: no upstream CORS headers, no client Origin upstream', async () => {
+    // The proxy serves the app's own origin. Passing the upstream's Access-Control-* through let the
+    // UPSTREAM's CORS policy decide who may read this origin: an upstream echoing \`*.example.com\` with
+    // credentials let a sibling subdomain read any authenticated GET, the bearer injected by this proxy.
+    upstreamResponse = { status: 200, type: 'basic', headers: new Headers({
+      'access-control-allow-origin': 'https://evil.example.com',
+      'access-control-allow-credentials': 'true',
+      'access-control-expose-headers': 'x-secret',
+      'content-type': 'application/json',
+    }) }
+    const e = ev({ path: '/api/me', headers: { origin: 'https://evil.example.com' } })
+    await run(e)
+
+    expect(e.node.res.getHeader('access-control-allow-origin')).toBeUndefined()
+    expect(e.node.res.getHeader('access-control-allow-credentials')).toBeUndefined()
+    expect(e.node.res.getHeader('access-control-expose-headers')).toBeUndefined()
+    expect(e.node.res.getHeader('content-type')).toBe('application/json')
+    expect(proxyRequest.mock.calls.at(-1)![2]!.headers).toMatchObject({ origin: '' })
+  })
+
+  it('drops the upstream\'s hop-by-hop response headers (RFC 9110 §7.6.1)', async () => {
+    upstreamResponse = { status: 200, type: 'basic', headers: new Headers({
+      'connection': 'x-hop',
+      'x-hop': 'internal',
+      'keep-alive': 'timeout=5',
+      'proxy-authenticate': 'Basic',
+      'trailer': 'x-checksum',
+      'upgrade': 'h2c',
+      'x-kept': 'yes',
+    }) }
+    const e = ev({ path: '/api/me' })
+    await run(e)
+
+    for (const name of ['connection', 'x-hop', 'keep-alive', 'proxy-authenticate', 'trailer', 'upgrade']) {
+      expect(e.node.res.getHeader(name), name).toBeUndefined()
+    }
+    expect(e.node.res.getHeader('x-kept')).toBe('yes')
   })
 
   it('strips upstream Set-Cookie and marks the response non-cacheable', async () => {
