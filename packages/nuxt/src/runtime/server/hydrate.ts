@@ -108,11 +108,16 @@ export async function resolveHydrationAccess(event: H3Event): Promise<string | n
     await session.update(pair)
     warnIfSessionTooLarge(session) // parity with bff.ts — the SSR reseal can cross the budget first
     // The render takes a while, and the cookie only goes out with the page — see `withholdIfReplaced`.
-    remember(event, sessionKey(session), name, () => revokeDroppedSession(event, pair, baseURL, visitorIp(event, clientIpHeader)), async () => {
-      const newest = currentPair(sessionKey(session), pair)
+    // `sealedPair` follows each re-seal: the check can run twice (app:error, then app:rendered), and the
+    // second compares — and revokes — what the first sealed.
+    let sealedPair = pair
+    remember(event, sessionKey(session), name, () => revokeDroppedSession(event, sealedPair, baseURL, visitorIp(event, clientIpHeader)), async () => {
+      const newest = currentPair(sessionKey(session), sealedPair)
       // Moved past it, and the links that led on have expired: not this cookie at all.
-      if (!newest) withholdSessionCookie(event.node.res, name)
-      else if (newest !== pair) await session.update(newest)
+      if (!newest) return withholdSessionCookie(event.node.res, name)
+      if (newest === sealedPair) return
+      await session.update(newest)
+      sealedPair = newest
     })
     const fresh = await sealSession(event, { password: sessionPassword!, name })
     replaceRequestCookie(event, name, fresh)
@@ -134,7 +139,11 @@ export async function withholdIfReplaced(event: H3Event): Promise<void> {
   const hydrated = hydratedSession(event)
   if (!hydrated) return
   if (!(await sessionEnded(hydrated.key))) return resealNewest(event, hydrated)
+  dropEnded(event, hydrated)
+}
 
+/** The session this render re-sealed ended: revoke what it sealed, once, and withhold its cookie. */
+function dropEnded(event: H3Event, hydrated: HydratedSession): void {
   // The tokens this render re-sealed are being dropped: revoke them, once — this runs both right after
   // the user load and again from the render hooks.
   if (hydrated.revoke) {
@@ -166,7 +175,7 @@ async function resealNewest(event: H3Event, hydrated: HydratedSession): Promise<
     await hydrated.reseal()
     // Sealing takes a moment, after the last check: a logout or sign-in landing during it must not have the
     // ended session's cookie leave with the page.
-    if (await sessionEnded(hydrated.key)) withholdSessionCookie(event.node.res, hydrated.name)
+    if (await sessionEnded(hydrated.key)) dropEnded(event, hydrated)
   }
   catch { /* the response started meanwhile; it keeps the seal it had */ }
 }

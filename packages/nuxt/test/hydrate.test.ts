@@ -388,6 +388,8 @@ describe('resolveHydrationAccess', () => {
 
       await expect(withholdIfReplaced(event)).resolves.toBeUndefined()
       expect(event.node.res.getHeader('set-cookie')).toHaveLength(3)
+      // The cookie is out of reach, but the tokens it carries are not: they are still revoked.
+      expect(revokeDroppedSession).toHaveBeenCalledOnce()
     })
 
     it('does not throw when the response starts between the check and the write', async () => {

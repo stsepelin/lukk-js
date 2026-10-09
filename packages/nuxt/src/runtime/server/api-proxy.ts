@@ -144,7 +144,11 @@ export default defineEventHandler(async (event) => {
         await session.update(newest)
         const resealedCookies = toCookieArray(event.node.res.getHeader('set-cookie'))
         event.node.res.removeHeader('set-cookie')
-        return resealedCookies
+        // Sealing takes a moment, after the last check: a sign-in or logout landing during it drops the
+        // seal, and its tokens are revoked — as on the `replaced` path.
+        if (!(await ended())) return resealedCookies
+        revokeDroppedSession(event, newest, baseURL, clientIp)
+        return resealedCookies.filter(cookie => cookieName(cookie) !== sessionName)
       }
     }
     else if (pair) {

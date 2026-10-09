@@ -273,6 +273,53 @@ describe('a rotation nobody received, adopted by the next request', () => {
 
     expect(rw.update).toHaveBeenCalledTimes(2)
     expect(page.node.res.getHeader('set-cookie') ?? []).toEqual([])
-    expect(fetchSpy).toHaveBeenCalledTimes(2)
+    // And the pair it dropped is revoked, as on the other ended path — the one it just sealed, t2.
+    expect(fetchSpy).toHaveBeenCalledTimes(3)
+    expect(fetchSpy.mock.calls[2]![0]).toBe('https://lukk.test/auth/logout')
+    expect(new Headers(fetchSpy.mock.calls[2]![1]!.headers).get('authorization')).toBe('Bearer a2')
+  })
+
+  it('compares a second render-end check against what the first re-sealed — app:error, then app:rendered', async () => {
+    vi.spyOn(globalThis, 'fetch')
+      .mockImplementationOnce(async () => new Response(JSON.stringify({ access_token: 'a1', refresh_token: 't1', expires_in: 900 }), { status: 200 }))
+      .mockImplementationOnce(async () => new Response(JSON.stringify({ access_token: 'a2', refresh_token: 't2', expires_in: 900 }), { status: 200 }))
+    const sid = `twice-${Math.random()}`
+    sealed = { access: expired(), refresh: 't0', sid }
+    const page = event('/dashboard')
+    rw = { id: 'h3', data: { ...sealed }, update: vi.fn() }
+    await resolveHydrationAccess(page)
+    await refreshOnce({ id: 'h3', data: { refresh: 't1', sid } }, 'https://lukk.test/auth')
+
+    await withholdIfReplaced(page)
+    await withholdIfReplaced(page)
+
+    expect(rw.update.mock.calls.map(call => call[0])).toEqual([{ access: 'a1', refresh: 't1' }, { access: 'a2', refresh: 't2' }])
+  })
+
+  it('drops an app-API re-seal, and revokes it, when the session ended while it was re-sealing', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+      .mockImplementationOnce(async () => new Response(JSON.stringify({ access_token: 'a1', refresh_token: 't1', expires_in: 900 }), { status: 200 }))
+      .mockImplementationOnce(async () => new Response(JSON.stringify({ access_token: 'a2', refresh_token: 't2', expires_in: 900 }), { status: 200 }))
+      .mockImplementation(async () => new Response(null, { status: 204 }))
+    const sid = `api-ended-reseal-${Math.random()}`
+    sealed = { access: expired(), refresh: 't0', sid }
+    const proxied = event()
+    proxied.node.res.setHeader('set-cookie', ['other=1'])
+    rw = { id: 'h3', data: { ...sealed }, update: vi.fn(async (pair: TokenSession) => {
+      const others = ([] as string[]).concat((proxied.node.res.getHeader('set-cookie') as string[] | undefined) ?? []).filter(cookie => !cookie.startsWith('__Host-lukk-session='))
+      proxied.node.res.setHeader('set-cookie', [...others, `__Host-lukk-session=${pair.refresh}`])
+      if (pair.refresh === 't2') await endSession(sid)
+    }) }
+    proxyRequest.mockImplementationOnce(async (ev: unknown, _target: string, opts: { onResponse?: (e: unknown, x: unknown) => Promise<void> }) => {
+      await refreshOnce({ id: 'h3', data: { refresh: 't1', sid } }, 'https://lukk.test/auth')
+      ;(ev as H3Event).node.res.setHeader('set-cookie', ['upstream=1'])
+      await opts.onResponse!(ev, { status: 200, type: 'basic', headers: new Headers() })
+      return {}
+    })
+    await (apiProxy as unknown as (e: H3Event) => Promise<unknown>)(proxied)
+
+    expect(proxied.node.res.getHeader('set-cookie')).toEqual(['other=1'])
+    const logout = fetchSpy.mock.calls.find(call => String(call[0]).endsWith('/logout'))!
+    expect(new Headers(logout[1]!.headers).get('authorization')).toBe('Bearer a2')
   })
 })

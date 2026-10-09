@@ -224,6 +224,9 @@ export default defineEventHandler(async (event) => {
   let resealedTokens: TokenSession | undefined
   // A refresh that failed without lukk rejecting the token (a throttle, an outage): the session is live.
   let stillRefreshable = false
+  // The session moved past the pair this request renewed with while it was out: nothing may be sealed from
+  // here — `s` still holds the arriving tokens, a refresh token already spent.
+  let stale = false
 
   if (upstream.res.status === 401 && sealed.refresh && !SIGN_IN_PATHS.has(route)) {
     const s = await session()
@@ -252,6 +255,9 @@ export default defineEventHandler(async (event) => {
               await s.update(newest)
               warnIfSessionTooLarge(s)
               resealedTokens = newest
+            }
+            else {
+              stale = true
             }
           }
           // The logout is about to revoke it itself.
@@ -329,8 +335,9 @@ export default defineEventHandler(async (event) => {
   if (res.ok && isConfirmation(data)) {
     const s = await session()
     // h3 re-seals the WHOLE session on any update — a confirmation answering after a sign-in or logout
-    // would write the replaced session back. It also belongs to that session, so it is not recorded.
-    if (await sessionEnded(sessionKey(s))) {
+    // would write the replaced session back. It also belongs to that session, so it is not recorded. Nor
+    // over a pair gone stale: the browser holds the newer cookie, and its retry earns the step-up on that.
+    if (stale || await sessionEnded(sessionKey(s))) {
       setResponseStatus(event, 409)
       return { message: 'The session was replaced.' }
     }

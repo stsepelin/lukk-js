@@ -1157,6 +1157,39 @@ describe('a rotation that lands after the request waiting on it gave up', () => 
     finally { vi.useRealTimers() }
   })
 
+  it('does not seal a step-up onto a session whose pair went stale during the retry — 409, and no cookie', async () => {
+    // The confirmation capture re-seals the WHOLE session — here, the arriving tokens with a spent refresh
+    // token, over the browser's newer cookie. The client retries a 409 with the cookie it holds.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    try {
+      let finishRetry!: () => void
+      mockFetch().fetch = vi.fn(async (url: string, init?: RequestInit) => {
+        const body = String(init?.body ?? '')
+        if (String(url).endsWith('/refresh')) {
+          return body.includes('"t0"') ? jsonRes({ access_token: 'a1', refresh_token: 't1', expires_in: 900 }) : jsonRes({ access_token: 'a2', refresh_token: 't2', expires_in: 900 })
+        }
+        const bearer = new Headers(init?.headers).get('authorization')
+        if (bearer === 'Bearer a1') return new Promise<Response>((resolve) => { finishRetry = () => resolve(jsonRes({ confirmation_token: 'c1' })) })
+        return jsonRes({ message: 'Unauthenticated.' }, 401)
+      })
+      const sid = `bff-stale-confirm-${Math.random()}`
+      await refreshOnce({ id: 'h3', data: { refresh: 't0', sid } }, 'https://lukk/auth')
+
+      const straggler = makeSession({ access: 'old', refresh: 't0', sid } as TokenSession)
+      const event = makeEvent({ path: '/api/_lukk/confirm-password', method: 'POST', body: '{"password":"p"}', headers: { ...sameOrigin, 'content-type': 'application/json' }, session: straggler })
+      const pending = run(event)
+      await vi.advanceTimersByTimeAsync(5_000)
+      await refreshOnce({ id: 'h3', data: { refresh: 't1', sid } }, 'https://lukk/auth')
+      await vi.advanceTimersByTimeAsync(85_000)
+      finishRetry()
+
+      expect(await pending).toEqual({ message: 'The session was replaced.' })
+      expect(event.status).toBe(409)
+      expect(straggler.update).not.toHaveBeenCalled()
+    }
+    finally { vi.useRealTimers() }
+  })
+
   it('a rotation a request DID receive is adopted by a straggler\'s 401 retry within the window', async () => {
     // A page's burst: one request renewed the session and carried the new cookie home; another, already out
     // with the old one, comes back seconds later. It is handed that same rotation — never a replay.
