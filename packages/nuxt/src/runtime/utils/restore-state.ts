@@ -1,5 +1,5 @@
 import type { Ref } from 'vue'
-import { RESTORE_FAILED_KEY } from '../keys'
+import { CONFIRM_REQUIRED_KEY, RESTORE_FAILED_KEY } from '../keys'
 import { clearPendingLogout, noteSignIn } from './pending-logout'
 import { shallowRef, useState } from '#imports'
 
@@ -258,9 +258,22 @@ export function beginSession(nuxtApp: object, sentAt: number): void {
   // Stryker disable next-line ArrowFunction,BooleanLiteral: equivalent — the initial value is overwritten on the next line.
   const restoreFailed = useState<boolean>(RESTORE_FAILED_KEY, () => false)
   restoreFailed.value = false
+  // A step-up still waiting belongs to the session this one replaces, possibly another account's: cancel
+  // it, or the next confirmation would run the old action under the new account.
+  cancelPendingStepUp()
   // A logout never finished is moot once a sign-in is sent after it — here, or in a tab that left and
   // returns. One asked for while this sign-in was already out still stands.
   clearPendingLogout(state.scope, sentAt)
   noteSignIn(state.scope, sentAt)
   state.announce?.()
+}
+
+/**
+ * Cancel a `withConfirmation()` still waiting for a step-up: it rejects as soon as \`required\` goes false.
+ * Called when the session it was asked for ends — at logout, and when a sign-in replaces it.
+ */
+export function cancelPendingStepUp(): void {
+  // Stryker disable next-line ArrowFunction,BooleanLiteral: equivalent — the initial value is overwritten on the next line.
+  const required = useState<boolean>(CONFIRM_REQUIRED_KEY, () => false)
+  required.value = false
 }

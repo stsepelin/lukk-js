@@ -5,7 +5,7 @@ import { ACCESS_KEY, CHALLENGE_KEY, CONFIRMATION_KEY, CONFIRMED_KEY, READY_KEY, 
 import { SIGN_IN } from '../utils/sign-in'
 import { isAuthRejection } from '../shared'
 import { clearPendingLogout, notePendingLogout, signedInSince } from '../utils/pending-logout'
-import { acrossTabs, restoreState, settleRefresh, signIn } from '../utils/restore-state'
+import { acrossTabs, cancelPendingStepUp, restoreState, settleRefresh, signIn } from '../utils/restore-state'
 import { clearLogoutCookie, setLogoutCookie } from '../utils/logout-cookie'
 import { tokenFamily, tokenSubject } from '../utils/token-subject'
 import { isPrematureWait, whenReady as settled } from '../utils/when-ready'
@@ -359,6 +359,8 @@ export function useLukkAuth(): LukkAuth {
       challenge.value = null
       confirmation.value = null
       confirmed.value = false
+      // And a step-up still waiting for this session: the next confirmation must not run its action.
+      cancelPendingStepUp()
       state.announce?.()
     }
   }

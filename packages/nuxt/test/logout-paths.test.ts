@@ -10,6 +10,8 @@ vi.mock('../src/runtime/composables/useLukkFetch', () => ({ useLukkFetch: () => 
 import { useLukkAuth } from '../src/runtime/composables/useLukkAuth'
 // eslint-disable-next-line import/first
 import { useLukkPasskeys } from '../src/runtime/composables/useLukkPasskeys'
+// eslint-disable-next-line import/first
+import { useLukkConfirmation } from '../src/runtime/composables/useLukkConfirmation'
 
 function withApp(lukk: Record<string, unknown>, extra: Record<string, unknown> = {}, mode: 'direct' | 'bff' = 'direct') {
   __test.nuxtApp = { $lukk: lukk, ...extra }
@@ -220,5 +222,43 @@ describe('useLukkAuth — user unwrapping switched off', () => {
     await auth.login({ email: 'e', password: 'p' })
 
     expect(auth.user.value).toEqual({ id: 1, true: { id: 2 } })
+  })
+})
+
+describe('a step-up still waiting when the session ends', () => {
+  it('is cancelled by logout, so a later confirmation does not run the old action', async () => {
+    // After a 423 the action waited for `confirmed`. Nothing cancelled it on logout, so the next
+    // confirmation — for anything, by anyone signing in on this tab — resolved it and the old action
+    // (a passkey deletion, say) ran unasked.
+    const logout = vi.fn(async () => {})
+    withApp({ logout })
+    const auth = useLukkAuth()
+    const confirmation = useLukkConfirmation()
+    const action = vi.fn().mockRejectedValueOnce({ status: 423 }).mockResolvedValue('done')
+
+    const pending = confirmation.withConfirmation(action)
+    await vi.waitFor(() => expect(confirmation.required.value).toBe(true))
+    await auth.logout()
+
+    await expect(pending).rejects.toThrow('lukk: confirmation cancelled')
+    confirmation.record({ confirmation_token: 'later' })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(action).toHaveBeenCalledOnce()
+  })
+
+  it('is cancelled by a sign-in, which may be another account', async () => {
+    const login = vi.fn(async () => ({ access_token: 'B', expires_in: 900 }))
+    withApp({ login })
+    api.mockResolvedValue({ id: 2 })
+    const auth = useLukkAuth()
+    const confirmation = useLukkConfirmation()
+    const action = vi.fn().mockRejectedValueOnce({ status: 423 }).mockResolvedValue('done')
+
+    const pending = confirmation.withConfirmation(action)
+    await vi.waitFor(() => expect(confirmation.required.value).toBe(true))
+    await auth.login({ email: 'b', password: 'p' })
+
+    await expect(pending).rejects.toThrow('lukk: confirmation cancelled')
+    expect(action).toHaveBeenCalledOnce()
   })
 })
