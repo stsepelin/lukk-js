@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { refreshOnce } from '../src/runtime/server/refresh'
+import { currentPair, refreshOnce } from '../src/runtime/server/refresh'
 import { endSession, forgetEndedSessions, markSessionEnded, useSharedEndedSessions } from '../src/runtime/server/ended-sessions'
 import { refreshJournals } from '../src/runtime/server/refresh-journal'
 
@@ -492,16 +492,21 @@ describe('a rotation that lands after every caller gave up', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 
-  it('once taken late in its ten minutes, still ends at the ten minutes — taking never extends a link', async () => {
+  it('once taken late in its ten minutes, still lasts the full straggler window', async () => {
+    // The first taking gives the burst it belongs to its thirty seconds, even past the ten minutes: cut at
+    // the ten minutes, the user who came back at 9:59 had the rest of their page's requests replay the
+    // consumed token — and the family revoked. A hold therefore lasts at most ten minutes + thirty seconds.
     const sid = `late-take-${Math.random()}`
-    const fetchSpy = await lateRotation(sid)
-    await vi.advanceTimersByTimeAsync(9 * 60_000 + 50_000)
+    const fetchSpy = await lateRotation(sid) // landed at 20 s: ten minutes to 620 s
+    await vi.advanceTimersByTimeAsync(599_000) // 619 s
     await refreshOnce({ id: 'h3', data: { refresh: 'old-rt', sid } }, base)
-    await vi.advanceTimersByTimeAsync(9_999) // just inside the original ten minutes
+    await vi.advanceTimersByTimeAsync(1_500) // 620.5 s: past the original ten minutes, inside the thirty seconds
     await expect(refreshOnce({ id: 'h3', data: { refresh: 'old-rt', sid } }, base)).resolves.toMatchObject({ pair: { access: 'late-at' } })
+    expect(fetchSpy).toHaveBeenCalledOnce()
 
+    // A second taking extends nothing: the window from the first ends at 649 s.
     fetchSpy.mockResolvedValue(new Response('{}', { status: 401 }))
-    await vi.advanceTimersByTimeAsync(1)
+    await vi.advanceTimersByTimeAsync(28_500) // 649 s
     await expect(refreshOnce({ id: 'h3', data: { refresh: 'old-rt', sid } }, base)).resolves.toEqual({ pair: null, retryable: false })
   })
 
@@ -780,6 +785,26 @@ describe('the session\'s rotation journal', () => {
     await expect(present(sid, 't1')).resolves.toEqual({ pair: null, retryable: false })
   })
 
+  it('caps a link taken for the first time at the end of the link after it', async () => {
+    // t1 reached here from elsewhere, and its rotation (t1 → t2) was received at 1 s: that link ends at 31 s.
+    // Our own slow t0 → t1 lands unreceived at 20 s, after it. A t0 straggler adopting at 25 s takes the t0
+    // link for the first time — but not past 31 s: outliving t1 → t2, it would hand t1, rotated, to an old
+    // cookie at 33 s.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(answers(pair(1), 20_000))
+    const sid = `cap-${Math.random()}`
+    void present(sid, 't0')
+    await vi.advanceTimersByTimeAsync(1_000)
+    fetchSpy.mockImplementation(async () => new Response(JSON.stringify(pair(2)), { status: 200 }))
+    await present(sid, 't1')
+    await vi.advanceTimersByTimeAsync(24_000) // 25 s
+    await expect(present(sid, 't0')).resolves.toMatchObject({ pair: { refresh: 't2' } })
+    await vi.advanceTimersByTimeAsync(8_000) // 33 s
+
+    fetchSpy.mockImplementation(async () => new Response('{}', { status: 401 }))
+    await expect(present(sid, 't0')).resolves.toEqual({ pair: null, retryable: false })
+  })
+
   it('cuts short only the link that handed out the token rotated — never an unrelated branch\'s', async () => {
     // Journal empty; c is out 40 s. x flies at 1 s; x → y lands unreceived at 21 s. c lands at 40 s. The x
     // link is untouched by c's landing, and x at 100 s still adopts y — cut short, x would be replayed.
@@ -889,6 +914,23 @@ describe('the session\'s rotation journal', () => {
     expect(vi.getTimerCount()).toBe(16) // the pruned link's timer went with it
     fetchSpy.mockResolvedValue(new Response('{}', { status: 401 }))
     await expect(present(sid, 't0')).resolves.toEqual({ pair: null, retryable: false }) // pruned: lukk's to rule on
+  })
+})
+
+describe('currentPair', () => {
+  it('follows a pair on to the newest the session\'s journal holds, and leaves anything else as it is', async () => {
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: 'a1', refresh_token: 't1' }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: 'a2', refresh_token: 't2' }), { status: 200 }))
+    const sid = `current-${Math.random()}`
+    await refreshOnce({ id: 'h3', data: { refresh: 't0', sid } }, 'https://lukk/auth')
+    const handed = { access: 'a1', refresh: 't1' }
+    expect(currentPair(sid, handed)).toBe(handed) // nothing newer yet
+    await refreshOnce({ id: 'h3', data: { refresh: 't1', sid } }, 'https://lukk/auth')
+
+    expect(currentPair(sid, handed)).toEqual({ access: 'a2', refresh: 't2' })
+    expect(currentPair(`other-${Math.random()}`, handed)).toBe(handed)
+    expect(currentPair(undefined, handed)).toBe(handed)
   })
 })
 

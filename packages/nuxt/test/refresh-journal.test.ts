@@ -27,9 +27,11 @@ vi.mock('h3', () => ({
 // eslint-disable-next-line import/first
 import apiProxy from '../src/runtime/server/api-proxy'
 // eslint-disable-next-line import/first
-import { resolveHydrationAccess } from '../src/runtime/server/hydrate'
+import { resolveHydrationAccess, withholdIfReplaced } from '../src/runtime/server/hydrate'
 // eslint-disable-next-line import/first
 import { refreshOnce } from '../src/runtime/server/refresh'
+// eslint-disable-next-line import/first
+import { endSession } from '../src/runtime/server/ended-sessions'
 
 const expired = () => `${Buffer.from('{"alg":"HS256"}').toString('base64url')}.${Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) - 10 })).toString('base64url')}.sig`
 
@@ -108,5 +110,102 @@ describe('a rotation nobody received, adopted by the next request', () => {
     expect(await resolveHydrationAccess(event('/dashboard'))).toBe('got-at')
     expect(rw.update).toHaveBeenCalledWith({ access: 'got-at', refresh: 'got-rt' })
     expect(fetchSpy).toHaveBeenCalledOnce()
+  })
+
+  it('reseals the NEWEST pair when the session rotated the adopted one before the response left', async () => {
+    // A straggler adopts t1; another tab rotates t1 → t2 before this response's headers go out. Sealed as
+    // adopted, the cookie landed over t2's with t1, already spent.
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+      .mockImplementation(async () => new Response(JSON.stringify({ access_token: 'a1', refresh_token: 't1', expires_in: 900 }), { status: 200 }))
+    const rotateMeanwhile = async (sid: string) => {
+      fetchSpy.mockImplementationOnce(async () => new Response(JSON.stringify({ access_token: 'a2', refresh_token: 't2', expires_in: 900 }), { status: 200 }))
+      await refreshOnce({ id: 'h3', data: { refresh: 't1', sid } }, 'https://lukk.test/auth')
+    }
+    /** A read-write session that seals into `on`'s response the way h3 does: replacing its own cookie. */
+    const sessionOn = (on: H3Event) => ({ id: 'h3', data: { ...sealed }, update: vi.fn(async (pair: TokenSession) => {
+      const res = on.node.res
+      const others = ([] as string[]).concat((res.getHeader('set-cookie') as string[] | undefined) ?? []).filter(cookie => !cookie.startsWith('__Host-lukk-session='))
+      res.setHeader('set-cookie', [...others, `__Host-lukk-session=${pair.refresh}`])
+    }) })
+    const proxyAnswering = (meanwhile: () => Promise<void>) => proxyRequest.mockImplementationOnce(async (ev: unknown, _target: string, opts: { onResponse?: (e: unknown, r: unknown) => Promise<void> }) => {
+      await meanwhile()
+      // Like h3's `sendProxy`: the upstream's cookies replace whatever was queued.
+      ;(ev as H3Event).node.res.setHeader('set-cookie', ['upstream=1'])
+      await opts.onResponse!(ev, { status: 200, type: 'basic', headers: new Headers() })
+      return {}
+    })
+
+    // The app-API proxy: re-resolved when the upstream's headers arrive.
+    const apiSid = `newest-api-${Math.random()}`
+    await refreshOnce({ id: 'h3', data: { refresh: 't0', sid: apiSid } }, 'https://lukk.test/auth')
+    sealed = { access: expired(), refresh: 't0', sid: apiSid }
+    const proxied = event()
+    proxied.node.res.setHeader('set-cookie', ['other=1']) // queued before this handler: it stays
+    rw = sessionOn(proxied)
+    proxyAnswering(() => rotateMeanwhile(apiSid))
+    await (apiProxy as unknown as (e: H3Event) => Promise<unknown>)(proxied)
+    expect(rw.update.mock.calls.map(call => call[0])).toEqual([{ access: 'a1', refresh: 't1' }, { access: 'a2', refresh: 't2' }])
+    expect(proxied.node.res.getHeader('set-cookie')).toEqual(['other=1', '__Host-lukk-session=t2'])
+
+    // A logout this request finished, replaced by a sign-in meanwhile: none of our cookies leave — the
+    // re-seal included.
+    const droppedSid = `dropped-api-${Math.random()}`
+    await refreshOnce({ id: 'h3', data: { refresh: 't0', sid: droppedSid } }, 'https://lukk.test/auth')
+    sealed = { access: expired(), refresh: 't0', sid: droppedSid }
+    const dropped = event()
+    const endedKey = `finished-${Math.random()}`
+    ;(dropped.context as Record<string, unknown>).lukkEndedSession = { key: endedKey, marker: '__Host-lukk-signed-out', session: '__Host-lukk-session' }
+    await endSession(endedKey, { replaced: true })
+    rw = sessionOn(dropped)
+    proxyAnswering(() => rotateMeanwhile(droppedSid))
+    await (apiProxy as unknown as (e: H3Event) => Promise<unknown>)(dropped)
+    expect(dropped.node.res.getHeader('set-cookie')).toBeUndefined()
+
+    // Nothing rotated meanwhile: sealed once, as adopted.
+    const quietSid = `quiet-api-${Math.random()}`
+    await refreshOnce({ id: 'h3', data: { refresh: 't0', sid: quietSid } }, 'https://lukk.test/auth')
+    sealed = { access: expired(), refresh: 't0', sid: quietSid }
+    const quiet = event()
+    rw = sessionOn(quiet)
+    proxyAnswering(async () => {})
+    await (apiProxy as unknown as (e: H3Event) => Promise<unknown>)(quiet)
+    expect(rw.update).toHaveBeenCalledOnce()
+    expect(quiet.node.res.getHeader('set-cookie')).toEqual(['__Host-lukk-session=t1'])
+
+    // SSR hydration: re-resolved when the render is done, before the page's headers go out.
+    const ssrSid = `newest-ssr-${Math.random()}`
+    await refreshOnce({ id: 'h3', data: { refresh: 't0', sid: ssrSid } }, 'https://lukk.test/auth')
+    sealed = { access: expired(), refresh: 't0', sid: ssrSid }
+    const page = event('/dashboard')
+    rw = sessionOn(page)
+    expect(await resolveHydrationAccess(page)).toBe('a1')
+    await withholdIfReplaced(page) // nothing newer yet: no second seal
+    expect(rw.update).toHaveBeenCalledOnce()
+    await rotateMeanwhile(ssrSid)
+    await withholdIfReplaced(page)
+    expect(rw.update.mock.calls.map(call => call[0])).toEqual([{ access: 'a1', refresh: 't1' }, { access: 'a2', refresh: 't2' }])
+
+    // …but not once the page's headers are out: touching them would throw.
+    const streamedSid = `newest-streamed-${Math.random()}`
+    await refreshOnce({ id: 'h3', data: { refresh: 't0', sid: streamedSid } }, 'https://lukk.test/auth')
+    sealed = { access: expired(), refresh: 't0', sid: streamedSid }
+    const streamed = event('/dashboard')
+    rw = sessionOn(streamed)
+    await resolveHydrationAccess(streamed)
+    await rotateMeanwhile(streamedSid)
+    ;(streamed.node.res as { headersSent?: boolean }).headersSent = true
+    await withholdIfReplaced(streamed)
+    expect(rw.update).toHaveBeenCalledOnce()
+
+    // …nor does a response that started while it was sealing fail the render: it keeps the seal it had.
+    const racingSid = `newest-racing-${Math.random()}`
+    await refreshOnce({ id: 'h3', data: { refresh: 't0', sid: racingSid } }, 'https://lukk.test/auth')
+    sealed = { access: expired(), refresh: 't0', sid: racingSid }
+    const racing = event('/dashboard')
+    rw = sessionOn(racing)
+    await resolveHydrationAccess(racing)
+    await rotateMeanwhile(racingSid)
+    rw.update.mockRejectedValueOnce(Object.assign(new Error('Cannot set headers after they are sent'), { code: 'ERR_HTTP_HEADERS_SENT' }))
+    await expect(withholdIfReplaced(racing)).resolves.toBeUndefined()
   })
 })

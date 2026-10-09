@@ -7,7 +7,7 @@ import { sessionEnded, sessionKey } from './ended-sessions'
 import { logoutNoted, withholdSignedOut } from './logout-note'
 import { revokeDroppedSession } from './revoke-dropped'
 import { readSealedSession, sessionCookie as sessionCookieOptions, sessionSeal } from './sealed-session'
-import { refreshOnce, type TokenSession } from './refresh'
+import { currentPair, refreshOnce, type TokenSession } from './refresh'
 
 /**
  * Optional BFF app-API proxy. Forwards same-origin `${apiPath}/**` to the fixed
@@ -103,6 +103,8 @@ export default defineEventHandler(async (event) => {
   let access = sealed.access
   // Set when this request re-seals the session, so the response can check it again at the last moment.
   let resealed: (() => Promise<boolean>) | null = null
+  // And re-seals it with the newest pair, should the session have rotated the one sealed here meanwhile.
+  let resealNewest: ((queued: string[]) => Promise<string[]>) | null = null
   let rotatedRefresh: string | undefined
   if (access && sealed.refresh && accessExpired(access)) {
     const session = await useSession<TokenSession>(event, {
@@ -131,6 +133,16 @@ export default defineEventHandler(async (event) => {
       access = pair.access
       rotatedRefresh = pair.refresh
       resealed = ended
+      resealNewest = async (queued) => {
+        const newest = currentPair(sessionKey(session), pair)
+        if (newest === pair) return queued
+        // h3 writes the seal into the response's queued `Set-Cookie`, replacing our cookie of that name.
+        event.node.res.setHeader('set-cookie', queued)
+        await session.update(newest)
+        const resealedCookies = toCookieArray(event.node.res.getHeader('set-cookie'))
+        event.node.res.removeHeader('set-cookie')
+        return resealedCookies
+      }
     }
     else if (pair) {
       revokeDroppedSession(event, pair, baseURL, clientIp)
@@ -243,9 +255,12 @@ export default defineEventHandler(async (event) => {
       // the sign-in that replaced it and put the browser back on the previous account.
       const ours = [signedOutCookieName(secure, cookieNamespace), sessionName]
       const dropLogoutCookies = await withholdSignedOut(event)
+      // The newest pair, if the session rotated the one re-sealed above while the upstream was answering:
+      // left as is, this cookie landed over the newer one with a token already spent.
+      const queued = replaced || !resealNewest ? toCookieArray(sessionCookie) : await resealNewest(toCookieArray(sessionCookie))
       const keep = replaced
         ? []
-        : toCookieArray(sessionCookie).filter(cookie => !dropLogoutCookies || !ours.includes(cookieName(cookie)))
+        : queued.filter(cookie => !dropLogoutCookies || !ours.includes(cookieName(cookie)))
       // Opt-in passthrough: forward only allow-listed names — and NEVER a lukk sealed session
       // cookie (this app's OR a co-hosted app's, whatever the list says); an upstream must not be
       // able to set/overwrite any lukk session.

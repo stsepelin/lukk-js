@@ -17,7 +17,13 @@ export interface Link {
   expiresIn?: number
   /** When the refresh that produced it left — when lukk minted it, since lukk rotates on receipt. */
   mintedAt: number
-  /** When this link ends — only ever brought forward, never pushed back. */
+  /**
+   * Its pair has reached the session — a caller received it, a request adopted through it, or its pair's own
+   * rotation landed. The first taking gives it the straggler window outright; after that its end is only
+   * ever brought forward.
+   */
+  taken: boolean
+  /** When this link ends. */
   expiresAt: number
   /** Ends it then. */
   timer: ReturnType<typeof setTimeout>

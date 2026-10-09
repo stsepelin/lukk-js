@@ -81,10 +81,13 @@ export const REFRESH_INFLIGHT_MAX_MS = 5 * 60_000
  * rotating at that very moment (it now waits on that rotation and is handed what it produced).
  *
  * Each link lives on its own: `REFRESH_HOLD_MS` for its first taker when no caller received it, and
- * `REFRESH_STRAGGLER_MS` once its pair has reached the session — counted from when the BFF got the pair if
- * a caller received it, and otherwise from when a request adopts through it or the session presents the
- * pair it produced. A link's end is only ever brought forward, never pushed back, and never past the end of
- * the link after it in its chain. So answers from the journal can come up to a refresh's duration + 30 s
+ * `REFRESH_STRAGGLER_MS` once its pair has reached the session — from when the BFF got the pair if a caller
+ * received it; from when a request first adopts through it otherwise (outright, so a hold lasts at most
+ * `REFRESH_HOLD_MS` + `REFRESH_STRAGGLER_MS`: the burst of a user returning near its end still has its
+ * thirty seconds); and cut to that window when the rotation of the pair it handed out lands. After that its
+ * end is only ever brought forward, and never past the end of the link after it in its chain. And a caller
+ * about to seal a pair it was handed asks the journal again at the last moment (`currentPair`): the session
+ * may have rotated it meanwhile. So answers from the journal can come up to a refresh's duration + 30 s
  * after lukk rotated — past lukk's own grace window, on a slow refresh. That is deliberate: counted from
  * lukk's rotation instead, a slow refresh's link was gone as it landed, and the requests still out with the
  * old cookie replayed it into a revoke. The whole journal goes when the session presents a token outside it (it has moved
@@ -158,6 +161,22 @@ export function refreshOnce(session: { id?: string, data: TokenSession }, baseUR
  * a caller that stops waiting, or a throttle, is told so, and retrying finds the chain where it was.
  */
 function adopt(id: string, journal: Map<string, Link>, token: string): Promise<RefreshResult> {
+  const path = chainFrom(journal, token)
+  // From the head back: each gets the straggler window from now — outright on its first taking, so the
+  // burst it belongs to has its thirty seconds even near the end of a ten-minute hold — but never past the
+  // end of the one after it.
+  let until = Date.now() + REFRESH_STRAGGLER_MS
+  for (const [hop, link] of [...path].reverse()) {
+    take(id, hop, link, until)
+    until = link.expiresAt
+  }
+  const head = path.at(-1)![1]
+  const rotating = inflightRefresh.get(flightKey(id, head.pair.refresh!))
+  return rotating ? waitOn(rotating) : Promise.resolve(handOut(head))
+}
+
+/** `token`'s link and every link after it, in order: consumed token → link, ending at the head. */
+function chainFrom(journal: Map<string, Link>, token: string): [string, Link][] {
   const path: [string, Link][] = [[token, journal.get(token)!]]
   // Bounded by the journal's size, which only matters for an upstream that handed back a token it had
   // already consumed: the chain would loop, and the process with it.
@@ -168,15 +187,22 @@ function adopt(id: string, journal: Map<string, Link>, token: string): Promise<R
     if (!next) break
     path.push([hop, next])
   }
-  // From the head back, each one no later than the one after it.
-  let until = Date.now() + REFRESH_STRAGGLER_MS
-  for (const [hop, link] of path.reverse()) {
-    shorten(id, hop, link, until)
-    until = link.expiresAt
-  }
-  const head = path[0]![1]
-  const rotating = inflightRefresh.get(flightKey(id, head.pair.refresh!))
-  return rotating ? waitOn(rotating) : Promise.resolve(handOut(head))
+  return path
+}
+
+/**
+ * The newest pair the session's journal leads to from `pair` — `pair` itself when nothing newer is known.
+ *
+ * For a caller about to seal a pair it was handed a moment ago: the session may have rotated it since (a
+ * restore in another tab, a sibling request), and a cookie sealed with it would then land over the newer
+ * one with a token already spent, whose next refresh — once its link has expired — revokes the family. So
+ * each caller asks again at the last moment before its cookie leaves: the auth proxy's retry when it seals,
+ * the app-API proxy when the upstream's headers arrive, SSR hydration once the page has rendered.
+ */
+export function currentPair(id: string | undefined, pair: TokenSession): TokenSession {
+  const journal = refreshJournals.get(id!)
+  if (!journal?.has(pair.refresh!)) return pair
+  return chainFrom(journal, pair.refresh!).at(-1)![1].pair
 }
 
 /** A link's pair, with what is LEFT of its access token's lifetime. */
@@ -213,13 +239,15 @@ function record(id: string, consumed: string, result: RefreshResult, flight: Fli
   // straggler window from now — never longer than the link recorded below, which lasts at least that. Only
   // THAT link: another branch's untaken link has handed out nothing yet.
   for (const [token, link] of journal) {
+    // Not marked taken: a request adopting through it later caps it at the link recorded below anyway.
     if (link.pair.refresh === consumed) shorten(id, token, link, now + REFRESH_STRAGGLER_MS)
   }
   // A second rotation of the same token (one the in-flight backstop gave up on, then both answered): the
   // newer one stands, on its own lifetime.
   clearTimeout(journal.get(consumed)?.timer)
-  const link = { pair: result.pair!, expiresIn: result.expiresIn, mintedAt: flight.startedAt } as Link
-  expire(id, consumed, link, now + (flight.waiting > 0 ? REFRESH_STRAGGLER_MS : REFRESH_HOLD_MS))
+  const received = flight.waiting > 0
+  const link = { pair: result.pair!, expiresIn: result.expiresIn, mintedAt: flight.startedAt, taken: received } as Link
+  expire(id, consumed, link, now + (received ? REFRESH_STRAGGLER_MS : REFRESH_HOLD_MS))
   journal.set(consumed, link)
   if (journal.size > REFRESH_JOURNAL_MAX_LINKS) {
     const [oldest, dropped] = journal.entries().next().value!
@@ -232,7 +260,14 @@ function record(id: string, consumed: string, result: RefreshResult, flight: Fli
   })
 }
 
-/** End `link` at `until` if that is sooner than it would — a link's life is only ever brought forward. */
+/** A request adopted through `link`: on its first taking it ends at `until` outright, after that no later. */
+function take(id: string, token: string, link: Link, until: number): void {
+  if (link.taken) return shorten(id, token, link, until)
+  link.taken = true
+  expire(id, token, link, until)
+}
+
+/** End `link` at `until` if that is sooner than it would — once taken, a link's life is only brought forward. */
 function shorten(id: string, token: string, link: Link, until: number): void {
   expire(id, token, link, Math.min(until, link.expiresAt))
 }

@@ -8,7 +8,7 @@ import { endSession, newSessionId, sessionEnded, sessionKey, sessionReplaced, wi
 import { revokeDroppedSession } from './revoke-dropped'
 import { readSealedSession, sessionCookie, sessionSeal } from './sealed-session'
 import { warnIfSessionTooLarge } from './session-size'
-import { refreshOnce, type TokenSession } from './refresh'
+import { currentPair, refreshOnce, type TokenSession } from './refresh'
 
 type SessionCookieOptions = ReturnType<typeof sessionCookie>
 
@@ -244,9 +244,12 @@ export default defineEventHandler(async (event) => {
         try { upstream = await callLukk(pair.access) }
         finally {
           if (!(await ended())) {
-            await s.update(pair)
+            // The newest pair, not necessarily the one handed out before the call: the session may have
+            // rotated it meanwhile, and sealing a spent token over the newer cookie invites a revoke.
+            const newest = currentPair(sessionKey(s), pair)
+            await s.update(newest)
             warnIfSessionTooLarge(s)
-            resealedTokens = pair
+            resealedTokens = newest
           }
           // The logout is about to revoke it itself.
           else if (!endingIt) {
