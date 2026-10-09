@@ -45,3 +45,22 @@ describe('useLukkConfirmation withConfirmation cleanup', () => {
     expect(live.count).toBe(idle)
   })
 })
+
+describe('a step-up started by a component that unmounts', () => {
+  it('still completes when that component\'s scope is gone', async () => {
+    // The modal that starts a step-up is often the component that unmounts. A watcher created in its
+    // scope stopped with it, and the action waited forever.
+    const { effectScope } = await import('vue')
+    __test.nuxtApp = { $lukk: { confirmPassword: vi.fn().mockResolvedValue({ confirmation_token: 't' }) } }
+    const flow = useLukkConfirmation()
+    let attempts = 0
+    const scope = effectScope()
+
+    const pending = scope.run(() => flow.withConfirmation(async () => { if (++attempts === 1) throw { status: 423 }; return 'ok' }))!
+    await tick()
+    scope.stop()
+    await flow.confirmPassword('secret')
+
+    await expect(pending).resolves.toBe('ok')
+  })
+})
