@@ -124,7 +124,7 @@ export default defineEventHandler(async (event) => {
   const endsSession = route === '/logout'
   let logoutRefresh = sealed.refresh
 
-  function callLukk(access: string | undefined): Promise<Response> {
+  function callLukk(access: string | undefined): Promise<Upstream> {
     // This path builds its headers from scratch rather than forwarding the client's, so there is
     // nothing to strip — no hop-by-hop or spoofed forwarding header can reach the upstream. Via is
     // still owed: RFC 9110 §7.6.3 asks every forwarding intermediary to identify itself.
@@ -143,12 +143,16 @@ export default defineEventHandler(async (event) => {
     // X-Lukk-Confirmation header (undici keeps custom headers across redirects) and, on a
     // 307/308, the request body to the redirect host (CWE-918/200). Handled below.
     const body = endsSession ? JSON.stringify(logoutRefresh ? { refresh_token: logoutRefresh } : {}) : rawBody
-    // lukk unreachable, or the connection dropped: answer 502 like any other upstream failure, rather
-    // than letting the fetch error escape as a 500 with a stack trace in the log on every attempt.
-    return fetchUpstream(target!, { method, headers, body, redirect: 'manual' }).catch((error: unknown) => {
+    // The body is read inside the deadline, not after it: a lukk that answers with headers and then
+    // stalls would otherwise hold this request for as long as the runtime's socket timeout allows.
+    // lukk unreachable, the connection dropped, or the deadline passed: answer 502 like any other
+    // upstream failure, rather than letting the error escape as a 500 with a stack trace in the log.
+    // A redirect's body is never read — it is refused below — so it is not waited for either.
+    // Stryker disable next-line StringLiteral: equivalent — the text of a redirect is never read: the 3xx check below returns before it.
+    return fetchUpstream<Upstream>(target!, { method, headers, body, redirect: 'manual' }, async res => ({ res, text: isRedirect(res) ? '' : await res.text() })).catch((error: unknown) => {
       reportProxyFailure(target!, error)
       // No headers: only the status and body of this Response are read below.
-      return new Response(JSON.stringify({ message: 'lukk could not be reached.' }), { status: 502 })
+      return { res: new Response(null, { status: 502 }), text: JSON.stringify({ message: 'lukk could not be reached.' }) }
     })
   }
 
@@ -159,6 +163,14 @@ export default defineEventHandler(async (event) => {
   // so in BFF mode it could never succeed, and two tabs reloading would replay a consumed token
   // past the grace window — the false family revoke this package exists to avoid.
   if (route === '/refresh') {
+    // POST only. A rotation changes state (RFC 9110 §9.2.1), so a GET to it is one a prefetcher, a
+    // crawler or a same-origin `<img>` could trigger — spending the token on a response nobody reads.
+    if (method !== 'POST') {
+      setResponseStatus(event, 405)
+      setResponseHeader(event, 'allow', 'POST')
+      return { message: 'Method not allowed.' }
+    }
+
     // Read-only until we know there is something to rotate: opening the session would mint a
     // cookie for an anonymous caller.
     if (!sealed.refresh) {
@@ -200,13 +212,13 @@ export default defineEventHandler(async (event) => {
     return { ok: true, expires_in: expiresIn }
   }
 
-  let res = await callLukk(sealed.access)
+  let upstream = await callLukk(sealed.access)
   // Rotated tokens this request re-sealed, if any — revoked should the session turn out to be replaced.
   let resealedTokens: TokenSession | undefined
   // A refresh that failed without lukk rejecting the token (a throttle, an outage): the session is live.
   let stillRefreshable = false
 
-  if (res.status === 401 && sealed.refresh && !SIGN_IN_PATHS.has(route)) {
+  if (upstream.res.status === 401 && sealed.refresh && !SIGN_IN_PATHS.has(route)) {
     const s = await session()
     // A session a sign-in replaced or a logout ended is neither rotated nor written — before the
     // refresh or after it — and the 401 goes back as it came. See the `/refresh` branch above.
@@ -222,7 +234,7 @@ export default defineEventHandler(async (event) => {
         // Seal AFTER the retried call, so a sign-in or logout during it is still seen — the response
         // carries this cookie only once that call is done. In `finally`: the refresh token has been
         // rotated either way, and a throw that skipped the write would strand the session on a consumed one.
-        try { res = await callLukk(pair.access) }
+        try { upstream = await callLukk(pair.access) }
         finally {
           if (!(await ended())) {
             await s.update(pair)
@@ -249,19 +261,21 @@ export default defineEventHandler(async (event) => {
     }
   }
 
+  const { res, text } = upstream
+
   // A trusted JSON upstream shouldn't 3xx; with redirect:'manual' one surfaces as an
   // opaque response (status 0) — reject it rather than leak an empty/odd status downstream.
-  if (res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400)) {
+  if (isRedirect(res)) {
     setResponseStatus(event, 502)
     return { message: 'Upstream redirect rejected.' }
   }
 
-  const text = await res.text()
   const parsed = text ? safeParse(text) : undefined
   const data = parsed?.json
 
-  // Reading the body can take as long as the upstream likes. A session re-sealed above that a sign-in or
-  // logout ended meanwhile must not leave with this response — the last point before it does.
+  // Sealing takes time too (iron is async crypto), so a sign-in or logout can still land after the check
+  // in the retry's `finally` above. A session re-sealed there that one ended meanwhile must not leave with
+  // this response — the last point before it does.
   if (rwSession && await sessionEnded(sessionKey(await rwSession))) {
     withholdSessionCookie(event.node.res, sessionName)
     revokeDroppedSession(event, resealedTokens ?? {}, baseURL, clientIp)
@@ -355,6 +369,17 @@ export default defineEventHandler(async (event) => {
   const body = redactCredentials(data)
   return typeof body === 'object' && body !== null ? body : JSON.stringify(body)
 })
+
+/** A 3xx `redirect: 'manual'` left unfollowed, or the opaque redirect a browser-style runtime hands back instead. */
+function isRedirect(res: Response): boolean {
+  return res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400)
+}
+
+/** An upstream answer, its body already read — inside the deadline (see `fetchUpstream`). */
+interface Upstream {
+  res: Response
+  text: string
+}
 
 /**
  * The request body as text (`undefined` when there is none), or the status refusing it: 413 over

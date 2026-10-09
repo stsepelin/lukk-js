@@ -90,6 +90,24 @@ describe('useLukkAuth', () => {
     expect(user.value).toEqual({ id: 1, name: 'Ada' })
   })
 
+  it('fetchUser: in BFF mode the user endpoint is a route of this app, so it sits under the app base', async () => {
+    // Fetched with an empty base, a relative endpoint resolved against the origin ROOT — so an app served
+    // under `/admin/` asked `/api/me`, outside itself, while the app-API proxy answers at `/admin/api/me`.
+    withApp({})
+    __test.runtimeConfig.public.lukk = { ...__test.runtimeConfig.public.lukk, mode: 'bff', userEndpoint: '/api/me' }
+    ;(__test.runtimeConfig as { app?: unknown }).app = { baseURL: '/admin/' }
+    await useLukkAuth().fetchUser()
+    expect(api).toHaveBeenCalledWith('/admin/api/me', { baseURL: '' })
+  })
+
+  it('fetchUser: in direct mode the user endpoint is taken as written, whatever the app base', async () => {
+    withApp({})
+    __test.runtimeConfig.public.lukk = { ...__test.runtimeConfig.public.lukk, userEndpoint: '/me' }
+    ;(__test.runtimeConfig as { app?: unknown }).app = { baseURL: '/admin/' }
+    await useLukkAuth().fetchUser()
+    expect(api).toHaveBeenCalledWith('/me', { baseURL: '' })
+  })
+
   it('fetchUser logs out only on auth failures, not transient errors', async () => {
     withApp({})
     const { user, fetchUser } = useLukkAuth()

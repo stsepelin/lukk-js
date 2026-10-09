@@ -117,6 +117,23 @@ describe('reachesLukk', () => {
     expect(reachesLukk('https://API.test/users', 'https://api.test/')).toBe(true)
     expect(reachesLukk('https://api.test/users', 'https://auth.test')).toBe(false)
   })
+
+  it('follows the path through further rounds of decoding, collapsing the dot segments each one produces', () => {
+    const base = 'https://api.test/auth'
+    expect(reachesLukk('https://api.test/x/%252e%252e/auth/login', base)).toBe(true) // ../ after one more round
+    expect(reachesLukk('https://api.test/%2561uth/login', base)).toBe(true) // /auth after one more round
+    expect(reachesLukk('https://api.test/x/%2525252e%2525252e/auth/login', base)).toBe(true) // the third round
+    // A leading `//` a round produces stays a path on the TARGET's host — it is not read as an authority.
+    expect(reachesLukk('https://api.test/%252f%252fauth.test/auth/login', 'https://auth.test')).toBe(false)
+  })
+
+  it('lets an app path through once decoding settles, and refuses one still decoding after four rounds', () => {
+    const base = 'https://api.test/auth'
+    // Settles on the fourth look (`/x%252541` → `/x%2541` → `/x%41` → `/xA`), never under /auth.
+    expect(reachesLukk('https://api.test/x%252541', base)).toBe(false)
+    // One level deeper is still changing when the rounds run out: no telling where the next lands.
+    expect(reachesLukk('https://api.test/x%25252541', base)).toBe(true)
+  })
 })
 
 describe('rejectUnresolvedTarget', () => {
@@ -496,8 +513,17 @@ describe('isForeignSubresource', () => {
     expect(isForeignSubresource(event('HEAD', { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'cors' }))).toBe(true)
   })
 
-  it('leaves alone a navigation, the app\'s own requests, a caller with no fetch metadata, and other methods', () => {
-    expect(isForeignSubresource(event('GET', { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate' }))).toBe(false)
+  it('names a NESTED navigation too — only a top-level document is a link the visitor followed', () => {
+    // `Sec-Fetch-Mode: navigate` is also sent for an iframe, frame, embed or object; only
+    // `Sec-Fetch-Dest: document` is a top-level navigation.
+    for (const dest of ['iframe', 'frame', 'embed', 'object', '']) {
+      expect(isForeignSubresource(event('GET', { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': dest })), dest).toBe(true)
+    }
+    expect(isForeignSubresource(event('GET', { 'sec-fetch-site': 'same-site', 'sec-fetch-mode': 'navigate' }))).toBe(true)
+  })
+
+  it('leaves alone a top-level navigation, the app\'s own requests, a caller with no fetch metadata, and other methods', () => {
+    expect(isForeignSubresource(event('GET', { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document' }))).toBe(false)
     expect(isForeignSubresource(event('GET', { 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'cors' }))).toBe(false)
     expect(isForeignSubresource(event('GET', {}))).toBe(false)
     // Another method is the origin check's to judge.
@@ -508,23 +534,40 @@ describe('isForeignSubresource', () => {
 describe('fetchUpstream', () => {
   afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks() })
 
+  /** A response whose headers arrive at once and whose body never does — unless the call is aborted. */
+  const stalledBody = (signal?: AbortSignal | null) => new Response(new ReadableStream({
+    start(controller) { signal?.addEventListener('abort', () => controller.error(signal.reason)) },
+  }), { status: 200 })
+
   it('abandons a call lukk never answers, saying why', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     vi.spyOn(globalThis, 'fetch').mockImplementation((_input, init) => new Promise((_resolve, reject) => {
       init?.signal?.addEventListener('abort', () => reject(init.signal!.reason))
     }))
 
-    const call = fetchUpstream('https://lukk.test/auth/refresh', { method: 'POST' })
+    const call = fetchUpstream('https://lukk.test/auth/logout', { method: 'POST' }, res => res.text())
     const failed = expect(call).rejects.toThrow('lukk did not answer within 15000 ms')
     await vi.advanceTimersByTimeAsync(15_000)
     await failed
   })
 
-  it('leaves no timer behind once lukk answers', async () => {
+  it('holds the deadline over the body too, not only the headers', async () => {
+    // A server that sends its headers and then stalls the body otherwise hung the caller for as long as
+    // the runtime's own socket timeout allowed — the very wait the deadline exists to bound.
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 204 }))
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => stalledBody(init?.signal))
 
-    await fetchUpstream('https://lukk.test/auth/logout', { method: 'POST' })
+    const call = fetchUpstream('https://lukk.test/auth/user', { method: 'GET' }, res => res.text())
+    const failed = expect(call).rejects.toThrow('lukk did not answer within 15000 ms')
+    await vi.advanceTimersByTimeAsync(15_000)
+    await failed
+  })
+
+  it('hands back what the reader read, and leaves no timer behind once it has', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"ok":true}', { status: 200 }))
+
+    await expect(fetchUpstream('https://lukk.test/auth/logout', { method: 'POST' }, res => res.text())).resolves.toBe('{"ok":true}')
 
     expect(vi.getTimerCount()).toBe(0)
   })

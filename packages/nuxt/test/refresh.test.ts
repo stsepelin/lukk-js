@@ -51,20 +51,21 @@ describe('refreshOnce when lukk can\'t be reached', () => {
     expect(fetchSpy).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ redirect: 'manual' }))
   })
 
-  it('gives up on a lukk that never answers, rather than holding the session\'s requests forever', async () => {
-    // Every request on a session shares one refresh in flight. With no timeout a hung lukk kept that
-    // promise pending until the runtime's own socket timeout — minutes — and every page render, proxied
-    // call and refresh on the session waited with it.
+  it('never abandons a rotation in flight, however slowly lukk answers it', async () => {
+    // A refresh is the one call whose loss cannot be retried. Once lukk has the token it rotates it, and
+    // cutting the connection does not undo that: the replacement exists only in a response nobody would
+    // read, the session keeps the consumed token, and its next refresh — past the grace window — is the
+    // replay reuse detection punishes with a family revoke. So it is never aborted, at 15 s or otherwise.
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-    // Hangs for good unless the call carries a signal that aborts it.
-    vi.spyOn(globalThis, 'fetch').mockImplementation((_input, init) => new Promise((_resolve, reject) => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((_input, init) => new Promise((resolve, reject) => {
       init?.signal?.addEventListener('abort', () => reject(init.signal!.reason))
+      setTimeout(() => resolve(new Response(JSON.stringify({ access_token: 'slow-at', refresh_token: 'slow-rt', expires_in: 900 }), { status: 200 })), 20_000)
     }))
 
-    const result = refreshOnce({ id: 'hung', data: { refresh: 'rt' } }, 'https://api.example.com/auth')
-    await vi.advanceTimersByTimeAsync(15_000)
+    const result = refreshOnce({ id: 'slow', data: { refresh: 'rt' } }, 'https://api.example.com/auth')
+    await vi.advanceTimersByTimeAsync(20_000)
 
-    await expect(result).resolves.toMatchObject({ pair: null, retryable: true })
+    await expect(result).resolves.toEqual({ pair: { access: 'slow-at', refresh: 'slow-rt' }, expiresIn: 900, retryable: false })
     vi.useRealTimers()
   })
 

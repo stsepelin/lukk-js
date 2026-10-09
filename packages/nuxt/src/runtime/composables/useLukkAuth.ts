@@ -3,7 +3,7 @@ import type { ComputedRef, Ref } from 'vue'
 import { computed, useNuxtApp, useRuntimeConfig, useState } from '#imports'
 import { ACCESS_KEY, CHALLENGE_KEY, CONFIRMATION_KEY, CONFIRMED_KEY, READY_KEY, RESTORE_FAILED_KEY, USER_KEY } from '../keys'
 import { SIGN_IN } from '../utils/sign-in'
-import { isAuthRejection } from '../shared'
+import { isAuthRejection, underAppBase } from '../shared'
 import { clearPendingLogout, notePendingLogout, signedInSince } from '../utils/pending-logout'
 import { acrossTabs, cancelPendingStepUp, restoreState, settleRefresh, signIn } from '../utils/restore-state'
 import { clearLogoutCookie, setLogoutCookie } from '../utils/logout-cookie'
@@ -54,6 +54,13 @@ export function useLukkAuth(): LukkAuth {
   // Restore bookkeeping that `clearNuxtState()` cannot erase — see utils/restore-state.
   const state = restoreState(nuxtApp)
   const cfg = useRuntimeConfig().public.lukk as PublicLukk
+  // In BFF mode the user endpoint is a same-origin path served by THIS app (the app-API proxy, or a route of
+  // its own), so it sits under the app's base — fetched with an empty base, `/api/me` from an app served
+  // under `/admin/` resolved against the origin root, outside the app. In direct mode it names the API, as
+  // written. Read here, in valid Nuxt context, not inside the load.
+  const userEndpoint = cfg.mode === 'bff'
+    ? underAppBase((useRuntimeConfig() as { app?: { baseURL?: string } }).app?.baseURL, cfg.userEndpoint)
+    : cfg.userEndpoint
   // Auth-aware fetch for the current-user load — SSR-correct (forwards the session
   // cookie) unlike a bare `$fetch`, and transport-aware for the bearer.
   const api = useLukkFetch()
@@ -440,7 +447,7 @@ export function useLukkAuth(): LukkAuth {
       // userEndpoint is a full path; `baseURL: ''` keeps it as-is (in server-BFF the
       // request-aware transport resolves the relative endpoint in-process). `shapeUser`
       // auto-unwraps a Laravel `{ data: {...} }` API-Resource wrapper (configurable via `user.key`).
-      const body = await api(cfg.userEndpoint, { baseURL: '' })
+      const body = await api(userEndpoint, { baseURL: '' })
       // Stryker disable next-line BooleanLiteral: equivalent — a stale answer is never read: the caller re-checks `isCurrent()`, and a generation only moves on.
       if (!isCurrent()) return false
       user.value = shapeUser(body, cfg.userKey || false)

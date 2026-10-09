@@ -57,6 +57,24 @@ describe('logout request shape', () => {
     expect(init.keepalive).toBe(true)
   })
 
+  it('presents a refresh token it is given, so a session whose access token expired still ends', async () => {
+    // lukk accepts the refresh token on logout (RFC 7009 revocation by the token the client holds): a client
+    // in body mode, whose access token has lapsed, otherwise had to spend a rotation just to log out — or
+    // could not log out at all while refreshing was throttled or failing.
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockRejectedValueOnce(new TypeError('keepalive refused'))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+    const client = createLukkClient({ baseURL: 'https://x/auth', fetch })
+
+    await client.logout({ refreshToken: 'rt-1' })
+    expect((fetch.mock.calls[0]![1] as RequestInit).body).toBe('{"refresh_token":"rt-1"}')
+
+    // The same body on the resend a browser that refuses keepalive gets, or it is not the same logout.
+    await client.logout({ refreshToken: 'rt-2' })
+    expect((fetch.mock.calls[2]![1] as RequestInit).body).toBe('{"refresh_token":"rt-2"}')
+  })
+
   it('sends it again without keepalive where the browser refuses one needing a preflight', async () => {
     const fetch = vi.fn()
       .mockRejectedValueOnce(new TypeError('Preflight request for request with keepalive specified is currently not supported'))

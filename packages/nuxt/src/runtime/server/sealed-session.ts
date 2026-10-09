@@ -1,6 +1,7 @@
 import type { H3Event, SessionConfig } from 'h3'
 import { getCookie, unsealSession } from 'h3'
 import type { TokenSession } from './refresh'
+import { isUsableSessionMaxAge, sessionMaxAgeError } from '../shared'
 
 /**
  * Read-only unseal of the sealed BFF token session (access + refresh + confirmation).
@@ -51,7 +52,19 @@ export const DEFAULT_SESSION_MAX_AGE = 30 * 24 * 60 * 60
  * Partial on purpose: h3 spreads this OVER iron's defaults, so only `ttl` changes.
  */
 export function sessionSeal(maxAge: number | undefined): SessionConfig['seal'] {
-  return { ttl: (maxAge ?? DEFAULT_SESSION_MAX_AGE) * 1000 } as SessionConfig['seal']
+  return { ttl: lifetime(maxAge) * 1000 } as SessionConfig['seal']
+}
+
+/**
+ * The lifetime to write, in seconds — or a throw, never a guess. The module refuses an unusable
+ * `session.maxAge` at build, but a runtime override (`NUXT_LUKK_SESSION_MAX_AGE`) lands after that check,
+ * and the one value that matters most fails OPEN: iron reads a ttl of `0` as "never expires". Refusing to
+ * write is the same failure mode as a session secret iron rejects — loud, and nothing weaker is sealed.
+ */
+function lifetime(maxAge: number | undefined): number {
+  const value = maxAge ?? DEFAULT_SESSION_MAX_AGE
+  if (!isUsableSessionMaxAge(value)) throw new Error(sessionMaxAgeError(value))
+  return value
 }
 
 /**
@@ -62,5 +75,5 @@ export function sessionSeal(maxAge: number | undefined): SessionConfig['seal'] {
  * creation, while Max-Age restarts on every write, as the seal does.
  */
 export function sessionCookie(secure: boolean, maxAge: number | undefined): { sameSite: 'strict', secure: boolean, httpOnly: true, path: '/', maxAge: number } {
-  return { sameSite: 'strict', secure, httpOnly: true, path: '/', maxAge: maxAge ?? DEFAULT_SESSION_MAX_AGE }
+  return { sameSite: 'strict', secure, httpOnly: true, path: '/', maxAge: lifetime(maxAge) }
 }

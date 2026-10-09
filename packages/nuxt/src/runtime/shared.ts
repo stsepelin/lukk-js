@@ -14,6 +14,27 @@ export function underAppBase(appBase: unknown, path: string): string {
 }
 
 /**
+ * Whether `value` is a usable `session.maxAge`: a positive whole number of seconds that stays exact once
+ * iron multiplies it into milliseconds. Shared by the module's build-time check and the runtime writers,
+ * so "accepted at build" and "written at request time" can't drift.
+ *
+ * Each refusal is a real fault, not tidiness: iron reads a ttl of `0` as NO expiry, so a seal written with
+ * it unsealed forever; a negative `Max-Age` deletes the cookie it sets; and a fraction, `NaN`, `Infinity`
+ * or a string (an env override that was never a number) writes a cookie attribute browsers ignore.
+ */
+export function isUsableSessionMaxAge(value: unknown): value is number {
+  if (!Number.isInteger(value) || (value as number) <= 0) return false
+  // On a line of its own, so the annotation covers this bound alone.
+  // Stryker disable next-line EqualityOperator: equivalent — `<=` and `<` differ only where `value * 1000` EQUALS 2^53 - 1, which ends in 1 and so is no multiple of 1000.
+  return (value as number) * 1000 <= Number.MAX_SAFE_INTEGER
+}
+
+/** The message both checks refuse an unusable `session.maxAge` with. */
+export function sessionMaxAgeError(value: unknown): string {
+  return `[lukk-nuxt] session.maxAge must be a positive whole number of seconds (got ${String(value)}) — it is the lifetime of every sealed session and its cookie.`
+}
+
+/**
  * Whether a proxy base (`baseURL`, `api.target`) is one the SERVER can actually resolve and
  * fetch: absolute, with an http(s) scheme. Shared by the module's build-time validation and
  * `resolveTarget`, so "accepted at build" and "resolvable at request time" can't drift.

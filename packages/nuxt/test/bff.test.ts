@@ -727,6 +727,24 @@ describe('a session replaced or ended while a refresh for it was out', () => {
     expect(error).toHaveBeenCalled()
   })
 
+  it('answers 502 when lukk sends its headers and then stalls the body, rather than hanging', async () => {
+    // The deadline used to end with the headers, so `res.text()` waited on a stalled body for as long as
+    // the runtime's socket timeout allowed — holding the request, and the session's refresh behind it.
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    mockFetch().fetch = vi.fn(async (_url: string, init: RequestInit) => new Response(new ReadableStream({
+      start(controller) { init.signal?.addEventListener('abort', () => controller.error(init.signal!.reason)) },
+    }), { status: 200 }))
+    const event = makeEvent({ path: '/api/_lukk/two-factor/recovery-codes', session: makeSession({ access: 'A' }) })
+
+    const result = run(event)
+    await vi.advanceTimersByTimeAsync(15_000)
+
+    await expect(result).resolves.toEqual({ message: 'lukk could not be reached.' })
+    expect(event.status).toBe(502)
+    vi.useRealTimers()
+  })
+
   it('does not write back a step-up confirmation that answers after a sign-in — h3 re-seals the whole session', async () => {
     const confirming = makeSession({ access: 'A', refresh: 'rA', sid: 'session-A' } as TokenSession)
     const upstream = deferredFetch()
@@ -757,6 +775,28 @@ describe('a session replaced or ended while a refresh for it was out', () => {
     expect(event.status).toBe(200)
   })
 
+  it('withholds a re-sealed cookie when the session ends while it is being sealed', async () => {
+    // Sealing is async (iron), so a logout can land after the retry's own ended-check and before the
+    // response leaves. The last check before it does must still catch it, and revoke what was sealed.
+    const refreshing = makeSession({ access: 'A', refresh: 'rA', sid: 'session-A' } as TokenSession)
+    let calls = 0
+    mockFetch().fetch = vi.fn(async (url: string) => {
+      if (String(url).endsWith('/refresh')) return jsonRes({ access_token: 'A2', refresh_token: 'rA2', expires_in: 900 })
+      if (String(url).endsWith('/logout')) return jsonRes(null, 204)
+      return ++calls === 1 ? jsonRes({ message: 'Unauthenticated.' }, 401) : jsonRes({ passkeys: [] })
+    })
+    const event = makeEvent({ path: '/api/_lukk/passkeys', session: refreshing })
+    refreshing.update.mockImplementation(async (d: TokenSession) => {
+      Object.assign(refreshing.data, d)
+      event.node.res.setHeader('set-cookie', ['__Host-lukk-session=RESEALED', 'other=1'])
+      await run(post('/logout', makeSession({ access: 'A', refresh: 'rA', sid: 'session-A' } as TokenSession)))
+    })
+
+    expect(await run(event)).toEqual({ passkeys: [] })
+    expect(event.node.res.getHeader('set-cookie')).toEqual(['other=1'])
+    expect(mockFetch().fetch).toHaveBeenCalledWith('https://lukk/auth/logout', expect.objectContaining({ headers: expect.objectContaining({ Authorization: 'Bearer A2' }) }))
+  })
+
   it('withholds a re-sealed cookie when the session ends while the retried response body is still being read', async () => {
     const refreshing = makeSession({ access: 'A', refresh: 'rA', sid: 'session-A' } as TokenSession)
     let finishBody!: () => void
@@ -780,12 +820,14 @@ describe('a session replaced or ended while a refresh for it was out', () => {
 
     const pending = run(event)
     await new Promise(resolve => setTimeout(resolve, 0))
-    expect(refreshing.update).toHaveBeenCalled() // sealed before the body was read
     await run(post('/logout', makeSession({ access: 'A', refresh: 'rA', sid: 'session-A' } as TokenSession)))
     finishBody()
 
     expect(await pending).toEqual({ passkeys: [] })
-    expect(event.node.res.getHeader('set-cookie')).toEqual(['other=1'])
+    // The body is read inside the upstream deadline, so the seal is decided once it is in: the logout is
+    // seen there, and the ended session is never re-sealed onto this response at all.
+    expect(refreshing.update).not.toHaveBeenCalled()
+    expect(event.node.res.getHeader('set-cookie')).toBeUndefined()
     expect(mockFetch().fetch).toHaveBeenCalledWith('https://lukk/auth/logout', expect.objectContaining({ headers: expect.objectContaining({ Authorization: 'Bearer A2' }) }))
   })
 
@@ -1134,9 +1176,36 @@ describe('what the auth proxy sends, and answers', () => {
     const fetchMock = vi.fn(async () => jsonRes({}))
     mockFetch().fetch = fetchMock
 
-    await run(makeEvent({ path: '/api/_lukk/user', headers: { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate' }, session: makeSession({ access: 'A' }) }))
+    await run(makeEvent({ path: '/api/_lukk/user', headers: { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document' }, session: makeSession({ access: 'A' }) }))
 
     expect(fetchMock).toHaveBeenCalled()
+  })
+
+  it.each(['iframe', 'frame', 'embed', 'object'])('refuses a cross-site navigation with destination %s — only a top-level one is a link the user followed', async (dest) => {
+    // `Sec-Fetch-Mode: navigate` is also what a NESTED navigation sends: another site framing the auth
+    // proxy rides the session cookie just as a subresource does, and nothing about it is the visitor's click.
+    const fetchMock = vi.fn(async () => jsonRes({}))
+    mockFetch().fetch = fetchMock
+    const event = makeEvent({ path: '/api/_lukk/account/export', headers: { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': dest }, session: makeSession({ access: 'A' }) })
+
+    expect(await run(event)).toEqual({ message: 'Cross-origin request rejected.' })
+    expect(event.status).toBe(403)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it.each(['GET', 'PUT', 'DELETE'])('answers a %s to /refresh with 405 and `Allow: POST`, never a rotation', async (method) => {
+    // A rotation is a state change (RFC 9110 §9.2.1): a GET to it is one a prefetcher, a crawler or a
+    // same-origin `<img>` can trigger, and rotating there spends the token on a response nobody reads.
+    const session = makeSession({ access: 'A', refresh: 'rA' })
+    const fetchMock = vi.fn(async () => jsonRes({ access_token: 'A2', refresh_token: 'rA2', expires_in: 900 }))
+    mockFetch().fetch = fetchMock
+    const event = makeEvent({ path: '/api/_lukk/refresh', method, headers: sameOrigin, body: '{}', session })
+
+    expect(await run(event)).toEqual({ message: 'Method not allowed.' })
+    expect(event.status).toBe(405)
+    expect((event as { __res?: Record<string, string> }).__res?.allow).toBe('POST')
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(session.update).not.toHaveBeenCalled()
   })
 
   it('still serves its own app\'s GETs', async () => {

@@ -41,8 +41,10 @@ export function useLukkFetch(): $Fetch {
   }
 
   const deps: LukkFetchDeps = {
-    // Under the app's base path when relative (the BFF's app-API proxy is a server route of this app).
-    baseURL: underAppBase((useRuntimeConfig() as { app?: { baseURL?: string } }).app?.baseURL, cfg.apiBaseURL),
+    // BFF: under the app's base path — the app-API proxy is a server route of THIS app. Direct: as written.
+    // There `api.target` names where the API lives, and a relative one (`/api`) is a server beside this app
+    // on the same origin, not a route under its base; prefixing it sent every call where nothing answers.
+    baseURL: isDirect ? cfg.apiBaseURL : underAppBase((useRuntimeConfig() as { app?: { baseURL?: string } }).app?.baseURL, cfg.apiBaseURL),
     // Stryker disable next-line ConditionalExpression: the mutation run compiles the client, where this is `false` already; the server half is pinned in test/server-env/use-lukk-fetch.test.ts.
     isServer: import.meta.server === true,
     // Direct mode holds the token in client memory; SSR has none, so nothing to refresh.

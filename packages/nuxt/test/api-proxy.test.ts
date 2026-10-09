@@ -306,6 +306,70 @@ describe('app-API proxy', () => {
     expect(proxyRequest.mock.calls.at(-1)![2]!.headers).toMatchObject({ origin: '' })
   })
 
+  it('removes the browser\'s Origin from the request it forwards, rather than sending it empty', async () => {
+    // A blank `Origin:` is still an Origin header: a CORS layer upstream sees one present, and judges it.
+    // Absent is what a same-origin server-side call carries. Every header this proxy blanks goes the same
+    // way — h3 merges our bag over the client's, so a blank is the only way to override, and the request
+    // it hands to fetch then drops it.
+    await run(ev({ path: '/api/me', headers: { origin: 'https://app.test', cookie: 'a=1' } }))
+    const opts = proxyRequest.mock.calls.at(-1)![2] as { fetch?: (input: string, init: RequestInit) => Promise<Response> }
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 204 }))
+
+    await opts.fetch!('https://laravel.test/me', { headers: new Headers({ origin: '', cookie: '', authorization: 'Bearer tok', accept: 'application/json' }) })
+
+    const sent = new Headers(fetchSpy.mock.calls[0]![1]!.headers)
+    expect(sent.has('origin')).toBe(false)
+    expect(sent.has('cookie')).toBe(false)
+    expect(sent.get('authorization')).toBe('Bearer tok')
+    expect(sent.get('accept')).toBe('application/json')
+
+    // h3 always hands it an init; called without one it still forwards rather than throwing.
+    await opts.fetch!('https://laravel.test/me', undefined as never)
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
+    fetchSpy.mockRestore()
+  })
+
+  it('tells the browser never to sniff a proxied response\'s type', async () => {
+    // The response is served on the APP's origin. A body sniffed as HTML there runs with the app's
+    // cookies in scope — and with the BFF one request away.
+    upstreamResponse = { status: 200, type: 'basic', headers: new Headers({ 'content-type': 'application/json' }) }
+    const e = ev({ path: '/api/me' })
+    await run(e)
+    expect(e.node.res.getHeader('x-content-type-options')).toBe('nosniff')
+    expect(e.node.res.getHeader('content-security-policy')).toBeUndefined()
+  })
+
+  it.each(['text/html; charset=utf-8', 'image/svg+xml', 'application/xml', 'text/plain', undefined,
+    // Only the TYPE decides — a parameter naming JSON does not exempt a document,
+    'text/html; profile=application/json',
+    // and a type merely starting like JSON is not JSON (JSONP is script).
+    'application/jsonp'])('sandboxes a %s response, so a document from the API never runs as the app', async (type) => {
+    // An API answering with a document — an error page, a stored upload served inline — rendered on the
+    // app's origin, and its script could call the BFF as the visitor. `sandbox` gives it an opaque origin.
+    upstreamResponse = { status: 200, type: 'basic', headers: new Headers(type ? { 'content-type': type } : {}) }
+    const e = ev({ path: '/api/files/1' })
+    await run(e)
+    expect(e.node.res.getHeader('content-security-policy')).toEqual(['sandbox'])
+    expect(e.node.res.getHeader('x-content-type-options')).toBe('nosniff')
+  })
+
+  it('adds the sandbox to the upstream\'s own policy rather than replacing it', async () => {
+    // Every Content-Security-Policy header is enforced (CSP3 §4.1), so appending only ever narrows.
+    upstreamResponse = { status: 200, type: 'basic', headers: new Headers({ 'content-type': 'text/html', 'content-security-policy': 'default-src \'self\'' }) }
+    const e = ev({ path: '/api/page' })
+    await run(e)
+    expect(e.node.res.getHeader('content-security-policy')).toEqual(['default-src \'self\'', 'sandbox'])
+  })
+
+  it.each(['application/json', 'application/problem+json; charset=utf-8', 'application/pdf'])('leaves a %s response unsandboxed', async (type) => {
+    // JSON is not a document anything renders as the app; a PDF is shown by a viewer isolated from the
+    // page's origin, and Chromium refuses to show a sandboxed one at all.
+    upstreamResponse = { status: 200, type: 'basic', headers: new Headers({ 'content-type': type }) }
+    const e = ev({ path: '/api/invoice' })
+    await run(e)
+    expect(e.node.res.getHeader('content-security-policy')).toBeUndefined()
+  })
+
   it('drops the upstream\'s hop-by-hop response headers (RFC 9110 §7.6.1)', async () => {
     upstreamResponse = { status: 200, type: 'basic', headers: new Headers({
       'connection': 'X-Hop,  x-two',
@@ -669,6 +733,24 @@ describe('app-API proxy', () => {
     expect(proxyRequest).not.toHaveBeenCalled()
   })
 
+  it.each([
+    ['a same-site sibling\'s subresource', { 'sec-fetch-site': 'same-site', 'sec-fetch-mode': 'no-cors', 'sec-fetch-dest': 'image' }],
+    ['another site\'s fetch', { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'cors', 'sec-fetch-dest': 'empty' }],
+    ['another site\'s frame', { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'iframe' }],
+  ])('refuses a GET that is %s — the bearer it would carry is injected here', async (_, headers) => {
+    // The origin check skips GETs, so with nothing else a sibling's `<img src="/api/export">` — or another
+    // site's frame — was answered with the bearer this proxy injects from the sealed session.
+    const e = ev({ path: '/api/export', headers })
+    expect(await run(e)).toEqual({ message: 'Cross-origin request rejected.' })
+    expect(e.status).toBe(403)
+    expect(proxyRequest).not.toHaveBeenCalled()
+  })
+
+  it('still proxies a top-level navigation from another site — a link in an email', async () => {
+    await run(ev({ path: '/api/invoices/1.pdf', headers: { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document' } }))
+    expect(proxyRequest).toHaveBeenCalled()
+  })
+
   it('serves the dev-http shape when the session cookie is not Secure', async () => {
     // Two things hang off the one `secure` flag and must not diverge: the cookie name loses its
     // `__Host-` prefix (the browser rejects that prefix without Secure), and the Origin check stops
@@ -760,6 +842,12 @@ describe('lukk\'s own routes, reached through the app-API proxy', () => {
     ['/api/auth%2Flogin', '/api/auth%2Flogin'],
     ['/api/auth%2flogin', '/api/auth%2flogin'], // either case of the escape
     ['/api/AUTH/login', '/api/AUTH/login'], // refused case-insensitively — failing closed costs nothing
+    // Double-encoded: forwarded as written, but a hop that decodes once more — a CDN, a rewrite rule, a
+    // second proxy — turns each into one of the routes above. h3 leaves `%25` encoded in `event.path`.
+    ['/api/x/%252e%252e/auth/login', '/api/x/%252e%252e/auth/login'],
+    ['/api/%2561uth/login', '/api/%2561uth/login'], // an encoded `/auth` prefix
+    ['/api/auth%252Flogin', '/api/auth%252Flogin'],
+    ['/api/x/%25252e%25252e/auth/login', '/api/x/%25252e%25252e/auth/login'], // and once more again
   ])('refuses %s', async (path, url) => {
     const e = ev({ path, url, method: 'POST', headers: sameOrigin })
     const body = await run(e)
@@ -781,7 +869,9 @@ describe('lukk\'s own routes, reached through the app-API proxy', () => {
   it('still proxies the app\'s own routes, including one that merely shares the prefix', async () => {
     await run(ev({ path: '/api/authors' }))
     await run(ev({ path: '/api/users/auth' }))
-    expect(proxyRequest.mock.calls.map(call => call[1])).toEqual(['https://api.example.com/authors', 'https://api.example.com/users/auth'])
+    // A literal `%` in the app's own data decodes to nothing that reaches lukk, and is forwarded as sent.
+    await run(ev({ path: '/api/search/100%25', url: '/api/search/100%25' }))
+    expect(proxyRequest.mock.calls.map(call => call[1])).toEqual(['https://api.example.com/authors', 'https://api.example.com/users/auth', 'https://api.example.com/search/100%25'])
   })
 
   it('refuses everything when lukk is mounted at the root of the same origin', async () => {

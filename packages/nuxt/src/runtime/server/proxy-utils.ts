@@ -60,7 +60,12 @@ function routedPath(pathname: string): string {
   // Repeated slashes collapse too, last: Laravel alone never routes `//auth/login`, but a hop in front of
   // it that merges slashes (nginx's default `merge_slashes on`) hands it `/auth/login`. Reading them as
   // distinct let `/api//auth/login` past the app-API proxy and `/_lukk//refresh` past the refresh rule.
-  return pathname.replace(/\/+$/, '').replace(/%([0-7][0-9a-f])/gi, (_, hex: string) => String.fromCharCode(Number.parseInt(hex, 16))).replace(/\/{2,}/g, '/')
+  return decodeAscii(pathname.replace(/\/+$/, '')).replace(/\/{2,}/g, '/')
+}
+
+/** One round of percent-decoding, ASCII escapes only — see `routedPath` for why that is enough. */
+function decodeAscii(value: string): string {
+  return value.replace(/%([0-7][0-9a-f])/gi, (_, hex: string) => String.fromCharCode(Number.parseInt(hex, 16)))
 }
 
 /**
@@ -93,11 +98,28 @@ export function routeWithin(target: string, base: string): string | null {
  * own host everything is refused; on another host nothing is (lukk bound to a separate domain).
  */
 export function reachesLukk(target: string, base: string): boolean {
-  const t = new URL(target.toLowerCase())
   const b = new URL(base.toLowerCase())
-  if (routeWithin(t.href, b.href) === null) return false
-  return routedPath(b.pathname) !== '' || t.origin === b.origin
+  let t = new URL(target.toLowerCase())
+
+  // And not after a further decoding, either. The URL is forwarded as written, and lukk's router decodes
+  // it once — but a hop in between that decodes again (a CDN, a rewrite rule, a second proxy) turns
+  // `%252e%252e/auth/login` into `../auth/login` and `%2561uth/login` into `/auth/login`. So each round
+  // of decoding is checked as well, re-parsed so that a dot segment it produced collapses as it would
+  // there. Re-parsed under the TARGET's origin, so a leading `//` it produced stays a path.
+  for (let round = 0; round < DECODING_ROUNDS; round++) {
+    if (routeWithin(t.href, b.href) !== null && (routedPath(b.pathname) !== '' || t.origin === b.origin)) return true
+    const decoded = decodeAscii(t.pathname)
+    if (decoded === t.pathname) return false
+    t = new URL(`${t.origin}${decoded}`)
+  }
+
+  // Still decoding to something new after that many rounds: no route of an app is encoded that deep on
+  // purpose, and there is no telling where the next round lands — refused.
+  return true
 }
+
+/** How many rounds of percent-decoding `reachesLukk` follows a path through. */
+const DECODING_ROUNDS = 4
 
 /** Bases already reported, so a broken deploy logs once per value instead of once per request. */
 const reportedBases = new Set<string>()
@@ -188,14 +210,19 @@ export function rejectUnresolvedTarget(event: H3Event, base: string, label: stri
 
 /**
  * A GET or HEAD sent by another site, or a same-site sibling, that is not a top-level navigation — a
- * subresource or fetch riding the session cookie. Only browsers send `Sec-Fetch-*`, so a non-browser
- * caller (no cookie to ride) is never caught.
+ * subresource, fetch or framed document riding the session cookie. Only browsers send `Sec-Fetch-*`, so
+ * a non-browser caller (no cookie to ride) is never caught.
+ *
+ * The exemption keys on `Sec-Fetch-Dest: document`, not on `Sec-Fetch-Mode: navigate`: a NESTED
+ * navigation — an `<iframe>`, `<frame>`, `<embed>` or `<object>` another site points here — is a
+ * navigation too, and it is the other site's doing, not a link the visitor followed. Only a top-level
+ * document is (Fetch Metadata Request Headers §2.1).
  */
 export function isForeignSubresource(event: H3Event): boolean {
   const site = getRequestHeader(event, 'sec-fetch-site')
   return (event.method === 'GET' || event.method === 'HEAD')
     && (site === 'cross-site' || site === 'same-site')
-    && getRequestHeader(event, 'sec-fetch-mode') !== 'navigate'
+    && getRequestHeader(event, 'sec-fetch-dest') !== 'document'
 }
 
 /**
@@ -391,16 +418,22 @@ export function viaHeader(event: H3Event): string {
 export const UPSTREAM_TIMEOUT_MS = 15_000
 
 /**
- * `fetch`, abandoned after `UPSTREAM_TIMEOUT_MS`. Every request on a session shares one refresh in
- * flight, so with no limit a hung lukk held every render, proxied call and refresh on that session until
- * the runtime's own socket timeout. The abort surfaces as the network error it is; callers already treat
- * that as an outage, not a verdict on the session.
+ * `fetch` and `read`, abandoned together after `UPSTREAM_TIMEOUT_MS`. With no limit a hung lukk held
+ * every request waiting on it until the runtime's own socket timeout. The abort surfaces as the network
+ * error it is; callers already treat that as an outage, not a verdict on the session.
+ *
+ * The deadline covers `read` — the body — and not only the headers: aborting the signal errors a body
+ * still being read (Fetch §"abort the fetch"), so one that sends its headers and then stalls fails at
+ * the deadline instead of hanging the caller. That is why the reader is an argument: a `Response` handed
+ * back from here would be read after the timer was gone.
+ *
+ * **Never for `/refresh`.** An abort cannot un-rotate a token lukk has already rotated — see `rawRefresh`.
  */
-export async function fetchUpstream(input: string, init: RequestInit): Promise<Response> {
+export async function fetchUpstream<T>(input: string, init: RequestInit, read: (response: Response) => Promise<T>): Promise<T> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(new Error(`lukk did not answer within ${UPSTREAM_TIMEOUT_MS} ms`)), UPSTREAM_TIMEOUT_MS)
   try {
-    return await fetch(input, { ...init, signal: controller.signal })
+    return await read(await fetch(input, { ...init, signal: controller.signal }))
   }
   finally {
     clearTimeout(timer)

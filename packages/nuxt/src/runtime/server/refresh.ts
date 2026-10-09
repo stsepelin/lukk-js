@@ -1,5 +1,5 @@
 import { sessionKey } from './ended-sessions'
-import { fetchUpstream, reportUnusableBase, resolveTarget } from './proxy-utils'
+import { reportUnusableBase, resolveTarget } from './proxy-utils'
 
 export interface TokenSession {
   access?: string
@@ -62,9 +62,18 @@ async function rawRefresh(refreshToken: string, baseURL: string, clientIp: strin
   // itself; with it, login and the refresh that follows also key on the same identity.
   const headers: Record<string, string> = { 'Content-Type': 'application/json', 'Accept': 'application/json' }
   if (clientIp) headers['X-Forwarded-For'] = clientIp
+  // Plain `fetch`, deliberately WITHOUT `fetchUpstream`'s deadline — the one upstream call here that
+  // must never be cut short. lukk rotates the token as soon as it has the request, and an abort only
+  // stops US listening: the rotation is committed, its replacement exists only in the response we just
+  // walked away from, and the session still holds the consumed token. Its next refresh replays that token,
+  // and once the grace window has passed reuse detection revokes the whole family as stolen (RFC 9700
+  // §4.14.2) — a false logout, traded for a faster error. A timeout cannot make a rotation not happen; it
+  // can only make sure we never learn its result. So the wait — body included — is bounded only by the
+  // runtime's own transport timeouts (undici: 300 s for headers, 300 s between body chunks), and a hung
+  // lukk costs one connection per SESSION, not per request: every caller on it shares this one call.
   let res: Response
   try {
-    res = await fetchUpstream(target, {
+    res = await fetch(target, {
       method: 'POST',
       headers,
       body: JSON.stringify({ refresh_token: refreshToken }),

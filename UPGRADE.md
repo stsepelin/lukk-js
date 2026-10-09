@@ -33,7 +33,9 @@ but behaviour changed in ways an app can notice even without typechecking:
 - the proxies refuse more — lukk's own routes through the app-API proxy, oversized and unsized bodies,
   cross-site subresource GETs to the auth proxy — and sealed sessions expire;
 - in BFF mode `$lukkRefresh()` resolves to a symbol rather than `{ ok, expires_in }`;
-- SSR forwards cookies only to a relative API base, and `useLukkForm` drafts moved keys.
+- SSR forwards cookies only to a relative API base, and `useLukkForm` drafts moved keys;
+- `useLukkFetch` sends credentials only to a target it has judged same-origin, so a call that replaces
+  its `onRequest` hook or points it at another origin goes out without them.
 
 The published type declarations also stopped lying, which can fail a typecheck that passed before, and
 one route-middleware decision changed. Each is its own entry below.
@@ -73,6 +75,35 @@ now `'pwd' | 'otp' | 'pop' | 'user' | 'mfa'`; anything comparing against `'webau
 - Every BFF auth-proxy response carries `X-Content-Type-Options: nosniff`, and a non-JSON upstream body
   goes out as `text/plain`.
 - Route checks collapse repeated slashes, so `/api//auth/login` is refused like `/api/auth/login`.
+- The app-API proxy also refuses a path that a further round of percent-decoding would turn into one
+  of lukk's routes (`/api/x/%252e%252e/auth/login`, `/api/%2561uth/login`) with **404**.
+- Both proxies refuse a cross-site or same-site GET that is not a **top-level** navigation with **403** —
+  the app-API proxy now too, and a navigation into an `<iframe>`, `<frame>`, `<embed>` or `<object>` no
+  longer counts as one. A link the visitor follows still works.
+- `/api/_lukk/refresh` answers anything but `POST` with **405** and `Allow: POST`.
+- App-API proxy responses carry `X-Content-Type-Options: nosniff`, and every response that is neither
+  JSON nor a PDF also carries `Content-Security-Policy: sandbox` (added to the upstream's own policy), so
+  an HTML or SVG document from your API renders without script and outside the app's origin. Serve such
+  documents from another origin if they need to run script.
+- Request headers the app-API proxy strips (`Origin`, `Cookie`, spoofable forwarding headers, anything
+  the client named in `Connection`) are now removed rather than forwarded empty.
+- `session.maxAge` must be a positive whole number of seconds: anything else fails the build, and a
+  runtime override that is not one makes every write of the session throw.
+
+### `useLukkFetch` sends credentials only where it has checked they belong
+
+**Medium impact — if you pass your own `onRequest` to `useLukkFetch()`, or a per-call `baseURL`.**
+
+The instance used to default to `credentials: 'include'` and narrow it in its own `onRequest` hook.
+ofetch merges per-call options by spreading, so a call passing its own `onRequest` **replaced** that
+hook and kept `include` — sending the visitor's cookies to wherever the call pointed. The default is now
+`'same-origin'`, upgraded to `include` (and the bearer attached) only once the target is known to be on
+the API's origin. The same decision now also looks at a per-call `baseURL`: an absolute one is honoured
+only on the API's own origin (or this app's, in BFF mode).
+
+What changes for you: a call that replaces the hook, or that redirects the base to another origin, now
+goes out **without** the session cookie or bearer and gets a `401`. Wrap lukk's instance instead of
+replacing its hook, and keep authenticated calls on the API's origin.
 
 ### Every composable now declares its return type
 

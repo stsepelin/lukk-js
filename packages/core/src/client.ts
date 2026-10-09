@@ -5,6 +5,7 @@ import type {
   LoginInput,
   LoginResult,
   LukkError,
+  LukkStatus,
   PasskeyLoginOptions,
   PasskeySummary,
   PublicKeyCredentialCreationOptionsJSON,
@@ -156,6 +157,11 @@ export function createLukkClient(hooks: LukkClientHooks) {
      * End the session. `retry: false` skips the refresh-and-retry on a 401, for a binding that renews
      * the token itself: one that holds refreshes back while a logout is on the wire would otherwise
      * have that refresh wait on the very logout waiting for it.
+     *
+     * `refreshToken` presents the session's refresh token (body mode — cookie mode sends lukk's cookie
+     * instead). lukk ends the session by it even once the access token has expired, the RFC 7009 shape:
+     * revoke by the token the client holds, without spending a rotation to get a fresh bearer first.
+     * Older lukk releases ignore it and use the bearer, as before.
      */
     //
     // Sent with a JSON body: lukk accepts a logout authenticated only by the refresh cookie (an expired
@@ -166,15 +172,18 @@ export function createLukkClient(hooks: LukkClientHooks) {
     // `keepalive`, so a page that navigates away right after starting it doesn't cancel it — a cancelled
     // logout never reached lukk, and the session outlived what the user saw. A browser that refuses a
     // keepalive request needing a CORS preflight rejects it with a TypeError; it is sent again without.
-    // Stryker disable next-line LogicalOperator: `?? true` and `&& true` differ only for `undefined`,
-    // and `request`'s own parameter default turns that back into `true` — the same call either way.
-    logout: (options: { retry?: boolean } = {}) => request<void>('/logout', { ...json({}), keepalive: true }, options.retry ?? true)
-      .catch((error: unknown) => {
-        if (!(error instanceof TypeError)) throw error
-        // Stryker disable next-line LogicalOperator: as above — `undefined` reaches `request`'s
-        // parameter default and becomes `true` regardless.
-        return request<void>('/logout', json({}), options.retry ?? true)
-      }),
+    logout: (options: { retry?: boolean, refreshToken?: string } = {}) => {
+      const body = options.refreshToken ? { refresh_token: options.refreshToken } : {}
+      // Stryker disable next-line LogicalOperator: `?? true` and `&& true` differ only for `undefined`,
+      // and `request`'s own parameter default turns that back into `true` — the same call either way.
+      return request<void>('/logout', { ...json(body), keepalive: true }, options.retry ?? true)
+        .catch((error: unknown) => {
+          if (!(error instanceof TypeError)) throw error
+          // Stryker disable next-line LogicalOperator: as above — `undefined` reaches `request`'s
+          // parameter default and becomes `true` regardless.
+          return request<void>('/logout', json(body), options.retry ?? true)
+        })
+    },
     /**
      * Confirm this client received the session a sign-in just issued (lukk's `claim_seconds`): a session
      * first used after that window is revoked. Any authenticated request claims too; this one exists so a
@@ -186,16 +195,16 @@ export function createLukkClient(hooks: LukkClientHooks) {
 
     // --- email verification ---
     /** Resend the email-verification link to the authenticated user (a no-op if already verified). */
-    sendEmailVerification: () => request<void>('/email/verification-notification', { method: 'POST' }),
+    sendEmailVerification: () => request<LukkStatus>('/email/verification-notification', { method: 'POST' }),
 
     // --- password reset (public; pairs with lukk's features.password_reset) ---
     /** Request a password-reset link be emailed. Always resolves 200 (no user enumeration). */
-    forgotPassword: (email: string) => request<void>('/forgot-password', json({ email })),
+    forgotPassword: (email: string) => request<LukkStatus>('/forgot-password', json({ email })),
     /** Complete a reset with the token + email from the emailed link and the new password. */
-    resetPassword: (input: ResetPasswordInput) => request<void>('/reset-password', json(input)),
+    resetPassword: (input: ResetPasswordInput) => request<LukkStatus>('/reset-password', json(input)),
     /** Change the password of the SIGNED-IN user. Revokes every other session upstream; this one
      *  survives, so no re-login and no token change here. */
-    changePassword: (input: ChangePasswordInput) => request<void>('/password', json(input)),
+    changePassword: (input: ChangePasswordInput) => request<LukkStatus>('/password', json(input)),
 
     // --- the account itself (behind step-up) ---
     /**

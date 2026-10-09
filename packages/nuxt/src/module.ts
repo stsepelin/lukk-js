@@ -11,7 +11,7 @@ import {
 } from '@nuxt/kit'
 import { defu } from 'defu'
 import type { LukkMode } from 'lukk-core'
-import { LUKK_BFF_PREFIX, isResolvableBase, isUsableConfirmationHeader, logoutCookieName, redactCredentials, signedOutCookieName } from './runtime/shared'
+import { LUKK_BFF_PREFIX, isResolvableBase, isUsableConfirmationHeader, isUsableSessionMaxAge, logoutCookieName, redactCredentials, sessionMaxAgeError, signedOutCookieName } from './runtime/shared'
 
 export { LUKK_BFF_PREFIX, LUKK_SESSION_COOKIE } from './runtime/shared'
 
@@ -158,7 +158,8 @@ export interface ModuleOptions {
    * `maxAge` (seconds, default 2592000 = 30 days, lukk's default `refresh_ttl`) is the lifetime of each
    * seal written: a sealed cookie copied out of a browser stops unsealing that long after it was written.
    * Every refresh re-seals, so an active session is bounded by lukk's refresh family instead. Keep it at
-   * least as long as lukk's `refresh_ttl`, or idle sessions end before their refresh token does.
+   * least as long as lukk's `refresh_ttl`, or idle sessions end before their refresh token does. It must be a
+   * positive whole number of seconds; anything else fails the build (`0` would mean a seal that never expires).
    */
   session: { password: string, cookieSecure?: boolean, name?: string, sharedStore?: string, maxAge?: number }
   /**
@@ -323,7 +324,7 @@ export default defineNuxtModule<ModuleOptions>({
     // directly and defu gives that precedence, so checking only the module option would bless a
     // value the app never uses. (A runtime `NUXT_*` env override still lands after the build;
     // the proxies report that one honestly at request time.)
-    const serverLukk = nuxt.options.runtimeConfig.lukk as { baseURL: string, apiTarget: string }
+    const serverLukk = nuxt.options.runtimeConfig.lukk as { baseURL: string, apiTarget: string, sessionMaxAge: unknown }
     const publicLukk = nuxt.options.runtimeConfig.public.lukk as { baseURL: string, apiBaseURL: string }
     // Direct mode's base is browser-resolved (the public copy); BFF's is server-fetched.
     const isDirect = options.mode === 'direct'
@@ -361,6 +362,12 @@ export default defineNuxtModule<ModuleOptions>({
         fail('[lukk-nuxt] the session secret is too short — it must be at least 32 characters. '
           + 'It is the confidentiality boundary for the sealed session cookie, the BFF equivalent of Laravel\'s APP_KEY.')
       }
+    }
+
+    // The EFFECTIVE lifetime, after the merge: a consumer's own `runtimeConfig.lukk.sessionMaxAge` wins over
+    // the option. A `0` here sealed every session with no expiry at all (see `isUsableSessionMaxAge`).
+    if (!isUsableSessionMaxAge(serverLukk.sessionMaxAge)) {
+      fail(sessionMaxAgeError(serverLukk.sessionMaxAge))
     }
 
     if (!effectiveBase) {
@@ -441,6 +448,7 @@ export default defineNuxtModule<ModuleOptions>({
         `  interface ComponentCustomProperties {`,
         `    $lukk: LukkClient`,
         `    $lukkRefresh: () => Promise<RefreshOutcome>`,
+        `    $lukkRestore: () => Promise<{ pair: RefreshOutcome, unavailable: boolean, superseded?: boolean }>`,
         `  }`,
         `}`,
         `export {}`,

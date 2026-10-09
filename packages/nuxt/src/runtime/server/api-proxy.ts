@@ -2,7 +2,7 @@ import { defineEventHandler, getRequestHeader, proxyRequest, setResponseStatus, 
 import { useRuntimeConfig } from '#imports'
 import { LUKK_BFF_PREFIX, confirmationHeaderName, isResolvableBase, isSessionCookieName, sessionCookieName, signedOutCookieName } from '../shared'
 import { accessExpired } from './access-token'
-import { hopByHopHeaders, isForeignOrigin, reachesLukk, reportProxyFailure, rejectUnresolvedTarget, resolveTarget, SPOOFABLE_FORWARDING, viaHeader, visitorIp } from './proxy-utils'
+import { hopByHopHeaders, isForeignOrigin, isForeignSubresource, reachesLukk, reportProxyFailure, rejectUnresolvedTarget, resolveTarget, SPOOFABLE_FORWARDING, viaHeader, visitorIp } from './proxy-utils'
 import { sessionEnded, sessionKey } from './ended-sessions'
 import { logoutNoted, withholdSignedOut } from './logout-note'
 import { revokeDroppedSession } from './revoke-dropped'
@@ -44,7 +44,10 @@ export default defineEventHandler(async (event) => {
   const secure = cookieSecure !== false
   const sessionName = sessionCookieName(secure, cookieNamespace)
 
-  if (isForeignOrigin(event, secure)) {
+  // CSRF, and the GET half of it: this proxy injects the bearer from the sealed session, so another site's
+  // — or a same-site sibling's — `<img>`, fetch or frame pointed here was answered as the visitor. Only a
+  // top-level navigation (a link in an email to a download) still passes; see `isForeignSubresource`.
+  if (isForeignOrigin(event, secure) || isForeignSubresource(event)) {
     setResponseStatus(event, 403)
     return { message: 'Cross-origin request rejected.' }
   }
@@ -153,6 +156,10 @@ export default defineEventHandler(async (event) => {
     // opaque redirect (status 0), or — Node's undici, workerd, Deno — the real 3xx with its headers.
     // onResponse turns either into a clean 502 (matching the BFF proxy).
     fetchOptions: { redirect: 'manual' },
+    // h3 merges the bag below OVER the client's headers, so blanking is the only way to override one — and
+    // a blank is still a header: `Origin:` with no value is an Origin a CORS layer upstream sees as present
+    // and judges, and `Cookie:` an empty cookie list. What this proxy blanked, it means to remove.
+    fetch: (input, init) => globalThis.fetch(input, { ...init, headers: withoutBlanks(init?.headers) }),
     headers: {
       // FIRST, so a pathological `confirmationHeader` rename can never clobber a header set below.
       // Symmetric with `authorization`: the step-up token is a credential the browser must never
@@ -246,6 +253,18 @@ export default defineEventHandler(async (event) => {
       }
       if (keep.length) ev.node.res.setHeader('set-cookie', keep)
       ev.node.res.setHeader('cache-control', 'private, no-store')
+      // Served on the APP's origin: a body sniffed as HTML there runs with the app's cookies in scope and
+      // the BFF one request away. Never let the browser second-guess the declared type.
+      ev.node.res.setHeader('x-content-type-options', 'nosniff')
+      // And a DOCUMENT from the API — an error page, an upload served inline, an SVG — gets an opaque
+      // origin, so whatever script it carries cannot act as the app. Not for JSON, which no browser renders
+      // as a document of this origin (and Firefox's viewer breaks under a sandbox), nor a PDF, which a
+      // viewer isolated from the page shows and Chromium refuses to show sandboxed at all. Added to the
+      // upstream's own policy, never over it: every CSP header is enforced (CSP3 §4.1), so it only narrows.
+      // Stryker disable next-line StringLiteral: equivalent — the fallback only reaches the test, and no replacement string starts with `application/json` or `application/pdf`.
+      if (!UNSANDBOXED_TYPE.test(response.headers.get('content-type') ?? '')) {
+        ev.node.res.setHeader('content-security-policy', [...toCookieArray(ev.node.res.getHeader('content-security-policy')), 'sandbox'])
+      }
       // And per visitor: `no-store` keeps it out of a conforming cache, `Vary: Cookie` out of one that
       // keys on the URL alone regardless (RFC 9111 §4.1). Added to what the upstream varies on, not over it.
       const vary = String(ev.node.res.getHeader('vary') ?? '')
@@ -267,7 +286,19 @@ export default defineEventHandler(async (event) => {
   })
 })
 
-/** Normalize a `Set-Cookie` header value (string | string[] | number | undefined) to an array. */
+/** JSON (`application/json`, `application/*+json`) and PDF — the response types left unsandboxed. */
+const UNSANDBOXED_TYPE = /^application\/(?:(?:[\w.-]+\+)?json|pdf)\s*(?:;|$)/i
+
+/** The outgoing headers minus every one left blank — see the `fetch` option above. */
+function withoutBlanks(init: HeadersInit | undefined): Headers {
+  const headers = new Headers(init)
+  for (const [name, value] of [...headers]) {
+    if (value === '') headers.delete(name)
+  }
+  return headers
+}
+
+/** Normalize a header value (string | string[] | number | undefined) to an array. */
 function toCookieArray(value: number | string | string[] | undefined): string[] {
   if (value === undefined) return []
   return Array.isArray(value) ? [...value] : [String(value)]

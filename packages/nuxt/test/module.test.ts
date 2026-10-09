@@ -112,6 +112,8 @@ describe('lukk-nuxt module', () => {
     // And in templates, where `$lukk` was untyped: Vue reads globals from ComponentCustomProperties.
     expect(contents).toContain(`declare module 'vue'`)
     expect(contents).toMatch(/interface ComponentCustomProperties \{[^}]*\$lukk: LukkClient/)
+    // All three provides, as on NuxtApp: `$lukkRestore` was typed there and missing here.
+    expect(contents).toMatch(/interface ComponentCustomProperties \{[^}]*\$lukkRestore: \(\) => Promise<\{ pair: RefreshOutcome, unavailable: boolean, superseded\?: boolean \}>/)
   })
 
   it('registers the streaming-render marker alongside SSR hydration, and not without it', () => {
@@ -367,6 +369,23 @@ describe('lukk-nuxt module', () => {
     expect((set.options.runtimeConfig.lukk as { sessionMaxAge: number }).sessionMaxAge).toBe(86400)
   })
 
+  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 60, '86400'])('refuses a session.maxAge of %o — it must be a positive whole number of seconds', (maxAge) => {
+    // iron reads a ttl of 0 as "never expires", so `0` turned every seal into one that unseals forever;
+    // a negative or non-finite one wrote a cookie the browser drops or cannot parse. Fail at build.
+    expect(() => setup({ baseURL: 'https://api/auth', mode: 'bff', session: { password: 'x'.repeat(32), maxAge } })).toThrow(/session\.maxAge/)
+  })
+
+  it('refuses an invalid sessionMaxAge set through runtimeConfig too, and only logs it under `nuxt prepare`', () => {
+    // defu gives a consumer's own runtimeConfig precedence, so checking only the option would bless a value
+    // the app never uses.
+    const runtimeConfig = () => ({ public: {}, lukk: { sessionMaxAge: 0 } })
+    expect(() => setup({ baseURL: 'https://api/auth', mode: 'bff' }, { runtimeConfig: runtimeConfig() })).toThrow(/session\.maxAge/)
+
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    expect(() => setup({ baseURL: 'https://api/auth', mode: 'bff' }, { runtimeConfig: runtimeConfig(), _prepare: true })).not.toThrow()
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('session.maxAge'))
+  })
+
   it('passes the auth proxy\'s body limit through, defaulting to 1 MiB', () => {
     const dflt = setup({ baseURL: 'https://api/auth', mode: 'bff' })
     expect((dflt.options.runtimeConfig.lukk as { bodyLimit: number }).bodyLimit).toBe(1024 * 1024)
@@ -553,6 +572,7 @@ describe('lukk-nuxt module — what it registers, and when it speaks up', () => 
       `  interface ComponentCustomProperties {`,
       `    $lukk: LukkClient`,
       `    $lukkRefresh: () => Promise<RefreshOutcome>`,
+      `    $lukkRestore: () => Promise<{ pair: RefreshOutcome, unavailable: boolean, superseded?: boolean }>`,
       `  }`,
       `}`,
       `export {}`,

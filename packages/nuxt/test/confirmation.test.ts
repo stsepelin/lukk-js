@@ -169,6 +169,39 @@ describe('an unearnable step-up reported to the caller', () => {
   })
 })
 
+describe('the unearnable error is the app\'s, not one composable instance\'s', () => {
+  it('reaches the action waiting in ANOTHER instance — the page wraps, the modal confirms', async () => {
+    // The documented shape: a page calls `withConfirmation()` from its own `useLukkConfirmation()`, and the
+    // modal bound to `required` calls `confirmPassword()` from ITS own. Held per instance, the 403 landed
+    // in the modal's copy, and the page's action rejected as "cancelled" — the misreport this exists to stop.
+    const refused = { status: 403, message: 'This token was issued with a fixed set of abilities' }
+    __test.nuxtApp = { $lukk: { confirmPassword: vi.fn().mockRejectedValue(refused) } }
+    const page = useLukkConfirmation()
+    const modal = useLukkConfirmation()
+
+    const gated = page.withConfirmation(() => Promise.reject({ status: 423 }))
+    await Promise.resolve()
+    expect(modal.required.value).toBe(true)
+
+    await expect(modal.confirmPassword('secret')).rejects.toBe(refused)
+    // The very error, not a copy or a reactive proxy of it.
+    await expect(gated).rejects.toBe(refused)
+  })
+
+  it('never carries over to another app — on the server, another request', async () => {
+    __test.nuxtApp = { $lukk: { confirmPassword: vi.fn().mockRejectedValue({ status: 403 }) } }
+    useLukkConfirmation().abandonIfUnearnable({ status: 403 })
+
+    __test.nuxtApp = { $lukk: {} }
+    const next = useLukkConfirmation()
+    const waiting = next.withConfirmation(() => Promise.reject({ status: 423 }))
+    await Promise.resolve()
+    next.cancel()
+
+    await expect(waiting).rejects.toThrow('lukk: confirmation cancelled')
+  })
+})
+
 describe('the unearnable error does not outlive its cycle', () => {
   it('reports a later CANCELLATION as cancelled, not as the earlier 403', async () => {
     // `unearnable` was only ever set, never cleared. Once any action hit a 403, every later

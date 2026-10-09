@@ -17,7 +17,7 @@ export function whenReady(ready: Readonly<Ref<boolean>>, isServer: boolean): Pro
   if (ready.value || isServer) return Promise.resolve()
 
   // Only installed while `ready` is false, and a watcher fires only on a change — so its first
-  // callback necessarily sees `true`. `once` stops the watcher after that first callback.
+  // callback necessarily sees `true`, and stopping the scope there ends the watcher after it.
   // In a DETACHED scope: created in the caller's — a component's — the watcher stopped when it unmounted
   // before `ready` flipped, and the promise never settled.
   return new Promise((resolve) => {

@@ -41,6 +41,16 @@ describe('useLukkFetch', () => {
     expect(deps().baseURL).toBe('/admin/api')
   })
 
+  it('direct: a relative API base is the API\'s own path on this origin, not a route of this app', () => {
+    // In direct mode `api.target` names where the API lives — `/api` there is a server beside this app on
+    // the same origin, not a Nitro route under its base. Prefixing the app base sent every call to
+    // `/admin/api`, which nothing serves.
+    __test.runtimeConfig.public.lukk = { mode: 'direct', apiBaseURL: '/api' }
+    ;(__test.runtimeConfig as { app?: unknown }).app = { baseURL: '/admin/' }
+    useLukkFetch()
+    expect(deps().baseURL).toBe('/api')
+  })
+
   it('direct: an absolute API base is left as it is', () => {
     __test.runtimeConfig.public.lukk = { mode: 'direct', apiBaseURL: 'https://api.test' }
     ;(__test.runtimeConfig as { app?: unknown }).app = { baseURL: '/admin/' }

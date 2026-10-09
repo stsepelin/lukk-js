@@ -1,5 +1,5 @@
 ---
-"lukk-nuxt": patch
+"lukk-nuxt": minor
 "lukk-core": minor
 ---
 

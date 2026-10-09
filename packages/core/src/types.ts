@@ -123,6 +123,16 @@ export interface RecoveryCodeCount {
   total: number
 }
 
+/**
+ * The acknowledgement lukk answers a fire-and-forget account call with: `forgot-password`
+ * (`password-reset-link-sent`), `reset-password` (`password-reset`), `password` (`password-changed`) and
+ * `email/verification-notification` (`verification-link-sent`, a `202`). Typed as a string so a lukk
+ * release adding a value is not a type error here.
+ */
+export interface LukkStatus {
+  status: string
+}
+
 /** `POST /auth/confirm-password|confirm-passkey` — a step-up token, sent back
  *  in the `X-Lukk-Confirmation` header on `lukk.confirm`-gated requests. */
 export interface ConfirmationToken {

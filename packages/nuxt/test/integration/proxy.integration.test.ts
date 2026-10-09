@@ -13,7 +13,7 @@ let upstream: Server
 let auth: Server
 let proxy: Server
 let proxyURL = ''
-let received: { url?: string, method?: string, contentType?: string, accept?: string, authorization?: string, xForwardedFor?: string, visitorCountry?: string, body: Buffer } = { body: Buffer.alloc(0) }
+let received: { url?: string, method?: string, contentType?: string, accept?: string, authorization?: string, xForwardedFor?: string, visitorCountry?: string, headerNames?: string[], body: Buffer } = { body: Buffer.alloc(0) }
 let refreshCalls = 0
 
 const port = (s: Server) => (s.address() as { port: number }).port
@@ -43,7 +43,7 @@ beforeAll(async () => {
         res.end(JSON.stringify({ ok: true }))
         return
       }
-      received = { url: req.url, method: req.method, contentType: req.headers['content-type'], accept: req.headers.accept, authorization: req.headers.authorization, xForwardedFor: req.headers['x-forwarded-for'] as string | undefined, visitorCountry: req.headers['x-visitor-country'] as string | undefined, body: Buffer.concat(chunks) }
+      received = { url: req.url, method: req.method, contentType: req.headers['content-type'], accept: req.headers.accept, authorization: req.headers.authorization, xForwardedFor: req.headers['x-forwarded-for'] as string | undefined, visitorCountry: req.headers['x-visitor-country'] as string | undefined, headerNames: Object.keys(req.headers), body: Buffer.concat(chunks) }
       res.setHeader('content-type', 'application/json')
       res.end(JSON.stringify({ ok: true }))
     })
@@ -172,7 +172,8 @@ describe('api-proxy integration (real h3 + upstream)', () => {
     cfg.baseURL = `${cfg.apiTarget as string}/auth`
     received = { body: Buffer.alloc(0) }
     try {
-      for (const path of ['/api/auth/login', '/api/auth/./login', '/api/auth%2Flogin', '/api/auth/login/']) {
+      // The double-encoded ones too, through h3's real decoding: a hop that decodes once more lands on lukk.
+      for (const path of ['/api/auth/login', '/api/auth/./login', '/api/auth%2Flogin', '/api/auth/login/', '/api/x/%252e%252e/auth/login', '/api/%2561uth/login']) {
         const res = await fetch(`${proxyURL}${path}`, { method: 'POST', body: '{}' })
         expect(res.status, path).toBe(404)
       }
@@ -181,6 +182,25 @@ describe('api-proxy integration (real h3 + upstream)', () => {
     finally {
       cfg.baseURL = baseURL
     }
+  })
+
+  it('removes the headers it blanks — the browser\'s Origin and Cookie never reach the upstream, not even empty', async () => {
+    const res = await fetch(`${proxyURL}/api/me`, { headers: { 'origin': proxyURL, 'cookie': 'tracking=1', 'x-forwarded-host': 'evil.test' } })
+
+    expect(res.status).toBe(200)
+    expect(received.headerNames).not.toContain('origin')
+    expect(received.headerNames).not.toContain('cookie')
+    expect(received.headerNames).not.toContain('x-forwarded-host')
+    expect(received.headerNames).toContain('accept')
+  })
+
+  it('marks every response nosniff, and sandboxes only a document', async () => {
+    const json = await fetch(`${proxyURL}/api/me`)
+    expect(json.headers.get('x-content-type-options')).toBe('nosniff')
+    expect(json.headers.get('content-security-policy')).toBeNull()
+
+    const pdf = await fetch(`${proxyURL}/api/download`)
+    expect(pdf.headers.get('content-security-policy')).toBeNull()
   })
 
   it('marks the streamed response as varying by Cookie', async () => {
@@ -259,16 +279,15 @@ it('still strips a header the client legitimately named in Connection', async ()
   // The feature this stripper exists for (RFC 9110 §7.6.1) must keep working — the fix skips only
   // the names fetch manages itself, not custom single-hop headers.
   //
-  // Neutralised by BLANKING, not by removal: `proxyRequest` merges over the inbound headers, so
-  // omitting a key leaves the client's value in place. The upstream therefore sees the header
-  // present-but-empty rather than absent. Strictly §7.6.1 says "remove", and this is as close as
-  // that API allows — what matters is that the client's value does not survive the hop.
+  // REMOVED, as §7.6.1 says: `proxyRequest` merges over the inbound headers, so the proxy blanks the
+  // name to override the client's value, and its `fetch` then drops every blank before sending. (It
+  // used to reach the upstream present-but-empty.)
   const res = await httpGet('/api/echo', {
     'connection': 'keep-alive, x-visitor-country',
     'x-visitor-country': 'SE',
   })
 
   expect(res.status).toBe(200)
-  expect(received.visitorCountry).toBe('')
-  expect(received.visitorCountry).not.toBe('SE')
+  expect(received.headerNames).not.toContain('x-visitor-country')
+  expect(received.visitorCountry).toBeUndefined()
 })
