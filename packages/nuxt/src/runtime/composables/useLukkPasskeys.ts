@@ -17,6 +17,15 @@ export interface LukkPasskeys {
 }
 
 /**
+ * `navigator.credentials.create()`/`get()` may resolve to null; serialising that threw a TypeError deep
+ * in the conversion, with nothing to say what happened.
+ */
+function present(credential: PublicKeyCredential | null): PublicKeyCredential {
+  if (!credential) throw new Error('lukk: the browser returned no passkey credential')
+  return credential
+}
+
+/**
  * Passkeys (WebAuthn). Drives the browser ceremony (`navigator.credentials`)
  * and lukk-core's base64url (de)serialization, so callers just await a verb.
  */
@@ -27,7 +36,7 @@ export function useLukkPasskeys(): LukkPasskeys {
   /** Register a new passkey (requires a logged-in, step-up-confirmed user). */
   async function register(name?: string): Promise<void> {
     const options = await $lukk.passkeyRegistrationOptions()
-    const credential = await navigator.credentials.create({ publicKey: toCreationOptions(options) }) as PublicKeyCredential
+    const credential = present(await navigator.credentials.create({ publicKey: toCreationOptions(options) }) as PublicKeyCredential | null)
     await $lukk.registerPasskey(credentialToJSON(credential), name)
   }
 
@@ -87,7 +96,7 @@ export function useLukkPasskeys(): LukkPasskeys {
   /** Run the assertion ceremony once (shared by login + confirm). */
   async function assert(options_: () => Promise<PasskeyLoginOptions> = () => $lukk.passkeyLoginOptions()): Promise<{ ceremony_id: string, credential: Record<string, unknown> }> {
     const { ceremony_id, options } = await options_()
-    const credential = await navigator.credentials.get({ publicKey: toRequestOptions(options) }) as PublicKeyCredential
+    const credential = present(await navigator.credentials.get({ publicKey: toRequestOptions(options) }) as PublicKeyCredential | null)
     return { ceremony_id, credential: credentialToJSON(credential) }
   }
 

@@ -51,6 +51,23 @@ describe('refreshOnce when lukk can\'t be reached', () => {
     expect(fetchSpy).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ redirect: 'manual' }))
   })
 
+  it('gives up on a lukk that never answers, rather than holding the session\'s requests forever', async () => {
+    // Every request on a session shares one refresh in flight. With no timeout a hung lukk kept that
+    // promise pending until the runtime's own socket timeout — minutes — and every page render, proxied
+    // call and refresh on the session waited with it.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    // Hangs for good unless the call carries a signal that aborts it.
+    vi.spyOn(globalThis, 'fetch').mockImplementation((_input, init) => new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(init.signal!.reason))
+    }))
+
+    const result = refreshOnce({ id: 'hung', data: { refresh: 'rt' } }, 'https://api.example.com/auth')
+    await vi.advanceTimersByTimeAsync(15_000)
+
+    await expect(result).resolves.toMatchObject({ pair: null, retryable: true })
+    vi.useRealTimers()
+  })
+
   it('reports it retryable instead of throwing out of the handler as a 500', async () => {
     vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('fetch failed'))
 

@@ -385,3 +385,23 @@ export function viaHeader(event: H3Event): string {
 
   return received ? `${received}, ${hop}` : hop
 }
+
+/** How long a server-side call to lukk may take before it is treated as an outage. */
+export const UPSTREAM_TIMEOUT_MS = 15_000
+
+/**
+ * `fetch`, abandoned after `UPSTREAM_TIMEOUT_MS`. Every request on a session shares one refresh in
+ * flight, so with no limit a hung lukk held every render, proxied call and refresh on that session until
+ * the runtime's own socket timeout. The abort surfaces as the network error it is; callers already treat
+ * that as an outage, not a verdict on the session.
+ */
+export async function fetchUpstream(input: string, init: RequestInit): Promise<Response> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(new Error(`lukk did not answer within ${UPSTREAM_TIMEOUT_MS} ms`)), UPSTREAM_TIMEOUT_MS)
+  try {
+    return await fetch(input, { ...init, signal: controller.signal })
+  }
+  finally {
+    clearTimeout(timer)
+  }
+}

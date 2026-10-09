@@ -196,3 +196,23 @@ describe('passkey step-up a pinned token cannot earn', () => {
     expect(required.value).toBe(true)
   })
 })
+
+describe('a browser that hands back no credential', () => {
+  // `navigator.credentials.create()`/`get()` may resolve to null. Serialising that threw a TypeError deep in
+  // the conversion, with nothing to say what happened.
+  it('fails registration with a message naming it', async () => {
+    __test.nuxtApp = { $lukk: { passkeyRegistrationOptions: vi.fn().mockResolvedValue({ challenge: 'c' }), registerPasskey: vi.fn() } }
+    withNavigator(vi.fn().mockResolvedValue(null), vi.fn())
+
+    await expect(useLukkPasskeys().register()).rejects.toThrow('lukk: the browser returned no passkey credential')
+  })
+
+  it('fails a sign-in with the same message, and sends nothing', async () => {
+    const $lukk = { passkeyLoginOptions: vi.fn().mockResolvedValue({ ceremony_id: 'cer', options: { challenge: 'c' } }), loginWithPasskey: vi.fn() }
+    __test.nuxtApp = { $lukk }
+    withNavigator(vi.fn(), vi.fn().mockResolvedValue(null))
+
+    await expect(useLukkPasskeys().login()).rejects.toThrow('lukk: the browser returned no passkey credential')
+    expect(signInWith).not.toHaveBeenCalled()
+  })
+})

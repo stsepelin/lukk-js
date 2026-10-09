@@ -1,5 +1,5 @@
 import { sessionKey } from './ended-sessions'
-import { reportUnusableBase, resolveTarget } from './proxy-utils'
+import { fetchUpstream, reportUnusableBase, resolveTarget } from './proxy-utils'
 
 export interface TokenSession {
   access?: string
@@ -64,7 +64,7 @@ async function rawRefresh(refreshToken: string, baseURL: string, clientIp: strin
   if (clientIp) headers['X-Forwarded-For'] = clientIp
   let res: Response
   try {
-    res = await fetch(target, {
+    res = await fetchUpstream(target, {
       method: 'POST',
       headers,
       body: JSON.stringify({ refresh_token: refreshToken }),

@@ -26,10 +26,17 @@ default is safe.
 
 ## Upgrading to `lukk-nuxt` 0.12.0 / `lukk-core` 0.12.0 (unreleased)
 
-Everything before this release was additive. This one is not: the published type declarations
-stopped lying, which can fail a typecheck that passed before, and one route-middleware decision
-changed. No runtime API was renamed or removed, so an app that doesn't typecheck its own code
-has only the middleware entry to read.
+Everything before this release was additive. This one is not. No runtime API was renamed or removed,
+but behaviour changed in ways an app can notice even without typechecking:
+
+- passkey sign-in can return a two-factor challenge, and the `amr` values changed (lukk 0.7);
+- the proxies refuse more — lukk's own routes through the app-API proxy, oversized and unsized bodies,
+  cross-site subresource GETs to the auth proxy — and sealed sessions expire;
+- in BFF mode `$lukkRefresh()` resolves to a symbol rather than `{ ok, expires_in }`;
+- SSR forwards cookies only to a relative API base, and `useLukkForm` drafts moved keys.
+
+The published type declarations also stopped lying, which can fail a typecheck that passed before, and
+one route-middleware decision changed. Each is its own entry below.
 
 ### lukk 0.7: passkey sign-in can return a two-factor challenge, and `amr` changed values
 
