@@ -31,7 +31,8 @@ but behaviour changed in ways an app can notice even without typechecking:
 
 - passkey sign-in can return a two-factor challenge, and the `amr` values changed (lukk 0.7);
 - the proxies refuse more — lukk's own routes through the app-API proxy, oversized and unsized bodies,
-  cross-site subresource GETs to the auth proxy — and sealed sessions expire;
+  cross-site subresource requests to either proxy, any `/refresh` but a POST — and sealed sessions
+  expire;
 - in BFF mode `$lukkRefresh()` resolves to a symbol rather than `{ ok, expires_in }`;
 - SSR forwards cookies only to a relative API base, and `useLukkForm` drafts moved keys;
 - `useLukkFetch` sends credentials only to a target it has judged same-origin, so a call that replaces
@@ -104,6 +105,27 @@ only on the API's own origin (or this app's, in BFF mode).
 What changes for you: a call that replaces the hook, or that redirects the base to another origin, now
 goes out **without** the session cookie or bearer and gets a `401`. Wrap lukk's instance instead of
 replacing its hook, and keep authenticated calls on the API's origin.
+
+### Smaller changes you may notice
+
+**Low impact.**
+
+- **The account calls resolve to `{ status }`.** `forgotPassword`, `resetPassword`, `changePassword` and
+  `sendEmailVerification` resolved to `void` in the types; they resolve to the new exported `LukkStatus`
+  (`{ status: string }`), which is what lukk always sent. Code that ignored the result is unaffected.
+- **`logout({ refreshToken })` (lukk-core).** Presents the refresh token in the logout body, so lukk 0.7
+  ends the session even when the access token has expired (RFC 7009 §2.1). Optional; older lukk
+  releases ignore it.
+- **In BFF mode `user.endpoint` resolves under `app.baseURL`**, like every other BFF route. An app mounted
+  under a base path that worked around this with an absolute endpoint can drop the workaround.
+- **Direct mode no longer prefixes a relative `api.target` with `app.baseURL`** in `useLukkFetch`. The
+  prefix came in earlier in this release cycle and never shipped; only a direct-mode app tracking the
+  branch would notice.
+- **A refresh is never abandoned on a timer.** lukk commits a rotation as soon as it receives the
+  request, so giving up after 15 s lost the new token and the next refresh past the grace window revoked
+  the whole session. Other upstream calls keep the 15 s deadline, which now also covers reading the body.
+- **An unearnable step-up is remembered per app**, not per `useLukkConfirmation()` call: a modal and a
+  page using separate instances now both see the refusal, and the action waiting in one is rejected.
 
 ### Every composable now declares its return type
 
