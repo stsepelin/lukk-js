@@ -6,7 +6,7 @@ vi.mock('h3', () => ({
 }))
 
 // eslint-disable-next-line import/first
-import { hopByHopHeaders, isForeignOrigin, reachesLukk, rejectUnresolvedTarget, reportProxyFailure, resolveTarget, routeWithin, SPOOFABLE_FORWARDING, viaHeader, visitorIp } from '../src/runtime/server/proxy-utils'
+import { fetchUpstream, hopByHopHeaders, isForeignOrigin, isForeignSubresource, reachesLukk, rejectUnresolvedTarget, reportProxyFailure, resolveTarget, routeWithin, SPOOFABLE_FORWARDING, viaHeader, visitorIp } from '../src/runtime/server/proxy-utils'
 
 const ev = () => ({ status: 200 } as { status: number })
 
@@ -485,5 +485,47 @@ describe('reportProxyFailure', () => {
 
     expect(error).toHaveBeenCalledTimes(20)
     expect(String(error.mock.calls[19]![0])).toContain('further proxy failures will not be logged')
+  })
+})
+
+describe('isForeignSubresource', () => {
+  const event = (method: string, headers: Record<string, string>) => ({ method, headers }) as never
+
+  it('names a GET or HEAD from another site or a same-site sibling that is not a navigation', () => {
+    expect(isForeignSubresource(event('GET', { 'sec-fetch-site': 'same-site', 'sec-fetch-mode': 'no-cors' }))).toBe(true)
+    expect(isForeignSubresource(event('HEAD', { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'cors' }))).toBe(true)
+  })
+
+  it('leaves alone a navigation, the app\'s own requests, a caller with no fetch metadata, and other methods', () => {
+    expect(isForeignSubresource(event('GET', { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate' }))).toBe(false)
+    expect(isForeignSubresource(event('GET', { 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'cors' }))).toBe(false)
+    expect(isForeignSubresource(event('GET', {}))).toBe(false)
+    // Another method is the origin check's to judge.
+    expect(isForeignSubresource(event('POST', { 'sec-fetch-site': 'same-site', 'sec-fetch-mode': 'no-cors' }))).toBe(false)
+  })
+})
+
+describe('fetchUpstream', () => {
+  afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks() })
+
+  it('abandons a call lukk never answers, saying why', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    vi.spyOn(globalThis, 'fetch').mockImplementation((_input, init) => new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(init.signal!.reason))
+    }))
+
+    const call = fetchUpstream('https://lukk.test/auth/refresh', { method: 'POST' })
+    const failed = expect(call).rejects.toThrow('lukk did not answer within 15000 ms')
+    await vi.advanceTimersByTimeAsync(15_000)
+    await failed
+  })
+
+  it('leaves no timer behind once lukk answers', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 204 }))
+
+    await fetchUpstream('https://lukk.test/auth/logout', { method: 'POST' })
+
+    expect(vi.getTimerCount()).toBe(0)
   })
 })

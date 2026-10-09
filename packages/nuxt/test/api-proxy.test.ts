@@ -308,18 +308,21 @@ describe('app-API proxy', () => {
 
   it('drops the upstream\'s hop-by-hop response headers (RFC 9110 §7.6.1)', async () => {
     upstreamResponse = { status: 200, type: 'basic', headers: new Headers({
-      'connection': 'x-hop',
+      'connection': 'X-Hop,  x-two',
       'x-hop': 'internal',
+      'x-two': 'internal',
       'keep-alive': 'timeout=5',
       'proxy-authenticate': 'Basic',
+      'proxy-connection': 'keep-alive',
       'trailer': 'x-checksum',
+      'transfer-encoding': 'chunked',
       'upgrade': 'h2c',
       'x-kept': 'yes',
     }) }
     const e = ev({ path: '/api/me' })
     await run(e)
 
-    for (const name of ['connection', 'x-hop', 'keep-alive', 'proxy-authenticate', 'trailer', 'upgrade']) {
+    for (const name of ['connection', 'x-hop', 'x-two', 'keep-alive', 'proxy-authenticate', 'proxy-connection', 'trailer', 'transfer-encoding', 'upgrade']) {
       expect(e.node.res.getHeader(name), name).toBeUndefined()
     }
     expect(e.node.res.getHeader('x-kept')).toBe('yes')

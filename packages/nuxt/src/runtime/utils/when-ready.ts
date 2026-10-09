@@ -25,7 +25,7 @@ export function whenReady(ready: Readonly<Ref<boolean>>, isServer: boolean): Pro
     scope.run(() => watch(ready, () => {
       scope.stop()
       resolve()
-    }, { once: true }))
+    }))
   })
 }
 

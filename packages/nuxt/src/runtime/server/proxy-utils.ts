@@ -192,8 +192,9 @@ export function rejectUnresolvedTarget(event: H3Event, base: string, label: stri
  * caller (no cookie to ride) is never caught.
  */
 export function isForeignSubresource(event: H3Event): boolean {
+  const site = getRequestHeader(event, 'sec-fetch-site')
   return (event.method === 'GET' || event.method === 'HEAD')
-    && ['cross-site', 'same-site'].includes(getRequestHeader(event, 'sec-fetch-site') ?? '')
+    && (site === 'cross-site' || site === 'same-site')
     && getRequestHeader(event, 'sec-fetch-mode') !== 'navigate'
 }
 

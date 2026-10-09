@@ -209,7 +209,8 @@ export default defineEventHandler(async (event) => {
       // one echoing `*.example.com` with credentials let a sibling subdomain read authenticated GETs,
       // the bearer injected here. Hop-by-hop (RFC 9110 §7.6.1), including any the upstream's own
       // `Connection` names: they end at this hop.
-      const named = (response.headers.get('connection') ?? '').split(',').map(name => name.trim().toLowerCase()).filter(Boolean)
+      // Stryker disable next-line StringLiteral: equivalent — the fallback only ever reaches `includes`, and no response header is named after it.
+      const named = (response.headers.get('connection') ?? '').split(',').map(name => name.trim().toLowerCase())
       for (const [name] of response.headers) {
         if (name.startsWith('access-control-') || HOP_BY_HOP_RESPONSE.has(name) || named.includes(name)) ev.node.res.removeHeader(name)
       }

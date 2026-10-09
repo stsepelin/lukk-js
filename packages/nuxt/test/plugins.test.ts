@@ -60,9 +60,17 @@ describe('client plugin', () => {
     // `/admin/api/_lukk`. A root-relative `/api/_lukk` sent every sign-in, refresh and logout to the
     // origin root — a 404, or another app's route.
     __test.runtimeConfig.public.lukk = { mode: 'bff', baseURL: '', confirmationHeader: 'X-Lukk-Confirmation' }
-    ;(__test.runtimeConfig as { app?: unknown }).app = { baseURL: '/admin/' }
+    ;(__test.runtimeConfig as { app?: unknown }).app = { baseURL: '/admin//' }
     ;(clientPlugin as unknown as () => unknown)()
+    // Every trailing slash of the base goes, or the join doubles one.
     expect(captured.hooks!.baseURL).toBe('/admin/api/_lukk')
+  })
+
+  it('leaves a protocol-relative or absolute target alone under any base', async () => {
+    const { underAppBase } = await import('../src/runtime/shared')
+    expect(underAppBase('/admin/', '//cdn.test/x')).toBe('//cdn.test/x')
+    expect(underAppBase('/admin/', 'https://api.test/auth')).toBe('https://api.test/auth')
+    expect(underAppBase(undefined, '/api/_lukk')).toBe('/api/_lukk')
   })
 
   it('provides $lukkRefresh as ONE single-flight shared with the client (concurrent → one refresh)', async () => {
