@@ -63,6 +63,10 @@ now `'pwd' | 'otp' | 'pop' | 'user' | 'mfa'`; anything comparing against `'webau
   no longer receives them; send what it needs explicitly.
 - `useLukkForm` drafts live under `lukk:form:<rememberKey>`, so a draft remembered under the old key
   is not carried over.
+- The BFF session cookie now persists for `session.maxAge` (30 days) instead of ending with the
+  browser, so BFF users stay signed in across restarts, as direct-mode users already did.
+- A `withConfirmation()` still waiting for a step-up is cancelled — it rejects — when the session ends
+  by logout or when any sign-in replaces it, so its action can no longer run under the next account.
 - In BFF mode, `$lukkRefresh()` resolves to the `REFRESHED_WITHOUT_TOKEN` symbol instead of the
   proxy's `{ ok, expires_in }`; code reading `.expires_in` from it gets `undefined`. Both are truthy on
   success. `$lukkRestore()`'s `pair` carries the same symbol.
