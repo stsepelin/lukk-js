@@ -81,11 +81,13 @@ export const REFRESH_INFLIGHT_MAX_MS = 5 * 60_000
  * rotating at that very moment (it now waits on that rotation and is handed what it produced).
  *
  * Each link lives on its own: `REFRESH_HOLD_MS` for its first taker when no caller received it, and
- * `REFRESH_STRAGGLER_MS` once its pair has reached the session — counted from when its refresh LEFT if a
- * caller received it (lukk rotates on receipt, so that is when lukk's own grace window starts), and from the
- * moment otherwise: when a request adopts through it (every link on the way to the head is taken), or when
- * the session presents the pair it produced. So no link outlives the links after it in its chain. Taking
- * one link never extends another. The whole journal goes when the session presents a token outside it (it has moved
+ * `REFRESH_STRAGGLER_MS` once its pair has reached the session — counted from when the BFF got the pair if
+ * a caller received it, and otherwise from when a request adopts through it or the session presents the
+ * pair it produced. A link's end is only ever brought forward, never pushed back, and never past the end of
+ * the link after it in its chain. So answers from the journal can come up to a refresh's duration + 30 s
+ * after lukk rotated — past lukk's own grace window, on a slow refresh. That is deliberate: counted from
+ * lukk's rotation instead, a slow refresh's link was gone as it landed, and the requests still out with the
+ * old cookie replayed it into a revoke. The whole journal goes when the session presents a token outside it (it has moved
  * on), when lukk refuses one of its tokens outright, and when the session ends; a retryable failure keeps
  * it. Never recorded for a session that has ended. At most `REFRESH_JOURNAL_MAX_LINKS` per session.
  *
@@ -145,9 +147,10 @@ export function refreshOnce(session: { id?: string, data: TokenSession }, baseUR
 }
 
 /**
- * The head of the chain `token`'s link starts, for a request presenting it. Every link on the way is TAKEN —
- * its pair has now reached the session, so it lasts only the straggler window from here: left on a longer
- * one, an older link outlived the newer links after it, and handed an old cookie a pair rotated since.
+ * The head of the chain `token`'s link starts, for a request presenting it. Every link on the way has now
+ * delivered its pair to the session, so it lasts at most the straggler window from here — and no link lasts
+ * longer than the one after it: an older link outliving the newer ones handed an old cookie a pair rotated
+ * since.
  *
  * While the head's own token is being rotated, the request waits for that rotation and is handed what it
  * produced — the new head, journalled as it lands; handing out the head as it stood gave the straggler a
@@ -155,17 +158,23 @@ export function refreshOnce(session: { id?: string, data: TokenSession }, baseUR
  * a caller that stops waiting, or a throttle, is told so, and retrying finds the chain where it was.
  */
 function adopt(id: string, journal: Map<string, Link>, token: string): Promise<RefreshResult> {
-  let head = journal.get(token)!
-  take(id, token, head)
+  const path: [string, Link][] = [[token, journal.get(token)!]]
   // Bounded by the journal's size, which only matters for an upstream that handed back a token it had
   // already consumed: the chain would loop, and the process with it.
   // Stryker disable next-line EqualityOperator: equivalent — one more hop around a loop lands on a link of the same loop, and lukk never issues a token it consumed, so outside a loop the `break` ends it first.
   for (let hops = 0; hops < journal.size; hops++) {
-    const next = journal.get(head.pair.refresh!)
+    const hop = path.at(-1)![1].pair.refresh!
+    const next = journal.get(hop)
     if (!next) break
-    take(id, head.pair.refresh!, next)
-    head = next
+    path.push([hop, next])
   }
+  // From the head back, each one no later than the one after it.
+  let until = Date.now() + REFRESH_STRAGGLER_MS
+  for (const [hop, link] of path.reverse()) {
+    shorten(id, hop, link, until)
+    until = link.expiresAt
+  }
+  const head = path[0]![1]
   const rotating = inflightRefresh.get(flightKey(id, head.pair.refresh!))
   return rotating ? waitOn(rotating) : Promise.resolve(handOut(head))
 }
@@ -190,24 +199,27 @@ function countedDown(result: RefreshResult, since: number): RefreshResult {
 /**
  * Record that rotating `consumed` produced `result` — received by a caller, or for a first taker to come.
  *
- * A received link's straggler window runs from when its refresh LEFT, not from when the answer came back:
- * lukk rotates on receipt, so that is when lukk's own grace window starts, and counted from the answer a
- * slow one let the link answer a replay lukk itself would no longer have.
+ * Its window counts from NOW, when the BFF got the pair, not from when the refresh left. Counted from the
+ * departure, a slow refresh's link was gone, or nearly, the moment it landed: the requests still out with
+ * the old cookie found nothing, replayed it past lukk's grace window, and the family was revoked. The cost,
+ * taken deliberately: an answer from the journal can come up to the refresh's duration + 30 s after lukk
+ * rotated — beyond lukk's own grace window, on a slow refresh.
  */
 function record(id: string, consumed: string, result: RefreshResult, flight: Flight): void {
   const journal = refreshJournals.get(id) ?? new Map<string, Link>()
   refreshJournals.set(id, journal)
-  // The session just presented `consumed`, so whichever link handed it out has done its job: from now it
-  // lasts the straggler window, like any link whose pair has reached the session.
+  const now = Date.now()
+  // The session just presented `consumed`, so the link that handed it out has done its job: it lasts the
+  // straggler window from now — never longer than the link recorded below, which lasts at least that. Only
+  // THAT link: another branch's untaken link has handed out nothing yet.
   for (const [token, link] of journal) {
-    // Stryker disable next-line ConditionalExpression: equivalent — `consumed` is the head's token (any other drops the journal before its refresh leaves), and every link not handing it out hands out a token already presented, so it was taken when that one was recorded.
-    if (link.pair.refresh === consumed) take(id, token, link)
+    if (link.pair.refresh === consumed) shorten(id, token, link, now + REFRESH_STRAGGLER_MS)
   }
-  const received = flight.waiting > 0
   // A second rotation of the same token (one the in-flight backstop gave up on, then both answered): the
   // newer one stands, on its own lifetime.
   clearTimeout(journal.get(consumed)?.timer)
-  const link: Link = { pair: result.pair!, expiresIn: result.expiresIn, mintedAt: flight.startedAt, taken: received, timer: lifetime(id, consumed, received ? flight.startedAt + REFRESH_STRAGGLER_MS - Date.now() : REFRESH_HOLD_MS) }
+  const link = { pair: result.pair!, expiresIn: result.expiresIn, mintedAt: flight.startedAt } as Link
+  expire(id, consumed, link, now + (flight.waiting > 0 ? REFRESH_STRAGGLER_MS : REFRESH_HOLD_MS))
   journal.set(consumed, link)
   if (journal.size > REFRESH_JOURNAL_MAX_LINKS) {
     const [oldest, dropped] = journal.entries().next().value!
@@ -220,22 +232,21 @@ function record(id: string, consumed: string, result: RefreshResult, flight: Fli
   })
 }
 
-/** A request took `link`: from now, it lasts only the straggler window — however long it had left. */
-function take(id: string, token: string, link: Link): void {
-  if (link.taken) return
-  link.taken = true
-  clearTimeout(link.timer)
-  link.timer = lifetime(id, token, REFRESH_STRAGGLER_MS)
+/** End `link` at `until` if that is sooner than it would — a link's life is only ever brought forward. */
+function shorten(id: string, token: string, link: Link, until: number): void {
+  expire(id, token, link, Math.min(until, link.expiresAt))
 }
 
-/** The timer that ends one link — that link only, and the journal with its last. */
-function lifetime(id: string, token: string, ms: number): ReturnType<typeof setTimeout> {
-  return unref(setTimeout(() => {
+/** End `link` at `at`: that link only, and the journal with its last. */
+function expire(id: string, token: string, link: Link, at: number): void {
+  clearTimeout(link.timer)
+  link.expiresAt = at
+  link.timer = unref(setTimeout(() => {
     // Every way a journal goes clears its timers first, so this one's is still there.
     const journal = refreshJournals.get(id)!
     journal.delete(token)
     if (journal.size === 0) refreshJournals.delete(id)
-  }, ms))
+  }, at - Date.now()))
 }
 
 /** A session's refresh of one particular token. */

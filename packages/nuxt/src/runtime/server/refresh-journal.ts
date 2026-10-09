@@ -17,9 +17,9 @@ export interface Link {
   expiresIn?: number
   /** When the refresh that produced it left — when lukk minted it, since lukk rotates on receipt. */
   mintedAt: number
-  /** Received by a caller, or taken since: what remains is the straggler window. */
-  taken: boolean
-  /** Ends this link's life — `REFRESH_HOLD_MS` untaken, `REFRESH_STRAGGLER_MS` once taken. */
+  /** When this link ends — only ever brought forward, never pushed back. */
+  expiresAt: number
+  /** Ends it then. */
   timer: ReturnType<typeof setTimeout>
 }
 
