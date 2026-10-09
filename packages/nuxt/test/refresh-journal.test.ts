@@ -90,4 +90,23 @@ describe('a rotation nobody received, adopted by the next request', () => {
     expect(rw.update).toHaveBeenCalledWith({ access: 'late-at', refresh: 'late-rt' })
     expect(fetchSpy).toHaveBeenCalledOnce()
   })
+
+  it('a rotation a request DID receive: adopted within the window, through both', async () => {
+    // One request of a burst renewed the session; the others, already out with the old cookie, come back.
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({ access_token: 'got-at', refresh_token: 'got-rt', expires_in: 900 }), { status: 200 }))
+    const sid = `received-${Math.random()}`
+    expect((await refreshOnce({ id: 'h3', data: { refresh: 'old-rt', sid } }, 'https://lukk.test/auth')).pair?.access).toBe('got-at')
+    await vi.advanceTimersByTimeAsync(10_000)
+
+    sealed = { access: expired(), refresh: 'old-rt', sid }
+    rw = { id: 'h3', data: { ...sealed }, update: vi.fn() }
+    await (apiProxy as unknown as (e: H3Event) => Promise<unknown>)(event())
+    expect(rw.update).toHaveBeenCalledWith({ access: 'got-at', refresh: 'got-rt' })
+    expect(proxyRequest.mock.calls[0]![2].headers.authorization).toBe('Bearer got-at')
+
+    rw = { id: 'h3', data: { ...sealed }, update: vi.fn() }
+    expect(await resolveHydrationAccess(event('/dashboard'))).toBe('got-at')
+    expect(rw.update).toHaveBeenCalledWith({ access: 'got-at', refresh: 'got-rt' })
+    expect(fetchSpy).toHaveBeenCalledOnce()
+  })
 })

@@ -13,9 +13,10 @@ import type { TokenSession } from './refresh'
 export interface Link {
   /** The pair the rotation produced. */
   pair: TokenSession
-  /** lukk's `expires_in` for its access token, counted down from `landedAt` when handed out. */
+  /** lukk's `expires_in` for its access token, as lukk sent it — counted down from `mintedAt` when handed out. */
   expiresIn?: number
-  landedAt: number
+  /** When the refresh that produced it left — when lukk minted it, since lukk rotates on receipt. */
+  mintedAt: number
   /** Received by a caller, or taken since: what remains is the straggler window. */
   taken: boolean
   /** Ends this link's life — `REFRESH_HOLD_MS` untaken, `REFRESH_STRAGGLER_MS` once taken. */

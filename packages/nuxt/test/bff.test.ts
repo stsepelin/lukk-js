@@ -1096,6 +1096,23 @@ describe('a rotation that lands after the request waiting on it gave up', () => 
     expect(again.clear).not.toHaveBeenCalled()
     expect(refreshCalls()).toBe(1)
   })
+
+  it('a rotation a request DID receive is adopted by a straggler\'s 401 retry within the window', async () => {
+    // A page's burst: one request renewed the session and carried the new cookie home; another, already out
+    // with the old one, comes back seconds later. It is handed that same rotation — never a replay.
+    mockFetch().fetch = vi.fn(async (url: string, init?: RequestInit) => {
+      if (String(url).endsWith('/refresh')) return jsonRes({ access_token: 'new-at', refresh_token: 'new-rt', expires_in: 900 })
+      return new Headers(init?.headers).get('authorization') === 'Bearer new-at' ? jsonRes({ id: 1 }) : jsonRes({ message: 'Unauthenticated.' }, 401)
+    })
+    const sid = `bff-received-${Math.random()}`
+    expect(await run(makeEvent({ path: '/api/_lukk/user', session: makeSession({ access: 'old', refresh: 'old-rt', sid } as TokenSession) }))).toEqual({ id: 1 })
+
+    const straggler = makeSession({ access: 'old', refresh: 'old-rt', sid } as TokenSession)
+    expect(await run(makeEvent({ path: '/api/_lukk/user', session: straggler }))).toEqual({ id: 1 })
+
+    expect(straggler.update).toHaveBeenCalledWith({ access: 'new-at', refresh: 'new-rt' })
+    expect(refreshCalls()).toBe(1)
+  })
 })
 
 describe('cache directives', () => {

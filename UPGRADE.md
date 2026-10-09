@@ -142,8 +142,12 @@ replacing its hook, and keep authenticated calls on the API's origin.
   it consumed to the pair it produced. A request still presenting a consumed token — any of those callers
   — is handed the newest pair in that chain and seals it, rather than replaying a spent token; if that
   pair's own token is being rotated right then, it waits and is handed the result. A link lives ten minutes
-  for its first taker when nobody received the rotation, and 30 s from the moment someone did (received
-  when it landed, or taken since), for the requests already out with the old cookie. The journal is
+  for its first taker when nobody received the rotation, and 30 s once its pair has reached the session, for
+  the requests already out with the old cookie — counted from when the refresh left if a caller received it,
+  so it never outlasts lukk's own 30 s grace window, and no link outlives the links after it in its chain.
+  A replay answered from the journal never reaches lukk: lukk's reuse detection and `RefreshFamilyForked`
+  do not see it — a deliberate deviation from RFC 9700 §4.14.2's "replay means theft" signal, bounded to
+  these windows. The journal is
   dropped when the session presents a token outside it, when lukk refuses one of its tokens outright, and
   when the session is logged out or replaced; a throttle or an outage keeps it. One limit is accepted: if
   the response carrying a pair is lost (a navigation aborts it) and the link's window closes first, the

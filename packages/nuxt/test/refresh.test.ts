@@ -151,8 +151,8 @@ describe('refreshOnce when lukk can\'t be reached', () => {
 describe('a rotation that lands after every caller gave up', () => {
   const base = 'https://api.example.com/auth'
   const rotated = { access_token: 'late-at', refresh_token: 'late-rt', expires_in: 900 }
-  /** The held outcome, its `expires_in` counted down from when it landed. */
-  const adopted = (expiresIn = 900) => ({ pair: { access: 'late-at', refresh: 'late-rt' }, expiresIn, retryable: false })
+  /** The outcome, its `expires_in` counted down from when lukk minted it — the refresh leaving at 0; 880 at 20 s. */
+  const adopted = (expiresIn = 880) => ({ pair: { access: 'late-at', refresh: 'late-rt' }, expiresIn, retryable: false })
 
   /** One refresh lukk answers at `lagMs`, after the caller's 15 s wait has run out. */
   async function lateRotation(sid: string, lagMs = 20_000) {
@@ -177,7 +177,7 @@ describe('a rotation that lands after every caller gave up', () => {
 
     await vi.advanceTimersByTimeAsync(60_500) // the user comes back a minute later
     // Its `expires_in` is what is LEFT of the access token, not what it was when lukk minted it.
-    await expect(refreshOnce({ id: 'h3', data: { refresh: 'old-rt', sid } }, base)).resolves.toEqual(adopted(840))
+    await expect(refreshOnce({ id: 'h3', data: { refresh: 'old-rt', sid } }, base)).resolves.toEqual(adopted(820))
     expect(fetchSpy).toHaveBeenCalledOnce() // adopted, never replayed
   })
 
@@ -218,7 +218,7 @@ describe('a rotation that lands after every caller gave up', () => {
     const kept = `late-${Math.random()}`
     const fetchSpy = await lateRotation(kept)
     await vi.advanceTimersByTimeAsync(10 * 60_000 - 1)
-    await expect(refreshOnce({ id: 'h3', data: { refresh: 'old-rt', sid: kept } }, base)).resolves.toEqual(adopted(301))
+    await expect(refreshOnce({ id: 'h3', data: { refresh: 'old-rt', sid: kept } }, base)).resolves.toEqual(adopted(281))
 
     // Another session's, never taken: gone at ten minutes.
     const lapsed = `late-${Math.random()}`
@@ -237,9 +237,9 @@ describe('a rotation that lands after every caller gave up', () => {
     const sid = `burst-${Math.random()}`
     const fetchSpy = await lateRotation(sid)
     await vi.advanceTimersByTimeAsync(60_000)
-    await expect(refreshOnce({ id: 'h3', data: { refresh: 'old-rt', sid } }, base)).resolves.toEqual(adopted(840))
+    await expect(refreshOnce({ id: 'h3', data: { refresh: 'old-rt', sid } }, base)).resolves.toEqual(adopted(820))
     await vi.advanceTimersByTimeAsync(30_000 - 1)
-    await expect(refreshOnce({ id: 'h3', data: { refresh: 'old-rt', sid } }, base)).resolves.toEqual(adopted(811))
+    await expect(refreshOnce({ id: 'h3', data: { refresh: 'old-rt', sid } }, base)).resolves.toEqual(adopted(791))
     // The second taking does not extend the window.
     fetchSpy.mockResolvedValue(new Response('{}', { status: 401 }))
     await vi.advanceTimersByTimeAsync(1)
@@ -512,7 +512,7 @@ describe('a rotation that lands after every caller gave up', () => {
 
     const first = refreshOnce({ id: 'h3', data: { refresh: 'old-rt', sid } }, base)
     await vi.advanceTimersByTimeAsync(10_000)
-    await expect(first).resolves.toEqual(adopted())
+    await expect(first).resolves.toEqual(adopted(900)) // the clock is real here: no time has passed for lukk's token
     await vi.advanceTimersByTimeAsync(30_000)
     void refreshOnce({ id: 'h3', data: { refresh: 'old-rt', sid } }, base)
 
@@ -530,7 +530,7 @@ describe('a rotation that lands after every caller gave up', () => {
     await vi.advanceTimersByTimeAsync(10_000)
     const second = refreshOnce({ id: 'h3', data: { refresh: 'old-rt', sid } }, base) // waits until 25 s
     await vi.advanceTimersByTimeAsync(10_000)
-    await expect(second).resolves.toEqual(adopted())
+    await expect(second).resolves.toEqual(adopted(900)) // the clock is real here
     await vi.advanceTimersByTimeAsync(30_000) // not the ten minutes a rotation nobody received gets
     void refreshOnce({ id: 'h3', data: { refresh: 'old-rt', sid } }, base)
 
@@ -584,7 +584,7 @@ describe('the session\'s rotation journal', () => {
     await expect(taker).resolves.toMatchObject({ pair: null, retryAfter: 5 })
     await vi.advanceTimersByTimeAsync(120_000 - 36_000)
 
-    await expect(present(sid, 't1')).resolves.toEqual({ pair: { access: 'a2', refresh: 't2' }, expiresIn: 300 - 79, retryable: false })
+    await expect(present(sid, 't1')).resolves.toEqual({ pair: { access: 'a2', refresh: 't2' }, expiresIn: 201, retryable: false })
     expect(fetchSpy).toHaveBeenCalledTimes(2)
     // T0's own link was taken at 20 s and lived thirty seconds: at 120 s it is lukk's to rule on.
     fetchSpy.mockResolvedValue(new Response('{}', { status: 401 }))
@@ -635,18 +635,120 @@ describe('the session\'s rotation journal', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(2)
   })
 
-  it('(4) links a sibling lukk issued for the head\'s token, and a later straggler adopts it', async () => {
-    // lukk answers a replay inside its grace window with a sibling (T1 → T3). That is the chain going on,
-    // not the session moving away from it.
+  it('(4) links a sibling lukk issued for the head\'s token, and a straggler arriving while it is out adopts it', async () => {
+    // lukk answers a replay inside its grace window with a sibling (T1 → T3) — T1 rotated elsewhere, say,
+    // another instance this one never heard of. That is the chain going on, not the session moving away
+    // from it, and a T0 straggler arriving while it is out must get T3: the hold model handed it T1, the
+    // token being rotated at that very moment.
     const sid = `j4-${Math.random()}`
     await unreceivedRotation(sid)
     await present(sid, 't0') // taken at 20 s: T0's link lasts to 50 s
-    fetchSpy.mockResolvedValue(new Response(JSON.stringify(pair(3)), { status: 200 }))
-    await expect(present(sid, 't1')).resolves.toMatchObject({ pair: { refresh: 't3' } })
-    await vi.advanceTimersByTimeAsync(10_000)
+    fetchSpy.mockImplementation(answers(pair(3), 2_000))
+    const sibling = present(sid, 't1')
+    await vi.advanceTimersByTimeAsync(1_000)
+    const straggler = present(sid, 't0')
+    await vi.advanceTimersByTimeAsync(1_000)
 
-    await expect(present(sid, 't0')).resolves.toEqual({ pair: { access: 'a3', refresh: 't3' }, expiresIn: 290, retryable: false })
+    await expect(sibling).resolves.toMatchObject({ pair: { refresh: 't3' } })
+    await expect(straggler).resolves.toMatchObject({ pair: { access: 'a3', refresh: 't3' } })
+    await vi.advanceTimersByTimeAsync(10_000)
+    await expect(present(sid, 't0')).resolves.toEqual({ pair: { access: 'a3', refresh: 't3' }, expiresIn: 288, retryable: false })
     expect(fetchSpy).toHaveBeenCalledTimes(2)
+  })
+
+  it('never lets a link outlive the link that delivered its pair — an old cookie is not handed a rotated token', async () => {
+    // t0 T0 → T1, received. t1 T1 presented; lukk takes 16 s, so it lands at ~17 s unreceived (ten minutes).
+    // t18 a T0 straggler is handed T2 through it. t21 T2 → T3, received (thirty seconds). Left on its ten
+    // minutes, the T1 link outlived T2 → T3, and at 9 min an old T1 cookie was handed T2 — rotated long ago.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify(pair(1)), { status: 200 }))
+    const sid = `mono-${Math.random()}`
+    await present(sid, 't0')
+    await vi.advanceTimersByTimeAsync(1_000)
+    fetchSpy.mockImplementation(answers(pair(2), 16_000))
+    void present(sid, 't1')
+    await vi.advanceTimersByTimeAsync(17_000) // gave up at 16 s; landed at 17 s with nobody waiting
+    await expect(present(sid, 't0')).resolves.toMatchObject({ pair: { refresh: 't2' } }) // 18 s
+    await vi.advanceTimersByTimeAsync(3_000)
+    fetchSpy.mockImplementation(async () => new Response(JSON.stringify(pair(3)), { status: 200 }))
+    await present(sid, 't2') // 21 s, received
+    await vi.advanceTimersByTimeAsync(9 * 60_000 - 21_000)
+
+    fetchSpy.mockImplementation(async () => new Response('{}', { status: 401 }))
+    await expect(present(sid, 't1')).resolves.toEqual({ pair: null, retryable: false })
+    expect(fetchSpy).toHaveBeenCalledTimes(4)
+  })
+
+  it('takes every link on the way to the head a straggler adopts, not only the one it presented', async () => {
+    // As above, but the session never presents T2 afterwards: only the straggler's adoption through the T1
+    // link says T2 has reached the session, and the T1 link must not keep handing it out for ten minutes.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify(pair(1)), { status: 200 }))
+    const sid = `hops-${Math.random()}`
+    await present(sid, 't0')
+    await vi.advanceTimersByTimeAsync(1_000)
+    fetchSpy.mockImplementation(answers(pair(2), 16_000))
+    void present(sid, 't1')
+    await vi.advanceTimersByTimeAsync(17_000)
+    await expect(present(sid, 't0')).resolves.toMatchObject({ pair: { refresh: 't2' } }) // 18 s
+    await vi.advanceTimersByTimeAsync(30_000)
+
+    fetchSpy.mockImplementation(async () => new Response('{}', { status: 401 }))
+    await expect(present(sid, 't1')).resolves.toEqual({ pair: null, retryable: false })
+  })
+
+  it('also shortens a waiting link the moment the session presents the pair it produced', async () => {
+    // T1 → T2 landed unreceived; the session then presents T2 itself — so T2 reached it, through some other
+    // way. The T1 link has done its job, and lasts only the straggler window from there.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(answers(pair(2), 20_000))
+    const sid = `mono2-${Math.random()}`
+    void present(sid, 't1')
+    await vi.advanceTimersByTimeAsync(20_000) // T1 → T2, nobody waiting: ten minutes
+    fetchSpy.mockImplementation(async () => new Response(JSON.stringify(pair(3)), { status: 200 }))
+    await present(sid, 't2') // the head's own token: chain goes on, T2 → T3 received
+    await vi.advanceTimersByTimeAsync(30_000)
+
+    fetchSpy.mockImplementation(async () => new Response('{}', { status: 401 }))
+    await expect(present(sid, 't1')).resolves.toEqual({ pair: null, retryable: false })
+  })
+
+  it('counts expires_in from when lukk minted the token — the refresh leaving — never overstating it', async () => {
+    // lukk mints on receipt and answers 14 s later with `expires_in: 900`: 886 s are left, not 900. Told
+    // 900, a client scheduled its renewal 14 s too late and met a 401.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(answers({ access_token: 'a', refresh_token: 'r', expires_in: 900 }, 14_500))
+    const sid = `minted-${Math.random()}`
+    const direct = present(sid, 't0')
+    await vi.advanceTimersByTimeAsync(14_500)
+    await expect(direct).resolves.toMatchObject({ expiresIn: 886 })
+    // And never below zero, for a flight slower than the token's whole life.
+    fetchSpy.mockImplementation(answers({ access_token: 'b', refresh_token: 'r2', expires_in: 10 }, 12_000))
+    const slow = present(`slower-${Math.random()}`, 't0')
+    await vi.advanceTimersByTimeAsync(12_000)
+    await expect(slow).resolves.toMatchObject({ expiresIn: 0 })
+    // No `expires_in` from lukk, none reported.
+    fetchSpy.mockImplementation(answers({ access_token: 'c', refresh_token: 'r3' }, 3_000))
+    const unnamed = present(`unnamed-${Math.random()}`, 't0')
+    await vi.advanceTimersByTimeAsync(3_000)
+    expect(await unnamed).not.toHaveProperty('expiresIn')
+  })
+
+  it('measures a received link\'s thirty seconds from when its refresh LEFT — lukk rotates on receipt', async () => {
+    // lukk commits at 0 and answers at 14 s. Counted from the answer, the link answered a replay at 31 s —
+    // past lukk's own thirty-second grace, a window lukk itself no longer grants.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(answers(pair(1), 14_000))
+    const sid = `left-${Math.random()}`
+    const received = present(sid, 't0')
+    await vi.advanceTimersByTimeAsync(14_000)
+    await expect(received).resolves.toMatchObject({ pair: { refresh: 't1' } })
+
+    await vi.advanceTimersByTimeAsync(15_000) // 29 s
+    await expect(present(sid, 't0')).resolves.toMatchObject({ pair: { refresh: 't1' } })
+    await vi.advanceTimersByTimeAsync(2_000) // 31 s
+    fetchSpy.mockImplementation(async () => new Response('{}', { status: 401 }))
+    await expect(present(sid, 't0')).resolves.toEqual({ pair: null, retryable: false })
   })
 
   it('hands an old cookie a live pair only within its link\'s window — ten minutes untaken, thirty seconds once taken', async () => {
@@ -680,7 +782,8 @@ describe('the session\'s rotation journal', () => {
     await vi.advanceTimersByTimeAsync(1_000)
     await expect(received).resolves.toMatchObject({ pair: { refresh: 't1' } })
 
-    await vi.advanceTimersByTimeAsync(30_000 - 1)
+    // Thirty seconds from when the refresh LEFT, at 0 — not from the answer at 1 s.
+    await vi.advanceTimersByTimeAsync(29_000 - 1)
     await expect(present(sid, 't0')).resolves.toMatchObject({ pair: { refresh: 't1' }, expiresIn: 271 })
     fetchSpy.mockResolvedValue(new Response('{}', { status: 401 }))
     await vi.advanceTimersByTimeAsync(1)
