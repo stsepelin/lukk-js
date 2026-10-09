@@ -119,9 +119,10 @@ export function reachesLukk(target: string, base: string): boolean {
   //
   // And simulating hops has a limit: a CHAIN of them — merge slashes, then decode, then collapse — lands
   // where no single reading here does (`/x//%252e%252e/auth/login`). So a `.` or `..` segment that only
-  // decoding reveals is refused outright, wherever it would land: the URL parser already collapsed every
-  // one written plainly or encoded once, so what remains was encoded at least twice, which no app path is
-  // on purpose. Unless the path cannot matter — lukk at the ROOT owns every path or none: of its own host
+  // decoding reveals is refused outright, wherever it would land. The URL parser has already collapsed every
+  // one written plainly or as `%2e`; what remains was either encoded twice, or sits behind an ENCODED
+  // separator (`a%2F..%2Fb`, `a%5c..%5cb` — h3 leaves `%2F` encoded, so the parser saw one segment). Both
+  // are traversal-shaped, and no app path is written that way on purpose. Unless the path cannot matter — lukk at the ROOT owns every path or none: of its own host
   // the loop below refuses everything anyway, and of another host nothing here reaches it.
   if (routedPath(b.pathname) !== '' && revealsDotSegment(t.pathname)) return true
   const lands = (url: URL) => routeWithin(url.href, b.href) !== null && (routedPath(b.pathname) !== '' || url.origin === b.origin)
@@ -156,7 +157,10 @@ function revealsDotSegment(pathname: string): boolean {
   // Stryker disable next-line EqualityOperator: equivalent — a fifth round only reveals a dot in a segment still decoding after four, which keeps `reachesLukk`'s own loop changing too, and its cap refuses that path anyway. (`round--` never ends: that timeout is a synchronous loop, the detection.)
   for (let round = 0; round < DECODING_ROUNDS; round++) {
     path = decodeAscii(path)
-    if (path.split(/[/\\]/).some(segment => segment === '.' || segment === '..')) return true
+    // Without the tab, LF and CR the URL parser strips from anywhere in a URL before it collapses dots —
+    // `.%09.` is `..` to every hop that re-parses. (Stripped from what is SPLIT only, so the next round
+    // still decodes what was actually there.)
+    if (path.replace(/[\t\n\r]/g, '').split(/[/\\]/).some(segment => segment === '.' || segment === '..')) return true
   }
   return false
 }

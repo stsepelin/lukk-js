@@ -77,8 +77,10 @@ now `'pwd' | 'otp' | 'pop' | 'user' | 'mfa'`; anything comparing against `'webau
   goes out as `text/plain`.
 - Route checks collapse repeated slashes, so `/api//auth/login` is refused like `/api/auth/login`.
 - The app-API proxy refuses (`404`) any path in which a round of percent-decoding reveals a whole `.` or
-  `..` segment (`/api/x/%252e%252e/y`), wherever it would lead. A dot inside a segment name
-  (`v1.2`, `.well-known`) is unaffected.
+  `..` segment (`/api/x/%252e%252e/y`), wherever it would lead — including one behind an ENCODED
+  separator, which h3 leaves encoded: `/api/files/a%2F..%2Fb`, `/api/files/foo%2F.%2Fbar.txt`,
+  `/api/..%2Fx`, `/api/a%5c..%5cb` now answer **404**, and so does a dot segment a tab, LF or CR splits
+  (`.%2509.`). A dot inside a segment name (`v1.2`, `.well-known`, `..y`) is unaffected.
 - The app-API proxy also refuses a path that a further round of percent-decoding would turn into one
   of lukk's routes (`/api/x/%252e%252e/auth/login`, `/api/%2561uth/login`) with **404**.
 - Both proxies refuse a cross-site or same-site GET that is not a **top-level** navigation with **403** —
@@ -139,8 +141,12 @@ replacing its hook, and keep authenticated calls on the API's origin.
   carries on regardless, and the session's next refresh — any of those callers, as long as it still
   presents the old token — joins it while it is out or adopts its result once it has landed. A landed
   result waits up to ten minutes for its first taker; once taken, it stays only 30 s more, for the
-  requests that were already out with the old cookie. It is let go at once when the session presents any
-  other refresh token, and when the session ends — a logout or a sign-in never has it re-sealed. **That memory is per process**: behind a multi-instance BFF without sticky
+  requests that were already out with the old cookie — even if the taker refreshes the token it was handed
+  meanwhile, in which case those requests receive the taker's NEW pair rather than the one it just spent
+  (never past the original 30 s). It is let go at once when the session presents any other refresh token, and when the session
+  ends — a logout or a sign-in never has it re-sealed. One limit is accepted: if the first taker's response
+  is lost (a navigation aborts it), the browser keeps the consumed token, and its next refresh after the
+  30 s revokes the session — the same exposure as any rotation whose response is lost. **That memory is per process**: behind a multi-instance BFF without sticky
   sessions, a next request that reaches another instance replays the old token, and only lukk's grace
   window (`LUKK_GRACE`, 30 s by default) keeps that from revoking the session. Use sticky sessions there,
   or raise the grace window if your lukk can be slow to rotate.

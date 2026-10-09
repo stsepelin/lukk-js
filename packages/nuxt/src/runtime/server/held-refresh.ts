@@ -16,6 +16,11 @@ export interface Held {
   landedAt: number
   /** Taken at least once: what remains is the straggler window. */
   taken: boolean
+  /**
+   * Refresh tokens this hold handed out and the session has since rotated itself (`forwardHeld`): still
+   * the session's own chain, so presenting one does not let the hold go.
+   */
+  superseded: Set<string>
   timer?: ReturnType<typeof setTimeout>
 }
 

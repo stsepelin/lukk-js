@@ -90,6 +90,10 @@ export const REFRESH_HOLD_MS = 10 * 60_000
  * is the right answer to it.
  */
 export const REFRESH_STRAGGLER_MS = 30_000
+// An accepted limit: the FIRST taker's response can be lost (a navigation aborts it), leaving the browser on
+// the consumed token after the window has closed. Its replay then revokes the family — the same exposure an
+// ordinary rotation has when the response carrying it is lost. Holding longer would widen the window in
+// which an old cookie somewhere else is answered with a live pair.
 
 /** Single-flight the server-side refresh per session, returning the rotation outcome. */
 export function refreshOnce(session: { id?: string, data: TokenSession }, baseURL: string, clientIp = ''): Promise<RefreshResult> {
@@ -103,12 +107,36 @@ export function refreshOnce(session: { id?: string, data: TokenSession }, baseUR
 
   const held = heldRefresh.get(id)
   if (held?.consumed === token) return Promise.resolve(take(id, held))
-  // Any other token: the session has moved on, and the held rotation with it.
-  forgetHeldRefresh(id)
+  // Any other token: the session has moved on, and the held rotation with it — except the session's own
+  // chain, presented while the straggler window is open. The token the hold handed out is the taker
+  // refreshing (an access token that ran out while the hold waited comes back already expired), and the
+  // burst it belongs to may still have requests with the consumed token on the way; dropped, they reached
+  // lukk long past its grace window. The window's own timer ends it. (Only a rotation that produced a pair
+  // is ever held.)
+  const handedOut = held?.taken === true && held.result.pair!.refresh === token
+  if (!handedOut && !(held?.taken && held.superseded.has(token))) forgetHeldRefresh(id)
 
   // Joined only by a request presenting the token it is rotating — the flight is keyed by both. One with
   // another token is lukk's to rule on: joined, it was handed a pair its own token never earned.
-  return waitOn(inflightRefresh.get(flightKey(id, token)) ?? fly(id, token, baseURL, clientIp))
+  const flight = inflightRefresh.get(flightKey(id, token)) ?? fly(id, token, baseURL, clientIp)
+  if (handedOut) void flight.run.then(result => forwardHeld(held!, token, result))
+  return waitOn(flight)
+}
+
+/**
+ * The session rotated the token a hold handed out: forward the hold to that rotation, so a straggler still
+ * presenting the consumed token adopts the CURRENT pair. Left on the handed-out one, it re-sealed a token
+ * lukk had just rotated, and the browser's next refresh replayed it — past lukk's grace window, as long as
+ * the straggler window itself, it revoked the family. The window is never extended: the timer set at the
+ * first taking still ends it. A session that ended meanwhile has no hold left to forward: `markSessionEnded`
+ * let it go, so forwarding the detached object reaches no request. Every forward for one rotation runs
+ * when it lands, with the same result, so a second one changes nothing.
+ */
+function forwardHeld(held: Held, rotated: string, result: RefreshResult): void {
+  if (!result.pair) return
+  held.superseded.add(rotated)
+  held.result = result
+  held.landedAt = Date.now()
 }
 
 /** A session's refresh of one particular token. */
@@ -131,14 +159,16 @@ function fly(id: string, token: string, baseURL: string, clientIp: string): Flig
   // outcome, in which a request with the old token could start a replay. Never for a session that ended
   // while it was out — a logout or sign-in lets go of a held one too (`markSessionEnded`).
   flight.run.then((result) => {
-    if (result.pair && flight.waiting === 0 && !isSessionEnded(id)) hold(id, token, result)
+    // Nor when it rotated the token a hold handed out: `forwardHeld` moves that hold on instead, keeping
+    // the straggler window it already has — a fresh hold would drop the consumed token's stragglers.
+    if (result.pair && flight.waiting === 0 && !isSessionEnded(id) && heldRefresh.get(id)?.result.pair!.refresh !== token) hold(id, token, result)
     forget()
   }, forget)
   return flight
 }
 
 function hold(id: string, consumed: string, result: RefreshResult): void {
-  const held: Held = { consumed, result, landedAt: Date.now(), taken: false }
+  const held: Held = { consumed, result, landedAt: Date.now(), taken: false, superseded: new Set() }
   held.timer = unref(setTimeout(() => forgetHeldRefresh(id, held), REFRESH_HOLD_MS))
   heldRefresh.set(id, held)
   // And not one another instance ended: the shared store answers asynchronously, so it is let go after.

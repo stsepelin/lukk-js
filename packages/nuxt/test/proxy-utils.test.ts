@@ -163,9 +163,23 @@ describe('reachesLukk', () => {
     '/x/%252e/../%252e%252e%255cauth/login', // a backslash a decoding round reveals
     '/x/%252E%252E/y', // whatever it would reach — the case of the escape does not matter
     '/x/%252e/y', // a lone `.` too
+    // A tab, LF or CR a round reveals: the URL parser strips them anywhere before it collapses dots.
+    '/x//%252e%252e%2509/auth/login',
+    '/x//%252e%252e%250a/auth/login',
+    '/x//%252e%252e%250d/auth/login',
+    '/x//%252e%2509%252e/auth/login',
+    '/x//%2509%252e%252e/auth/login',
+    '/x//.%2509./auth/login',
+    // A backslash a round reveals, after merged slashes — only the split on `\` sees this one.
+    '/x//%252e%252e%255cauth/login',
   ])('refuses %s: a decoding round reveals a dot segment, and no chain of hops is simulated to see where it lands', (path) => {
     // Simulating hops misses chains — merge slashes, then decode, then collapse — so a `.` or `..` segment
     // that only DECODING reveals is refused outright: no app path is written that way on purpose.
+    expect(reachesLukk(`https://api.test${path}`, 'https://api.test/auth')).toBe(true)
+  })
+
+  it.each(['/files/a%2F..%2Fb', '/files/foo%2F.%2Fbar.txt', '/..%2Fx', '/a%5c..%5cb'])('refuses %s: a dot segment hidden behind an encoded slash is traversal-shaped too', (path) => {
+    // h3 leaves `%2F` encoded, so the URL parser sees one segment — but any hop that decodes once sees `..`.
     expect(reachesLukk(`https://api.test${path}`, 'https://api.test/auth')).toBe(true)
   })
 
