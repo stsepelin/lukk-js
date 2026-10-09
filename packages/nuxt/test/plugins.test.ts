@@ -55,6 +55,16 @@ describe('client plugin', () => {
     expect(captured.hooks!.baseURL).toBe('/api/_lukk')
   })
 
+  it('targets the local proxy under the app\'s own base path', () => {
+    // Nitro mounts every server route under \`app.baseURL\`, so with \`/admin/\` the proxy lives at
+    // \`/admin/api/_lukk\`. A root-relative \`/api/_lukk\` sent every sign-in, refresh and logout to the
+    // origin root — a 404, or another app's route.
+    __test.runtimeConfig.public.lukk = { mode: 'bff', baseURL: '', confirmationHeader: 'X-Lukk-Confirmation' }
+    ;(__test.runtimeConfig as { app?: unknown }).app = { baseURL: '/admin/' }
+    ;(clientPlugin as unknown as () => unknown)()
+    expect(captured.hooks!.baseURL).toBe('/admin/api/_lukk')
+  })
+
   it('provides $lukkRefresh as ONE single-flight shared with the client (concurrent → one refresh)', async () => {
     __test.runtimeConfig.public.lukk = { mode: 'direct', baseURL: 'https://api/auth', confirmationHeader: 'X' }
     const { provide } = (clientPlugin as unknown as () => { provide: { lukkRefresh: () => Promise<unknown> } })()

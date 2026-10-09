@@ -2,7 +2,7 @@ import { createLukkClient, type LukkClient, REFRESHED_WITHOUT_TOKEN, type Refres
 import { defineNuxtPlugin, useNuxtApp, useRuntimeConfig, useState } from '#imports'
 import { useLukkAuth } from '../composables/useLukkAuth'
 import { ACCESS_KEY, CONFIRMATION_KEY } from '../keys'
-import { confirmationHeaderName, isAuthRejection, LUKK_BFF_PREFIX } from '../shared'
+import { confirmationHeaderName, isAuthRejection, LUKK_BFF_PREFIX, underAppBase } from '../shared'
 import { acrossTabs, restoreState, settle } from '../utils/restore-state'
 import { tokenSubject } from '../utils/token-subject'
 
@@ -44,7 +44,7 @@ export default defineNuxtPlugin({
       scope?: string
     }
 
-    const baseURL = cfg.mode === 'direct' ? cfg.baseURL : LUKK_BFF_PREFIX
+    const baseURL = cfg.mode === 'direct' ? cfg.baseURL : underAppBase((useRuntimeConfig() as { app?: { baseURL?: string } }).app?.baseURL, LUKK_BFF_PREFIX)
 
     // Access-token holder. Written ONLY on the client (guarded below) so it never
     // lands in the serialized SSR payload — in BFF mode it stays null (the proxy

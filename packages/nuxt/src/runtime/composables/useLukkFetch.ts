@@ -1,5 +1,6 @@
 import { isSameOrigin } from 'lukk-core'
 import { type $Fetch, ofetch } from 'ofetch'
+import { underAppBase } from '../shared'
 import { navigateTo, useNuxtApp, useRequestFetch, useRequestHeaders, useRequestURL, useRuntimeConfig, useState } from '#imports'
 import { ACCESS_KEY } from '../keys'
 import { createLukkFetch, createRequestFetch, type LukkFetchDeps, type RequestFetch } from '../utils/create-lukk-fetch'
@@ -40,7 +41,8 @@ export function useLukkFetch(): $Fetch {
   }
 
   const deps: LukkFetchDeps = {
-    baseURL: cfg.apiBaseURL,
+    // Under the app's base path when relative (the BFF's app-API proxy is a server route of this app).
+    baseURL: underAppBase((useRuntimeConfig() as { app?: { baseURL?: string } }).app?.baseURL, cfg.apiBaseURL),
     // Stryker disable next-line ConditionalExpression: the mutation run compiles the client, where this is `false` already; the server half is pinned in test/server-env/use-lukk-fetch.test.ts.
     isServer: import.meta.server === true,
     // Direct mode holds the token in client memory; SSR has none, so nothing to refresh.

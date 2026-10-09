@@ -4,6 +4,16 @@
 export const LUKK_BFF_PREFIX = '/api/_lukk'
 
 /**
+ * A root-relative path as this app serves it: under \`app.baseURL\`, where Nitro mounts every server
+ * route. With \`/admin/\` the BFF proxy lives at \`/admin/api/_lukk\`; a bare \`/api/_lukk\` reached the
+ * origin root — a 404, or another app co-hosted there. An absolute URL is left alone.
+ */
+export function underAppBase(appBase: unknown, path: string): string {
+  if (!path.startsWith('/') || path.startsWith('//')) return path
+  return (typeof appBase === 'string' ? appBase.replace(/\/+$/, '') : '') + path
+}
+
+/**
  * Whether a proxy base (`baseURL`, `api.target`) is one the SERVER can actually resolve and
  * fetch: absolute, with an http(s) scheme. Shared by the module's build-time validation and
  * `resolveTarget`, so "accepted at build" and "resolvable at request time" can't drift.

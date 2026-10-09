@@ -162,6 +162,15 @@ describe('finish-logout middleware (BFF)', () => {
     expect(event.deleted).toEqual([{ name: '__Host-lukk-logout', options: { path: '/', secure: true, sameSite: 'strict' } }])
   })
 
+  it('ends the session through the proxy under the app\'s own base path', async () => {
+    // Nitro routes a local fetch through the app mounted at \`app.baseURL\`; a root-relative path misses it.
+    ;(__test.runtimeConfig as { app?: unknown }).app = { baseURL: '/admin/' }
+    const event = makeEvent()
+    await run(event)
+
+    expect((event.fetch as ReturnType<typeof vi.fn>).mock.calls[0]![0]).toBe('/admin/api/_lukk/logout')
+  })
+
   it('ends the session through the proxy\'s /logout before the page renders, drops the note, and answers that the browser is signed out', async () => {
     const event = makeEvent()
     await run(event)

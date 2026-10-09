@@ -1,7 +1,7 @@
 import type { H3Event } from 'h3'
 import { appendResponseHeader, defineEventHandler, deleteCookie, getCookie, getRequestHeader, setCookie, setResponseHeader } from 'h3'
 import { useRuntimeConfig } from '#imports'
-import { LUKK_BFF_PREFIX, logoutCookieName, sessionCookieName, signedOutCookieName } from '../shared'
+import { LUKK_BFF_PREFIX, logoutCookieName, sessionCookieName, signedOutCookieName, underAppBase } from '../shared'
 import { sessionEnded, sessionKey, sessionReplaced } from './ended-sessions'
 import type { EndedHere } from './logout-note'
 import { readSealedSessionWithId } from './sealed-session'
@@ -171,7 +171,7 @@ async function send(event: H3Event): Promise<Response | undefined> {
 
   let timer: ReturnType<typeof setTimeout> | undefined
   const timeout = new Promise<undefined>((resolve) => { timer = setTimeout(resolve, FINISH_LOGOUT_TIMEOUT_MS) })
-  const request = local(`${LUKK_BFF_PREFIX}/logout`, {
+  const request = local(underAppBase((useRuntimeConfig(event) as { app?: { baseURL?: string } }).app?.baseURL, `${LUKK_BFF_PREFIX}/logout`), {
     method: 'POST',
     headers: {
       'accept': 'application/json',

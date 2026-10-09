@@ -6,7 +6,7 @@ import { hopByHopHeaders, isForeignOrigin, reachesLukk, reportProxyFailure, reje
 import { sessionEnded, sessionKey } from './ended-sessions'
 import { logoutNoted, withholdSignedOut } from './logout-note'
 import { revokeDroppedSession } from './revoke-dropped'
-import { readSealedSession, sessionSeal } from './sealed-session'
+import { readSealedSession, sessionCookie as sessionCookieOptions, sessionSeal } from './sealed-session'
 import { refreshOnce, type TokenSession } from './utils/refresh'
 
 /**
@@ -105,7 +105,7 @@ export default defineEventHandler(async (event) => {
     const session = await useSession<TokenSession>(event, {
       password: sessionPassword,
       name: sessionName,
-      cookie: { sameSite: 'strict', secure, httpOnly: true, path: '/' },
+      cookie: sessionCookieOptions(secure, sessionMaxAge),
       // h3 otherwise accepts a sealed session from the `x-<name>-session` REQUEST HEADER in
       // preference to the cookie — an auth channel outside `__Host-`, Secure, HttpOnly and
       // SameSite=Strict. Nothing here reads it (readSealedSession is cookie-only), but leaving the

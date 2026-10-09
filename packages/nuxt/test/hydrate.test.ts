@@ -176,7 +176,8 @@ describe('resolveHydrationAccess', () => {
     await resolveHydrationAccess(ev('__Host-lukk-session=STALE'))
 
     expect(useSession).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-      cookie: { sameSite: 'strict', secure: true, httpOnly: true, path: '/' },
+      // `maxAge` added: without it the cookie was a session cookie, dropped on browser restart.
+      cookie: { sameSite: 'strict', secure: true, httpOnly: true, path: '/', maxAge: 2592000 },
       sessionHeader: false,
     }))
   })

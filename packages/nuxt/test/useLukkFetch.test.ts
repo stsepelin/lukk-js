@@ -34,6 +34,20 @@ describe('useLukkFetch', () => {
     expect(d.getCookieHeader()).toBeUndefined() // client (import.meta.server=false)
   })
 
+  it('BFF: the app-API base sits under the app\'s own base path', () => {
+    __test.runtimeConfig.public.lukk = { mode: 'bff', apiBaseURL: '/api' }
+    ;(__test.runtimeConfig as { app?: unknown }).app = { baseURL: '/admin/' }
+    useLukkFetch()
+    expect(deps().baseURL).toBe('/admin/api')
+  })
+
+  it('direct: an absolute API base is left as it is', () => {
+    __test.runtimeConfig.public.lukk = { mode: 'direct', apiBaseURL: 'https://api.test' }
+    ;(__test.runtimeConfig as { app?: unknown }).app = { baseURL: '/admin/' }
+    useLukkFetch()
+    expect(deps().baseURL).toBe('https://api.test')
+  })
+
   it('reports this app\'s origin, and nothing where there is no request to read it from', () => {
     __test.runtimeConfig.public.lukk = { mode: 'bff', apiBaseURL: '/api' }
     __test.requestURL = 'https://app.test/dashboard'

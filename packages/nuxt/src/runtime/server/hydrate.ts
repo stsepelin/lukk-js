@@ -7,7 +7,7 @@ import { visitorIp } from './proxy-utils'
 import { sessionEnded, sessionKey, withholdSessionCookie } from './ended-sessions'
 import { logoutNoted } from './logout-note'
 import { revokeDroppedSession } from './revoke-dropped'
-import { readSealedSessionWithId, sessionSeal } from './sealed-session'
+import { readSealedSessionWithId, sessionCookie, sessionSeal } from './sealed-session'
 import { warnIfSessionTooLarge } from './session-size'
 import { refreshOnce, type TokenSession } from './utils/refresh'
 
@@ -84,7 +84,7 @@ export async function resolveHydrationAccess(event: H3Event): Promise<string | n
     const session = await useSession<TokenSession>(event, {
       password: sessionPassword!,
       name,
-      cookie: { sameSite: 'strict', secure, httpOnly: true, path: '/' },
+      cookie: sessionCookie(secure, sessionMaxAge),
       // h3 otherwise accepts a sealed session from the `x-<name>-session` REQUEST HEADER in
       // preference to the cookie — an auth channel outside `__Host-`, Secure, HttpOnly and
       // SameSite=Strict. Nothing here reads it, but leaving a door open on a session primitive

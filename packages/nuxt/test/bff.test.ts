@@ -174,6 +174,34 @@ describe('BFF proxy', () => {
     expect(h3state.lastSessionConfig).toMatchObject({ seal: { ttl: 3600 * 1000 } })
   })
 
+  it('keeps the session cookie across a browser restart for the same lifetime as its seal', async () => {
+    // With no Max-Age the cookie was a session cookie, dropped when the browser closed — so a BFF user was
+    // signed out on every restart while a direct-mode user, holding lukk's persistent refresh cookie, was
+    // not. Max-Age, not h3's \`maxAge\` (an Expires counted from the session's first creation): it restarts
+    // on every write, as the seal's own lifetime does.
+    mockFetch().fetch = vi.fn(async () => jsonRes({ access_token: 'a', refresh_token: 'r', expires_in: 900 }))
+    await run(makeEvent({ path: '/api/_lukk/login', method: 'POST', headers: sameOrigin, session: makeSession() }))
+    expect(h3state.lastSessionConfig?.cookie).toMatchObject({ maxAge: 2592000, httpOnly: true, sameSite: 'strict', path: '/' })
+    expect((h3state.lastSessionConfig as { maxAge?: unknown }).maxAge).toBeUndefined()
+
+    ;(__test.runtimeConfig.lukk as Record<string, unknown>).sessionMaxAge = 3600
+    await run(makeEvent({ path: '/api/_lukk/login', method: 'POST', headers: sameOrigin, session: makeSession() }))
+    expect(h3state.lastSessionConfig?.cookie).toMatchObject({ maxAge: 3600 })
+  })
+
+  it('deletes the session cookie outright when it clears the session, rather than leaving an empty one standing', async () => {
+    // h3's \`clear()\` rewrites the cookie empty with the session's own options — with a Max-Age, that kept
+    // an empty \`__Host-\` cookie for the whole lifetime instead of removing it.
+    const session = makeSession({ access: 'A', refresh: 'rA' })
+    mockFetch().fetch = vi.fn(async () => jsonRes(null, 204))
+    const event = makeEvent({ path: '/api/_lukk/logout', method: 'POST', body: '{}', headers: sameOrigin, session })
+
+    await run(event)
+
+    expect(session.clear).toHaveBeenCalled()
+    expect((event as unknown as { __deleted?: { name: string }[] }).__deleted?.map(d => d.name)).toContain('__Host-lukk-session')
+  })
+
   it('writes the sealed session under the per-app namespaced cookie name', async () => {
     ;(__test.runtimeConfig.lukk as Record<string, unknown>).cookieNamespace = 'admin' // → __Host-lukk-admin-session
     const session = makeSession()
@@ -372,13 +400,15 @@ describe('BFF proxy', () => {
     const event = makeEvent({ path: '/api/_lukk/logout', method: 'POST', headers: sameOrigin, session })
     await run(event)
     expect(session.clear).toHaveBeenCalledOnce()
-    expect((event as { __deleted?: { name: string }[] }).__deleted?.map(d => d.name)).toEqual(['__Host-lukk-logout', '__Host-lukk-signed-out'])
+    expect((event as { __deleted?: { name: string }[] }).__deleted?.map(d => d.name)).toEqual(['__Host-lukk-session', '__Host-lukk-logout', '__Host-lukk-signed-out'])
 
     // Named like the session cookie: relaxed and namespaced with it.
     Object.assign(__test.runtimeConfig.lukk, { cookieSecure: false, cookieNamespace: 'admin' })
     const dev = makeEvent({ path: '/api/_lukk/logout', method: 'POST', headers: { origin: 'http://app.example.com', host: 'app.example.com' }, session: makeSession({ access: 'tok' }) })
     await run(dev)
     expect((dev as { __deleted?: { name: string, options: unknown }[] }).__deleted).toEqual([
+      // The session cookie too, now that it carries a Max-Age that `clear()` would leave standing.
+      { name: 'lukk-admin-session', options: { sameSite: 'strict', secure: false, httpOnly: true, path: '/', maxAge: 2592000 } },
       { name: 'lukk-admin-logout', options: { path: '/', secure: false, sameSite: 'strict' } },
       { name: 'lukk-admin-signed-out', options: { path: '/', secure: false, sameSite: 'strict' } },
     ])

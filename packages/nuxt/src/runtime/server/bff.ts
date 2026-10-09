@@ -6,11 +6,11 @@ import { LUKK_BFF_PREFIX, confirmationHeaderName, logoutCookieName, sessionCooki
 import { isForeignOrigin, isForeignSubresource, rejectUnresolvedTarget, reportProxyFailure, resolveTarget, routeWithin, viaHeader, visitorIp } from './proxy-utils'
 import { endSession, newSessionId, sessionEnded, sessionKey, sessionReplaced, withholdSessionCookie } from './ended-sessions'
 import { revokeDroppedSession } from './revoke-dropped'
-import { readSealedSession, sessionSeal } from './sealed-session'
+import { readSealedSession, sessionCookie, sessionSeal } from './sealed-session'
 import { warnIfSessionTooLarge } from './session-size'
 import { refreshOnce, type TokenSession } from './utils/refresh'
 
-type SessionCookieOptions = { sameSite: 'strict', secure: boolean, httpOnly: true, path: '/' }
+type SessionCookieOptions = ReturnType<typeof sessionCookie>
 
 /**
  * Sign-in routes never refresh and retry. They don't authenticate with the session they would replace,
@@ -46,7 +46,7 @@ export default defineEventHandler(async (event) => {
   // and the Secure attribute both derive from this one `secure` — they can't diverge.
   const secure = cookieSecure !== false
   const sessionName = sessionCookieName(secure, cookieNamespace)
-  const cookieOptions: SessionCookieOptions = { sameSite: 'strict', secure, httpOnly: true, path: '/' }
+  const cookieOptions: SessionCookieOptions = sessionCookie(secure, sessionMaxAge)
   // The browser's logout note (see `logoutCookieName`): cleared once the logout is done, and by any new session.
   const clearLogoutNote = () => {
     const options = { path: '/', secure, sameSite: 'strict' as const }
@@ -183,7 +183,7 @@ export default defineEventHandler(async (event) => {
     }
 
     if (!pair) {
-      if (!retryable) await s.clear()
+      if (!retryable) await clearSession(event, s, sessionName, cookieOptions)
       setResponseStatus(event, retryable ? 503 : 401)
       return { message: 'Unauthenticated.' }
     }
@@ -241,7 +241,7 @@ export default defineEventHandler(async (event) => {
       // Clear ONLY on a definitive rejection. A throttled or failed refresh leaves the token valid, and
       // discarding the session there turns a transient 429 into an unrecoverable logout.
       else if (!pair && !retryable && !(await ended())) {
-        await s.clear()
+        await clearSession(event, s, sessionName, cookieOptions)
       }
       else if (!pair && retryable) {
         stillRefreshable = true
@@ -330,7 +330,7 @@ export default defineEventHandler(async (event) => {
       // Only a session that unsealed: a forged or expired cookie still gets an h3 id, and recording
       // those let anyone flood the record past its bound and evict the entries that matter.
       if (unsealed) await endSession(sessionKey(s))
-      await s.clear()
+      await clearSession(event, s, sessionName, cookieOptions)
       // Only with the session it was for: a note beside a newer session's cookie belongs to that one.
       clearLogoutNote()
     }
@@ -378,6 +378,16 @@ async function readBoundedBody(event: H3Event, limit: number): Promise<string | 
 }
 
 /** Open the read-write sealed session (h3 mints the cookie if absent — call only when writing). */
+/**
+ * End the sealed session and delete its cookie. h3's `clear()` rewrites the cookie empty with the
+ * session's own options, Max-Age included, which left an empty `__Host-` cookie standing for the whole
+ * lifetime instead of removing it.
+ */
+async function clearSession(event: H3Event, session: { clear: () => Promise<unknown> }, name: string, cookie: SessionCookieOptions): Promise<void> {
+  await session.clear()
+  deleteCookie(event, name, cookie)
+}
+
 function openSession(event: H3Event, password: string, name: string, cookie: SessionCookieOptions, maxAge: number | undefined) {
   // `sessionHeader: false`: h3 otherwise accepts a sealed session from the `x-<name>-session`
   // REQUEST HEADER in preference to the cookie — an auth channel outside `__Host-`, Secure,
