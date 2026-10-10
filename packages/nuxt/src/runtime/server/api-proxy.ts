@@ -164,6 +164,29 @@ export default defineEventHandler(async (event) => {
   // Carry any Set-Cookie h3 queued (the rotated session, on a refresh) through the
   // proxied response — the streamed upstream reply would otherwise drop it.
   const sessionCookie = event.node.res.getHeader('set-cookie')
+  // Set once the queued cookies have been settled for the response — by `onResponse`, or by the failure
+  // path when the upstream never answered. Never twice: past `onResponse` the headers may already be out.
+  let settled = false
+  /** The cookies queued here that may leave with this response — checked at the last moment before they do. */
+  const ownCookies = async (): Promise<string[]> => {
+    settled = true
+    // The rotated session cookie (if any) — unless a sign-in or logout ended that session while the
+    // upstream was answering. This is the last point before the headers go out.
+    const replaced = (await resealed?.()) === true
+    if (replaced) revokeDroppedSession(event, { access, refresh: rotatedRefresh }, baseURL, clientIp)
+    // Nor the signed-out cookie a logout this request finished queued (see `finish-logout`), if a sign-in
+    // replaced that session while the upstream was answering.
+    // Both cookies, not just the marker: the queue may also hold a session the logout's renewal
+    // re-sealed, and this response is finalised after the upstream answered — late enough to land over
+    // the sign-in that replaced it and put the browser back on the previous account.
+    const ours = [signedOutCookieName(secure, cookieNamespace), sessionName]
+    const dropLogoutCookies = await withholdSignedOut(event)
+    if (replaced) return []
+    // The newest pair, if the session rotated the one re-sealed above while the upstream was answering:
+    // left as is, this cookie landed over the newer one with a token already spent.
+    const queued = resealNewest ? await resealNewest(toCookieArray(sessionCookie)) : toCookieArray(sessionCookie)
+    return queued.filter(cookie => !dropLogoutCookies || !ours.includes(cookieName(cookie)))
+  }
 
   // Force `Accept: application/json` so auth/validation errors render as JSON (see
   // docs/transport-modes.md). Opt out to forward the browser's Accept for non-JSON routes.
@@ -259,25 +282,7 @@ export default defineEventHandler(async (event) => {
 
       const upstream = toCookieArray(ev.node.res.getHeader('set-cookie'))
       ev.node.res.removeHeader('set-cookie')
-      // The rotated session cookie (if any) — unless a sign-in or logout ended that session while the
-      // upstream was answering. This is the last point before the headers go out.
-      const replaced = (await resealed?.()) === true
-      if (replaced) revokeDroppedSession(event, { access, refresh: rotatedRefresh }, baseURL, clientIp)
-      // Nor the signed-out cookie a logout this request finished queued (see `finish-logout`), if a sign-in
-      // replaced that session while the upstream was answering.
-      // Both cookies, not just the marker: the queue may also hold a session the logout's renewal
-      // re-sealed, and this response is finalised after the upstream answered — late enough to land over
-      // the sign-in that replaced it and put the browser back on the previous account.
-      const ours = [signedOutCookieName(secure, cookieNamespace), sessionName]
-      const dropLogoutCookies = await withholdSignedOut(event)
-      // The newest pair, if the session rotated the one re-sealed above while the upstream was answering:
-      // left as is, this cookie landed over the newer one with a token already spent.
-      const deliver = resealNewest
-      resealNewest = null
-      const queued = replaced || !deliver ? toCookieArray(sessionCookie) : await deliver(toCookieArray(sessionCookie))
-      const keep = replaced
-        ? []
-        : queued.filter(cookie => !dropLogoutCookies || !ours.includes(cookieName(cookie)))
+      const keep = await ownCookies()
       // Opt-in passthrough: forward only allow-listed names — and NEVER a lukk sealed session
       // cookie (this app's OR a co-hosted app's, whatever the list says); an upstream must not be
       // able to set/overwrite any lukk session.
@@ -323,11 +328,12 @@ export default defineEventHandler(async (event) => {
     reportProxyFailure(base, error)
 
     // An unreachable upstream rejects before `onResponse`, and the error response still carries the
-    // re-sealed cookie h3 queued: it IS delivered, so it is checked and the link taken here as there.
-    // Left held, a cookie from before it adopted the live pair for ten minutes.
-    if (resealNewest) {
-      const queued = await resealNewest(toCookieArray(event.node.res.getHeader('set-cookie')))
-      if (queued.length) event.node.res.setHeader('set-cookie', queued)
+    // cookies h3 queued: they ARE delivered, so they get every check `onResponse` makes — a session that
+    // ended meanwhile withheld and revoked, a replaced logout's cookies withheld, the link taken. Left
+    // held, a cookie from before it adopted the live pair for ten minutes.
+    if (!settled) {
+      const keep = await ownCookies()
+      if (keep.length) event.node.res.setHeader('set-cookie', keep)
       else event.node.res.removeHeader('set-cookie')
     }
     throw error

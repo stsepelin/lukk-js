@@ -128,6 +128,32 @@ describe('reachesLukk', () => {
     expect(reachesLukk(target, base)).toBe(true)
   })
 
+  it.each([
+    ['https://h.test/index.php/auth/login', 'https://h.test/index.php/auth'],
+    ['https://h.test/auth/login', 'https://h.test/index.php/auth'],
+    ['https://h.test/app/index.php/auth/login', 'https://h.test/app/index.php/auth'],
+  ])('sees a base that names the front controller itself (Laravel without rewriting): %s', (target, base) => {
+    // `baseURL` at `https://h/index.php/auth`, `api.target` at `https://h`: judged with the script dropped from
+    // the target alone, `/api/index.php/auth/login` read as `/auth/login` against `/index.php/auth` and passed.
+    expect(reachesLukk(target, base)).toBe(true)
+  })
+
+  it.each([
+    '/auth%2Flogin%3F.php',
+    '/auth%2Flogin%23.php',
+    '/auth%252Flogin%253F.php',
+    '/auth%253Flogin.php',
+    '/%2561uth%252Flogin%253F.php',
+    '/x%2F..%2Fauth%2Flogin%3F.php',
+    '/files/a%2F..%2Fb.php',
+    '/..%2Fx.php',
+    '/a%5c..%5cb.php',
+  ])('never drops a .php segment that hides a separator or a dot segment before judging it: %s', (path) => {
+    // Dropped whole, the segment took its encoded `/`, `?`, `#` or `..` with it — and the path that decodes to
+    // lukk's route, or traverses, was never looked at.
+    expect(reachesLukk(`https://api.test${path}`, 'https://api.test/auth')).toBe(true)
+  })
+
   it('lets an app\'s own routes behind a front controller, and .php names elsewhere, through', () => {
     expect(reachesLukk('https://api.test/index.php/users', 'https://api.test/auth')).toBe(false)
     expect(reachesLukk('https://api.test/files/report.php', 'https://api.test/auth')).toBe(false)

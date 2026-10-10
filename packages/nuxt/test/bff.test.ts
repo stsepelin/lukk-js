@@ -1754,3 +1754,49 @@ describe('request body size', () => {
     expect(at.status).toBe(200)
   })
 })
+
+describe('a page render\'s own request (`x-lukk-ssr`) never renews the session', () => {
+  // Nuxt's SSR `useFetch('/api/_lukk/user')` copies the page request's headers — the session cookie and the
+  // render marker. Renewed here, the rotated cookie went back to the render, never to the page, and the
+  // browser replayed the consumed token into a revoke. As the app-API proxy does, the 401 goes back as it came.
+  const marked = { ...sameOrigin, 'x-lukk-ssr': '1' }
+
+  it('passes a 401 through instead of rotating and retrying', async () => {
+    const session = makeSession({ access: 'A', refresh: 'rA', sid: 'render-A' } as TokenSession)
+    mockFetch().fetch = vi.fn(async () => jsonRes({ message: 'Unauthenticated.' }, 401))
+    const event = makeEvent({ path: '/api/_lukk/user', headers: marked, session })
+
+    await run(event)
+
+    expect(event.status).toBe(401)
+    expect(mockFetch().fetch).toHaveBeenCalledOnce()
+    expect(session.update).not.toHaveBeenCalled()
+  })
+
+  it('answers /refresh 401 without rotating — and without clearing the session', async () => {
+    const session = makeSession({ access: 'A', refresh: 'rA', sid: 'render-B' } as TokenSession)
+    mockFetch().fetch = vi.fn()
+    const event = makeEvent({ path: '/api/_lukk/refresh', method: 'POST', body: '{}', headers: marked, session })
+
+    await expect(run(event)).resolves.toEqual({ message: 'Unauthenticated.' })
+
+    expect(event.status).toBe(401)
+    expect(mockFetch().fetch).not.toHaveBeenCalled()
+    expect(session.update).not.toHaveBeenCalled()
+    expect(session.clear).not.toHaveBeenCalled()
+  })
+
+  it('still renews for a logout, which ends the session anyway — so lukk can revoke it', async () => {
+    const session = makeSession({ access: 'A', refresh: 'rA', sid: 'render-C' } as TokenSession)
+    mockFetch().fetch = vi.fn(async (url: string, init: { headers?: Record<string, string> }) => {
+      if (String(url).endsWith('/refresh')) return jsonRes({ access_token: 'A2', refresh_token: 'rA2', expires_in: 900 })
+      return init.headers?.Authorization === 'Bearer A2' ? new Response(null, { status: 204 }) : jsonRes({ message: 'Unauthenticated.' }, 401)
+    })
+    const event = makeEvent({ path: '/api/_lukk/logout', method: 'POST', body: '{}', headers: marked, session })
+
+    await run(event)
+
+    const calls = mockFetch().fetch.mock.calls.map(([url]) => String(url).replace('https://lukk/auth', ''))
+    expect(calls).toEqual(['/logout', '/refresh', '/logout'])
+  })
+})

@@ -480,8 +480,11 @@ export default defineNuxtModule<ModuleOptions>({
     // Marks a render's own requests, so the app-API proxy never renews the session for one — BFF, whatever
     // `ssrHydrate` says (see `render-marker.server.ts`).
     if (options.mode === 'bff') addPlugin({ src: resolver.resolve('./runtime/plugins/render-marker.server'), mode: 'server' })
-    if (options.mode === 'bff' && options.ssrHydrate !== false) {
-      addPlugin({ src: resolver.resolve('./runtime/plugins/session.server'), mode: 'server' })
+    if (options.mode === 'bff') {
+      // Hydration renews the session before the render; without it, the renewal alone does — a render's own
+      // app-API calls never renew it (see `session-renew.server.ts`).
+      if (options.ssrHydrate !== false) addPlugin({ src: resolver.resolve('./runtime/plugins/session.server'), mode: 'server' })
+      else addPlugin({ src: resolver.resolve('./runtime/plugins/session-renew.server'), mode: 'server' })
       // Takes a render that must refresh the session off streaming (Nuxt 4 `experimental.ssrStreaming`), so its
       // re-sealed cookie can still be set — see `streaming-render.ts`.
       addServerPlugin(resolver.resolve('./runtime/server/plugins/streaming-render'))

@@ -116,12 +116,17 @@ describe('lukk-nuxt module', () => {
     expect(contents).toMatch(/interface ComponentCustomProperties \{[^}]*\$lukkRestore: \(\) => Promise<\{ pair: RefreshOutcome, unavailable: boolean, superseded\?: boolean \}>/)
   })
 
-  it('registers the streaming-render marker alongside SSR hydration, and not without it', () => {
+  it('registers the streaming-render marker in bff mode — with SSR hydration or the renewal alike — and not in direct mode', () => {
     setup({ baseURL: 'https://api/auth', mode: 'bff' })
     expect(kit.addServerPlugin).toHaveBeenCalledWith('./runtime/server/plugins/streaming-render')
 
+    // The renewal re-seals before the render too, and a streamed page could not withhold that seal.
     kit.addServerPlugin.mockClear()
     setup({ baseURL: 'https://api/auth', mode: 'bff', ssrHydrate: false })
+    expect(kit.addServerPlugin).toHaveBeenCalledWith('./runtime/server/plugins/streaming-render')
+
+    kit.addServerPlugin.mockClear()
+    setup({ baseURL: 'https://api/auth', mode: 'direct' })
     expect(kit.addServerPlugin).not.toHaveBeenCalledWith('./runtime/server/plugins/streaming-render')
   })
 
@@ -184,10 +189,11 @@ describe('lukk-nuxt module', () => {
     expect(kit.addServerImportsDir).toHaveBeenCalledOnce() // getLukkAccessToken / useLukkSession
   })
 
-  it('registers the SSR-hydration server plugin in bff mode by default, and skips it with ssrHydrate: false', () => {
+  it('registers the SSR-hydration server plugin in bff mode by default, and only the renewal step with ssrHydrate: false', () => {
     setup({ baseURL: 'https://api/auth', mode: 'bff' })
     expect(kit.addPlugin).toHaveBeenCalledTimes(4) // client + session.client + the render marker + session.server
     expect(kit.addPlugin).toHaveBeenCalledWith(expect.objectContaining({ src: expect.stringContaining('session.server'), mode: 'server' }))
+    expect(kit.addPlugin).not.toHaveBeenCalledWith(expect.objectContaining({ src: expect.stringContaining('session-renew') }))
     expect(kit.addPlugin).toHaveBeenCalledWith({ src: './runtime/plugins/render-marker.server', mode: 'server' })
     // The last check on a page whose request finished a logout — BFF, whatever ssrHydrate says.
     expect(kit.addServerPlugin).toHaveBeenCalledWith(expect.stringContaining('finish-logout-render'))
@@ -195,8 +201,13 @@ describe('lukk-nuxt module', () => {
     vi.clearAllMocks()
     setup({ baseURL: 'https://api/auth', mode: 'bff', ssrHydrate: false })
     // The render marker stays: without hydration, a render's own app-API calls must still never rotate.
-    expect(kit.addPlugin).toHaveBeenCalledTimes(3) // client + session.client + the render marker
-    expect(kit.addPlugin).not.toHaveBeenCalledWith(expect.objectContaining({ src: expect.stringContaining('session.server') }))
+    // And the renewal, so those calls carry a live token instead of rendering a 401 after every idle spell.
+    expect(kit.addPlugin.mock.calls.map(c => c[0])).toEqual([
+      './runtime/plugins/client',
+      { src: './runtime/plugins/session.client', mode: 'client' },
+      { src: './runtime/plugins/render-marker.server', mode: 'server' },
+      { src: './runtime/plugins/session-renew.server', mode: 'server' },
+    ])
     expect(kit.addServerPlugin).toHaveBeenCalledWith(expect.stringContaining('finish-logout-render'))
 
     vi.clearAllMocks()

@@ -687,6 +687,68 @@ describe('app-API proxy', () => {
       expect(revokeDroppedSession).toHaveBeenCalledWith(e, { access: 'new-tok', refresh: 'r2' }, 'https://api/auth', '')
     })
 
+    describe('when the upstream is unreachable — the error response carries the queued cookies too', () => {
+      const unreachable = (during: () => unknown) => proxyRequest.mockImplementationOnce(async () => {
+        await during()
+        throw Object.assign(new Error('fetch failed'), { statusCode: 502 })
+      })
+
+      it('withholds the re-sealed cookie, and revokes it, when the session ended meanwhile', async () => {
+        vi.spyOn(console, 'error').mockImplementation(() => {})
+        sessionData = { access: expiredJwt(), refresh: 'r', sid: 'session-A' }
+        refreshOnce.mockResolvedValue({ pair: { access: 'new-tok', refresh: 'r2' }, retryable: false })
+        unreachable(() => markSessionEnded('session-A')) // a sign-in in another tab lands mid-request
+        const e = ev({ path: '/api/me' })
+
+        await expect(run(e)).rejects.toThrow('fetch failed')
+
+        expect(e.node.res.getHeader('set-cookie') ?? []).toEqual([])
+        expect(revokeDroppedSession).toHaveBeenCalledWith(e, { access: 'new-tok', refresh: 'r2' }, 'https://api/auth', '')
+      })
+
+      it('withholds the signed-out cookie a logout this request finished, when a sign-in replaced that session meanwhile', async () => {
+        vi.spyOn(console, 'error').mockImplementation(() => {})
+        h3note.value = '1'
+        const e = { ...ev({ path: '/api/me' }), context: { lukkEndedSession: { key: 'session-Y', marker: '__Host-lukk-signed-out' } } }
+        e.node.res.setHeader('set-cookie', ['__Host-lukk-signed-out=1; Max-Age=10; Path=/', '__Host-lukk-session=RESEALED; Path=/; HttpOnly', 'theme=dark; Path=/'])
+        unreachable(() => endSession('session-Y', { replaced: true }))
+
+        await expect(run(e)).rejects.toThrow('fetch failed')
+
+        expect(e.node.res.getHeader('set-cookie')).toEqual(['theme=dark; Path=/'])
+      })
+
+      it('leaves the queued cookies as they are when nothing changed', async () => {
+        vi.spyOn(console, 'error').mockImplementation(() => {})
+        const e = ev({ path: '/api/me' })
+        e.node.res.setHeader('set-cookie', ['theme=dark; Path=/'])
+        unreachable(() => {})
+
+        await expect(run(e)).rejects.toThrow('fetch failed')
+
+        expect(e.node.res.getHeader('set-cookie')).toEqual(['theme=dark; Path=/'])
+      })
+
+      it('does not settle the cookies twice when the body fails after the headers went out', async () => {
+        vi.spyOn(console, 'error').mockImplementation(() => {})
+        sessionData = { access: expiredJwt(), refresh: 'r', sid: 'session-B' }
+        refreshOnce.mockResolvedValue({ pair: { access: 'new-tok', refresh: 'r2' }, retryable: false })
+        const e = ev({ path: '/api/me' })
+        const original = proxyRequest.getMockImplementation()!
+        proxyRequest.mockImplementationOnce(async (...args) => {
+          await original(...args)
+          // The headers are out; the body breaks off. Touching them now is ERR_HTTP_HEADERS_SENT.
+          markSessionEnded('session-B')
+          e.node.res.setHeader.mockImplementation(() => { throw Object.assign(new Error('Cannot set headers after they are sent'), { code: 'ERR_HTTP_HEADERS_SENT' }) })
+          e.node.res.removeHeader.mockImplementation(() => { throw Object.assign(new Error('Cannot remove headers after they are sent'), { code: 'ERR_HTTP_HEADERS_SENT' }) })
+          throw new Error('body broke off')
+        })
+
+        await expect(run(e)).rejects.toThrow('body broke off')
+        expect(revokeDroppedSession).not.toHaveBeenCalled()
+      })
+    })
+
     it('is not re-sealed, nor its new token used, when it ended during the refresh', async () => {
       const stale = expiredJwt()
       sessionData = { access: stale, refresh: 'r', sid: 'session-A' }

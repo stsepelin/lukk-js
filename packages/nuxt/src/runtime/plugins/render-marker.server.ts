@@ -10,8 +10,9 @@ import { defineNuxtPlugin } from '#imports'
  * cookie went back to the render, never to the page, and the browser replayed the consumed token into a
  * revoke. Marked, the proxy passes the token on as it is; SSR hydration is the one place a render renews.
  *
- * Registered in BFF mode whatever `ssrHydrate` says: with hydration off, a render's app-API call on an
- * expired token now answers 401 rather than renewing, and the client renews after hydration.
+ * Registered in BFF mode whatever `ssrHydrate` says: with hydration off, `session-renew.server` renews an
+ * aged-out session before the render instead. A server ROUTE's `event.$fetch('/api/…')` is not a render and
+ * is not marked; one that needs the session reads it with `getLukkAccessToken`.
  */
 export default defineNuxtPlugin({
   name: 'lukk:render-marker',

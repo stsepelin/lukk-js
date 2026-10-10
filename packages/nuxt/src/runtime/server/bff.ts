@@ -2,7 +2,7 @@ import type { H3Event } from 'h3'
 import { isTokenPair } from 'lukk-core'
 import { defineEventHandler, deleteCookie, getCookie, getRequestHeader, readRawBody, setResponseHeader, setResponseStatus, useSession } from 'h3'
 import { useRuntimeConfig } from '#imports'
-import { LUKK_BFF_PREFIX, confirmationHeaderName, logoutCookieName, sessionCookieName, signedOutCookieName } from '../shared'
+import { LUKK_BFF_PREFIX, LUKK_SSR_HEADER, confirmationHeaderName, logoutCookieName, sessionCookieName, signedOutCookieName } from '../shared'
 import { fetchUpstream, isForeignOrigin, isForeignSubresource, rejectUnresolvedTarget, reportProxyFailure, resolveTarget, routeWithin, viaHeader, visitorIp } from './proxy-utils'
 import { endSession, newSessionId, sessionEnded, sessionKey, sessionReplaced, withholdSessionCookie } from './ended-sessions'
 import { revokeDroppedSession } from './revoke-dropped'
@@ -167,6 +167,13 @@ export default defineEventHandler(async (event) => {
   // one rotation burned per attempt, and still a 401. `restore()` on app load is exactly this call,
   // so in BFF mode it could never succeed, and two tabs reloading would replay a consumed token
   // past the grace window — the false family revoke this package exists to avoid.
+  // A page render's own request (`LUKK_SSR_HEADER` — Nuxt's SSR `useFetch` copies the page request's
+  // headers, the marker with them) never renews the session: the rotated cookie would go back to the
+  // render, never to the browser, which then replayed the consumed token into a revoke. Its 401 goes back as
+  // it came, as the app-API proxy's does. Not a logout's renewal: that one ends the session anyway, and is
+  // what lets lukk revoke it.
+  const inRender = getRequestHeader(event, LUKK_SSR_HEADER) === '1' && !endsSession
+
   if (route === '/refresh') {
     // POST only. A rotation changes state (RFC 9110 §9.2.1), so a GET to it is one a prefetcher, a
     // crawler or a same-origin `<img>` could trigger — spending the token on a response nobody reads.
@@ -178,7 +185,7 @@ export default defineEventHandler(async (event) => {
 
     // Read-only until we know there is something to rotate: opening the session would mint a
     // cookie for an anonymous caller.
-    if (!sealed.refresh) {
+    if (!sealed.refresh || inRender) {
       setResponseStatus(event, 401)
       return { message: 'Unauthenticated.' }
     }
@@ -230,7 +237,7 @@ export default defineEventHandler(async (event) => {
   // A refresh that failed without lukk rejecting the token (a throttle, an outage): the session is live.
   let stillRefreshable = false
 
-  if (upstream.res.status === 401 && sealed.refresh && !SIGN_IN_PATHS.has(route)) {
+  if (upstream.res.status === 401 && sealed.refresh && !inRender && !SIGN_IN_PATHS.has(route)) {
     const s = await session()
     // A session a sign-in replaced or a logout ended is neither rotated nor written — before the
     // refresh or after it — and the 401 goes back as it came. See the `/refresh` branch above.

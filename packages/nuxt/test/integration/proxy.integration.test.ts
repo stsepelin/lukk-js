@@ -184,6 +184,30 @@ describe('api-proxy integration (real h3 + upstream)', () => {
     }
   })
 
+  it('refuses lukk\'s routes through a PHP front controller — named in the path, in baseURL, or hiding what it encodes', async () => {
+    const cfg = __test.runtimeConfig.lukk as Record<string, unknown>
+    const baseURL = cfg.baseURL
+    received = { body: Buffer.alloc(0) }
+    try {
+      // Laravel without URL rewriting: lukk is reached at `/index.php/auth`, and so is the login through the proxy.
+      cfg.baseURL = `${cfg.apiTarget as string}/index.php/auth`
+      for (const path of ['/api/index.php/auth/login', '/api/auth/login']) {
+        const res = await fetch(`${proxyURL}${path}`, { method: 'POST', body: '{}' })
+        expect(res.status, path).toBe(404)
+      }
+      // A `.php` segment is never dropped with what it hides: an encoded separator, query, fragment or `..`.
+      cfg.baseURL = `${cfg.apiTarget as string}/auth`
+      for (const path of ['/api/index.php/auth/login', '/api/auth%2Flogin%3F.php', '/api/auth%2Flogin%23.php', '/api/auth%252Flogin%253F.php', '/api/x%2F..%2Fauth%2Flogin%3F.php', '/api/..%2Fx.php']) {
+        const res = await fetch(`${proxyURL}${path}`, { method: 'POST', body: '{}' })
+        expect(res.status, path).toBe(404)
+      }
+      expect(received.url).toBeUndefined() // nothing reached the upstream
+    }
+    finally {
+      cfg.baseURL = baseURL
+    }
+  })
+
   it('removes the headers it blanks — the browser\'s Origin and Cookie never reach the upstream, not even empty', async () => {
     const res = await fetch(`${proxyURL}/api/me`, { headers: { 'origin': proxyURL, 'cookie': 'tracking=1', 'x-forwarded-host': 'evil.test' } })
 

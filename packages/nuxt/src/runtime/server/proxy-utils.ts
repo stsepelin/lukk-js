@@ -98,14 +98,20 @@ export function routeWithin(target: string, base: string): string | null {
  * own host everything is refused; on another host nothing is (lukk bound to a separate domain).
  */
 export function reachesLukk(target: string, base: string): boolean {
-  // Read through any PHP front controller. Laravel served through one routes `/index.php/auth/login` exactly as
-  // `/auth/login` — Symfony strips the script name — so with `api.target` at the app's root that path
-  // streamed lukk's token pair out; under a sub-path the script sits further in (`/app/index.php/auth/…`).
-  // Every segment naming a `.php` script (decoded, as the server would) is read as such a controller: the
-  // path is judged without them.
-  const { origin, pathname } = new URL(target)
-  const withoutScripts = pathname.split('/').filter(segment => !/\.php$/i.test(decodeAscii(segment))).join('/')
-  return reaches(`${origin}${withoutScripts}`, base)
+  // Read through any PHP front controller as well. Laravel served through one routes `/index.php/auth/login`
+  // exactly as `/auth/login` — Symfony strips the script name — so with `api.target` at the app's root that
+  // path streamed lukk's token pair out; under a sub-path the script sits further in (`/app/index.php/auth/…`),
+  // and without URL rewriting `baseURL` names it too (`https://h/index.php/auth`). So both are judged again
+  // with every segment naming a `.php` script (decoded, as the server would) dropped. AS WELL AS, never
+  // instead of, as written: dropped whole, a segment takes what it hides with it — an encoded `/`, `?`, `#`
+  // or `..` (`/auth%2Flogin%3F.php`) that the checks on the path as written refuse.
+  return reaches(target, base) || reaches(withoutScripts(target), withoutScripts(base))
+}
+
+/** `url` with every path segment that names a `.php` script dropped. */
+function withoutScripts(url: string): string {
+  const { origin, pathname } = new URL(url)
+  return `${origin}${pathname.split('/').filter(segment => !/\.php$/i.test(decodeAscii(segment))).join('/')}`
 }
 
 /** `reachesLukk` for one reading of the path — the front controller aside. */

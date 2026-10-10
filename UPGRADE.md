@@ -215,14 +215,20 @@ replacing its hook, and keep authenticated calls on the API's origin.
 - **The app-API proxy refuses lukk's routes behind a PHP front controller** (`/api/index.php/auth/login`)
   with `404` — wherever the script sits, so a Laravel app under a sub-path (`api.target` at
   `https://host/app`, lukk at `/app/auth`) is covered at `/app/index.php/auth/login` too. Any path segment
-  ending in `.php` is read as a front controller. It cannot see lukk's extra guard mounts (`lukk.guards.*.path`, e.g. `admin/auth`) on the same
-  host: keep them off `api.target`'s host, or out of its reach.
+  ending in `.php` is read as a front controller, in the path and in `baseURL` alike (Laravel without URL
+  rewriting, `baseURL` at `https://host/index.php/auth`); the path is also judged as written, so such a
+  segment never hides an encoded `/`, `?`, `#` or `..`. It cannot see lukk's extra guard mounts
+  (`lukk.guards.*.path`, e.g. `admin/auth`) on the same host: keep them off `api.target`'s host, or out of
+  its reach.
 - **The app-API proxy no longer renews the session for a page render's own requests** — `useLukkFetch`,
   and Nuxt's own `useFetch('/api/…')`, `useRequestFetch()` and `event.$fetch` alike: the page request is
-  marked (`x-lukk-ssr`, set by a BFF server plugin; removed before a request reaches your API). SSR
-  hydration renews it, and only its cookie reaches the page. With `ssrHydrate: false`, an SSR app-API call
-  on an expired access token now answers `401` during the render instead of renewing; the client renews
-  after hydration.
+  marked (`x-lukk-ssr`, set by a BFF server plugin; removed before a request reaches your API). The BFF
+  auth proxy (`/api/_lukk/*`) honours it too: a marked request's `401` goes back as it came, and a marked
+  `/refresh` answers `401` without rotating (a logout still renews, to revoke). The session is renewed once,
+  before the render — by SSR hydration, or with `ssrHydrate: false` by a renew-only step that loads no
+  user — and its cookie leaves with the page. Requests a server ROUTE makes (`event.$fetch('/api/…')`
+  from `server/api/*`) are not a render and are not marked: one that needs the session should read it
+  with `getLukkAccessToken` rather than proxy through `/api`.
 - **A rotation's straggler window starts when its cookie leaves**, not when it landed — see the refresh entry.
 - **Packaging**: `refreshOnce` is no longer auto-imported into your server code; `h3` is a declared
   dependency; `LUKK_BFF_PREFIX` and `LUKK_SESSION_COOKIE` import as values again.
