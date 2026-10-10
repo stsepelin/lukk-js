@@ -197,7 +197,7 @@ describe('api-proxy integration (real h3 + upstream)', () => {
       }
       // A `.php` segment is never dropped with what it hides: an encoded separator, query, fragment or `..`.
       cfg.baseURL = `${cfg.apiTarget as string}/auth`
-      for (const path of ['/api/index.php/auth/login', '/api/auth%2Flogin%3F.php', '/api/auth%2Flogin%23.php', '/api/auth%252Flogin%253F.php', '/api/x%2F..%2Fauth%2Flogin%3F.php', '/api/..%2Fx.php']) {
+      for (const path of ['/api/index.php/auth/login', '/api/auth%2Flogin%3F.php', '/api/auth%2Flogin%23.php', '/api/auth%252Flogin%253F.php', '/api/x%2F..%2Fauth%2Flogin%3F.php', '/api/..%2Fx.php', '/api/index.php%2Fauth/login', '/api/index%252ephp/auth/login', '/api/index.php%252Fauth/login']) {
         const res = await fetch(`${proxyURL}${path}`, { method: 'POST', body: '{}' })
         expect(res.status, path).toBe(404)
       }

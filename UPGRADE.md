@@ -226,7 +226,10 @@ replacing its hook, and keep authenticated calls on the API's origin.
   auth proxy (`/api/_lukk/*`) honours it too: a marked request's `401` goes back as it came, and a marked
   `/refresh` answers `401` without rotating (a logout still renews, to revoke). The session is renewed once,
   before the render — by SSR hydration, or with `ssrHydrate: false` by a renew-only step that loads no
-  user — and its cookie leaves with the page. Requests a server ROUTE makes (`event.$fetch('/api/…')`
+  user (and marks the render `no-store`) — and its cookie leaves with the page. With `ssrHydrate: false` a
+  page load after the access token aged out therefore rotates twice — the server's renewal, then the
+  client's own restore — and both count against lukk's per-IP refresh throttle
+  (`lukk.rate_limits.refresh`, 30 a minute by default). Requests a server ROUTE makes (`event.$fetch('/api/…')`
   from `server/api/*`) are not a render and are not marked: one that needs the session should read it
   with `getLukkAccessToken` rather than proxy through `/api`.
 - **A rotation's straggler window starts when its cookie leaves**, not when it landed — see the refresh entry.

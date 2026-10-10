@@ -98,14 +98,29 @@ export function routeWithin(target: string, base: string): string | null {
  * own host everything is refused; on another host nothing is (lukk bound to a separate domain).
  */
 export function reachesLukk(target: string, base: string): boolean {
+  if (reaches(target, base)) return true
   // Read through any PHP front controller as well. Laravel served through one routes `/index.php/auth/login`
   // exactly as `/auth/login` — Symfony strips the script name — so with `api.target` at the app's root that
   // path streamed lukk's token pair out; under a sub-path the script sits further in (`/app/index.php/auth/…`),
   // and without URL rewriting `baseURL` names it too (`https://h/index.php/auth`). So both are judged again
-  // with every segment naming a `.php` script (decoded, as the server would) dropped. AS WELL AS, never
-  // instead of, as written: dropped whole, a segment takes what it hides with it — an encoded `/`, `?`, `#`
-  // or `..` (`/auth%2Flogin%3F.php`) that the checks on the path as written refuse.
-  return reaches(target, base) || reaches(withoutScripts(target), withoutScripts(base))
+  // with every segment naming a `.php` script dropped — AS WELL AS, never instead of, as written above:
+  // dropped whole, a segment takes what it hides with it (`/auth%2Flogin%3F.php`).
+  //
+  // On every round of decoding, as `reaches` judges the path itself: a hop that decodes once more turns
+  // `/index.php%2Fauth/login` into `/index.php/auth/login` and `/index%252ephp/…` into `/index%2ephp/…`,
+  // which Symfony reads as the script. So each round's string is split on `/` and `\` (as a decoding hop
+  // treats them alike), its scripts dropped, and the rest judged — a `?` or `#` it decoded kept encoded,
+  // so that `reaches` reads it both ways.
+  const lukk = withoutScripts(base)
+  const { origin, pathname } = new URL(target)
+  let path = pathname
+  // Stryker disable next-line EqualityOperator: equivalent — a script only a fifth decoding reveals sits in a path still decoding after four rounds, which `reaches` refuses above, as written. (`round--` never ends: that timeout is a synchronous loop, the detection.)
+  for (let round = 0; round < DECODING_ROUNDS; round++) {
+    const rest = path.split(/[/\\]/).filter(segment => !/\.php$/i.test(segment)).join('/').replace(/[?#]/g, encodeURIComponent)
+    if (reaches(`${origin}${rest}`, lukk)) return true
+    path = decodeAscii(path)
+  }
+  return false
 }
 
 /** `url` with every path segment that names a `.php` script dropped. */

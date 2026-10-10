@@ -112,7 +112,7 @@ describe('reachesLukk', () => {
     expect(reachesLukk('https://api.test/authors', 'https://api.test/auth')).toBe(false)
   })
 
-  it.each(['/index.php/auth/login', '/INDEX.PHP/auth/refresh', '/app.php/auth', '/index%2Ephp/auth/login', '/index.php/index.php/auth/login'])('sees through a PHP front controller: %s reaches lukk', (path) => {
+  it.each(['/index.php/auth/login', '/INDEX.PHP/auth/refresh', '/app.php/auth', '/index%2Ephp/auth/login', '/index.php/index.php/auth/login', '/index.php%2Fauth/login', '/index%252ephp/auth/login', '/index.php%252Fauth/login', '/index.php%5cauth/login', '/index.php%255Cauth/login'])('sees through a PHP front controller: %s reaches lukk', (path) => {
     // Laravel served through its front controller routes `/index.php/auth/login` exactly as `/auth/login`
     // (Symfony strips the script name), so with `api.target` at the app root it streamed the token pair out.
     expect(reachesLukk(`https://api.test${path}`, 'https://api.test/auth')).toBe(true)
@@ -159,6 +159,8 @@ describe('reachesLukk', () => {
     expect(reachesLukk('https://api.test/files/report.php', 'https://api.test/auth')).toBe(false)
     expect(reachesLukk('https://api.test/index.php', 'https://api.test/auth')).toBe(false)
     expect(reachesLukk('https://api.test/index.phpx/auth/login', 'https://api.test/auth')).toBe(false) // not a .php script
+    expect(reachesLukk('https://api.test/auth/login', 'https://api.test/app.phpx/auth')).toBe(false) // nor in baseURL
+    expect(reachesLukk('https://api.test/index%25252ephp/auth/login', 'https://api.test/auth')).toBe(true) // three decodings deep
   })
 
   it('decides a root base on the origin', () => {

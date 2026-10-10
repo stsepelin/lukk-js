@@ -100,7 +100,10 @@ export interface ModuleOptions {
    * logged-in on the first paint (no logged-out→logged-in flash, no `<ClientOnly>`). The
    * server reads the sealed session and seeds the user resource into the SSR payload — the
    * token itself never leaves the server, and the render is marked `no-store`. Set `false`
-   * to keep the pre-0.4 client-only behavior. No effect in `direct` mode (no server session).
+   * to have the client resolve the user instead: the server still renews an aged-out session
+   * before the render — so the render's own app-API calls carry a live token — without loading
+   * the user, and still marks a render carrying a session `no-store`. No effect in `direct`
+   * mode (no server session).
    * @default true
    */
   ssrHydrate: boolean
