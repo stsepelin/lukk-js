@@ -1,13 +1,14 @@
 import { isSameOrigin } from 'lukk-core'
 import { type $Fetch, ofetch } from 'ofetch'
-import { underAppBase } from '../shared'
-import { navigateTo, useNuxtApp, useRequestFetch, useRequestHeaders, useRequestURL, useRuntimeConfig, useState } from '#imports'
-import { ACCESS_KEY } from '../keys'
+import { confirmationHeaderName, underAppBase } from '../shared'
+import { navigateTo, useNuxtApp, useRequestFetch, useRequestHeaders, useRequestURL, useRuntimeConfig } from '#imports'
+import { useLukkSecret } from '../utils/secrets'
 import { createLukkFetch, createRequestFetch, type LukkFetchDeps, type RequestFetch } from '../utils/create-lukk-fetch'
 
 interface PublicLukk {
   mode: 'bff' | 'direct'
   apiBaseURL: string
+  confirmationHeader?: string
 }
 
 /**
@@ -26,8 +27,8 @@ interface PublicLukk {
  */
 export function useLukkFetch(): $Fetch {
   const cfg = useRuntimeConfig().public.lukk as PublicLukk
-  // Stryker disable next-line ArrowFunction: equivalent — the bearer is attached only when truthy, so undefined and null read alike.
-  const access = useState<string | null>(ACCESS_KEY, () => null)
+  const access = useLukkSecret('access')
+  const confirmation = useLukkSecret('confirmation')
   const nuxtApp = useNuxtApp() as { $lukkRefresh?: () => Promise<unknown> }
   const isDirect = cfg.mode === 'direct'
   // Capture the request cookie eagerly, in valid Nuxt context — reading it lazily inside
@@ -53,6 +54,9 @@ export function useLukkFetch(): $Fetch {
     getCookieHeader: () => cookie,
     origin: requestOrigin(),
     getBearer: () => (isDirect ? access.value : null),
+    // Direct mode holds the step-up token itself; BFF's proxy injects the sealed one.
+    getConfirmation: () => (isDirect ? confirmation.value : null),
+    confirmationHeader: confirmationHeaderName(cfg.confirmationHeader),
     refresh: () => nuxtApp.$lukkRefresh?.() ?? Promise.resolve(null),
     // `external: true` opts out of Nuxt's absolute-URL block, so contain it ourselves: only follow
     // a redirect that stays on the API's own origin. Unreachable today (the browser sees an opaque

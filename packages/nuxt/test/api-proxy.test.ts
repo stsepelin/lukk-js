@@ -584,6 +584,19 @@ describe('app-API proxy', () => {
     expect(revokeDroppedSession).not.toHaveBeenCalled()
   })
 
+  it('never rotates for a page render\'s own in-process request — its cookie would never reach the browser', async () => {
+    // A render's useLukkFetch reaches this proxy in-process; the Set-Cookie of a rotation here goes back to
+    // that in-process caller, not to the page. The browser kept T0 and replayed it 30 s later: revoked. SSR
+    // hydration is the one place a render renews the session; here the token goes on as it is.
+    sessionData = { access: expiredJwt(), refresh: 'r' }
+    const e = ev({ path: '/api/me', headers: { 'x-lukk-ssr': '1' } })
+    await run(e)
+    expect(refreshOnce).not.toHaveBeenCalled()
+    const headers = (proxyRequest.mock.calls[0] as unknown[])[2] as { headers: Record<string, string> }
+    expect(headers.headers.authorization).toBe(`Bearer ${sessionData.access}`)
+    expect(headers.headers['x-lukk-ssr']).toBe('') // the marker is ours, and goes no further
+  })
+
   it('opens the read-write session under the hardened cookie options the re-seal writes back', async () => {
     // The rotate re-seals, which means h3 writes the cookie again from exactly these options — drop
     // one and the renewed session lands as a weaker cookie than the one it replaced. `sessionHeader:

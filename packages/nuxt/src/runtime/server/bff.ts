@@ -207,16 +207,21 @@ export default defineEventHandler(async (event) => {
       return { message: 'Unauthenticated.' }
     }
 
-    await s.update(pair)
+    // The newest pair — the session may have rotated this one during the checks above (a shared store's
+    // answer is real I/O) — or, should it have moved past it altogether, none: the browser holds the newer.
+    const newest = currentPair(sessionKey(s), pair)
+    if (!newest) return replaced()
+    await s.update(newest)
     warnIfSessionTooLarge(s)
     if (await sessionEnded(sessionKey(s))) {
       withholdSessionCookie(event.node.res, sessionName)
-      revokeDroppedSession(event, pair, baseURL, clientIp)
+      revokeDroppedSession(event, newest, baseURL, clientIp)
       return replaced()
     }
 
-    // The same shape the proxied token-pair capture returns — the browser never sees a token.
-    return { ok: true, expires_in: expiresIn }
+    // The same shape the proxied token-pair capture returns — the browser never sees a token. Its lifetime
+    // is known for the pair this request rotated; a newer one's is not, and is left out.
+    return { ok: true, expires_in: newest === pair ? expiresIn : undefined }
   }
 
   let upstream = await callLukk(sealed.access)
@@ -224,11 +229,6 @@ export default defineEventHandler(async (event) => {
   let resealedTokens: TokenSession | undefined
   // A refresh that failed without lukk rejecting the token (a throttle, an outage): the session is live.
   let stillRefreshable = false
-  // The session moved past the pair this request renewed with while it was out: nothing may be sealed from
-  // here — `s` still holds the arriving tokens, a refresh token already spent. A backstop: the retried call
-  // is bounded by the 15 s upstream deadline and a link lasts at least 30 s, so only a journal overflowing
-  // within that time (REFRESH_JOURNAL_MAX_LINKS rotations) gets here.
-  let stale = false
 
   if (upstream.res.status === 401 && sealed.refresh && !SIGN_IN_PATHS.has(route)) {
     const s = await session()
@@ -251,15 +251,14 @@ export default defineEventHandler(async (event) => {
           if (!(await ended())) {
             // The newest pair, not necessarily the one handed out before the call: the session may have
             // rotated it meanwhile, and sealing a spent token over the newer cookie invites a revoke. None
-            // at all when the session has moved past it: the browser keeps the newer cookie it holds.
+            // at all when the session has moved past it: the browser keeps the newer cookie it holds. (A
+            // backstop here: the call is bounded by the 15 s upstream deadline, and a link lasts at least
+            // 30 s once delivered — only a journal overflowing meanwhile gets that far.)
             const newest = currentPair(sessionKey(s), pair)
             if (newest) {
               await s.update(newest)
               warnIfSessionTooLarge(s)
               resealedTokens = newest
-            }
-            else {
-              stale = true
             }
           }
           // The logout is about to revoke it itself.
@@ -342,14 +341,18 @@ export default defineEventHandler(async (event) => {
       setResponseStatus(event, 409)
       return { message: 'The session was replaced.' }
     }
-    // Nor over a pair gone stale (see `stale`): the browser holds the newer cookie. Nothing retries a 409 on a
-    // step-up, so the user is asked to confirm again — and that confirmation is earned on the newer cookie.
-    // Only the status is read by the client; the message is for the user.
-    if (stale) {
+    // And the update re-seals the session's tokens as they arrived — which the session may have rotated
+    // while the step-up was out (a sibling request, another tab). Recorded onto the newest pair instead; and
+    // not at all over a pair the session has moved past, whose cookie would land over the newer one. Nothing
+    // retries a 409 on a step-up, so the user is asked to confirm again — and that confirmation is earned on
+    // the newer cookie. Only the status is read by the client; the message is for the user.
+    const arrived = { access: s.data.access, refresh: s.data.refresh }
+    const newest = arrived.refresh ? currentPair(sessionKey(s), arrived) : arrived
+    if (!newest) {
       setResponseStatus(event, 409)
       return { message: 'Your session was renewed meanwhile. Please confirm again.' }
     }
-    await s.update({ confirmation: data.confirmation_token })
+    await s.update(newest === arrived ? { confirmation: data.confirmation_token } : { ...newest, confirmation: data.confirmation_token })
     warnIfSessionTooLarge(s)
     return { ok: true }
   }

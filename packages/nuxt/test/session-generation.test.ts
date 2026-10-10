@@ -1,7 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ACCESS_KEY, CHALLENGE_KEY, RESTORE_FAILED_KEY, USER_KEY } from '../src/runtime/keys'
+import { RESTORE_FAILED_KEY, USER_KEY } from '../src/runtime/keys'
 import { REFRESH_SETTLE_TIMEOUT, restoreState } from '../src/runtime/utils/restore-state'
 import { __test, useState } from './mocks/imports'
+
+import clientPlugin from '../src/runtime/plugins/client'
+
+import { useLukkAuth } from '../src/runtime/composables/useLukkAuth'
+
+import { useLukkPasskeys } from '../src/runtime/composables/useLukkPasskeys'
+import { useLukkSecret } from '../src/runtime/utils/secrets'
 
 // The REAL client plugin and the REAL composables, with only the wire stubbed: the races below live in
 // the handover between the plugin's refresh single-flight and the composable's session state, and a
@@ -26,13 +33,6 @@ vi.mock('lukk-core', async importActual => ({
 const { api } = vi.hoisted(() => ({ api: vi.fn() }))
 vi.mock('../src/runtime/composables/useLukkFetch', () => ({ useLukkFetch: () => api }))
 
-// eslint-disable-next-line import/first
-import clientPlugin from '../src/runtime/plugins/client'
-// eslint-disable-next-line import/first
-import { useLukkAuth } from '../src/runtime/composables/useLukkAuth'
-// eslint-disable-next-line import/first
-import { useLukkPasskeys } from '../src/runtime/composables/useLukkPasskeys'
-
 function deferred<T>() {
   let resolve!: (value: T) => void
   let reject!: (error: unknown) => void
@@ -42,7 +42,7 @@ function deferred<T>() {
 
 const pairFor = (account: string) => ({ access_token: account, expires_in: 900 })
 const macrotask = () => new Promise(resolve => setTimeout(resolve, 0))
-const access = () => useState<string | null>(ACCESS_KEY, () => null).value
+const access = () => useLukkSecret('access').value
 const rawRestoreFailed = () => useState<boolean>(RESTORE_FAILED_KEY, () => false).value
 
 /** A sign-in endpoint that, like lukk-core's `commit`, persists the pair it issued before resolving. */
@@ -214,11 +214,11 @@ describe('a sign-in during an in-flight restore', () => {
   it.each([
     ['register', (auth: ReturnType<typeof useLukkAuth>) => auth.register({ email: 'b', password: 'p', password_confirmation: 'p' })],
     ['a two-factor challenge', async (auth: ReturnType<typeof useLukkAuth>) => {
-      useState<string | null>(CHALLENGE_KEY, () => null).value = 'challenge'
+      useLukkSecret('challenge').value = 'challenge'
       await auth.verifyTwoFactor('123456')
     }],
     ['a recovery code', async (auth: ReturnType<typeof useLukkAuth>) => {
-      useState<string | null>(CHALLENGE_KEY, () => null).value = 'challenge'
+      useLukkSecret('challenge').value = 'challenge'
       await auth.verifyRecoveryCode('code')
     }],
     ['a passkey', async () => {
@@ -632,6 +632,16 @@ describe('a sign-in or logout in another tab', () => {
     expect(restoreState(__test.nuxtApp).epoch).toBeGreaterThan(before)
   })
 
+  it('drops a 2FA challenge pending here when another tab changes the session', async () => {
+    // Redeemed after the other tab signed in, it would replace that tab's session with this attempt's.
+    boot()
+    useLukkSecret('challenge').value = 'pending-here'
+
+    await otherTabSays()
+
+    expect(useLukkSecret('challenge').value).toBeNull()
+  })
+
   it('announces a sign-in and a logout to other tabs', async () => {
     userEndpoint()
     boot()
@@ -702,7 +712,7 @@ describe('a sign-in or logout in another tab', () => {
     boot()
     const auth = useLukkAuth()
     auth.user.value = { id: 'A' }
-    useState<string | null>(ACCESS_KEY, () => null).value = 'A'
+    useLukkSecret('access').value = 'A'
 
     await otherTabSays()
 
@@ -713,7 +723,7 @@ describe('a sign-in or logout in another tab', () => {
   it('direct: signs out when the other tab logged out, but keeps the user when it could not tell', async () => {
     boot()
     const auth = useLukkAuth()
-    useState<string | null>(ACCESS_KEY, () => null).value = 'A'
+    useLukkSecret('access').value = 'A'
 
     auth.user.value = { id: 'A' }
     wire.client.refreshTokens!.mockRejectedValueOnce({ status: 503 })
@@ -763,7 +773,7 @@ describe('a sign-in or logout in another tab', () => {
     userEndpoint({ A: slowA.promise })
     boot('bff')
     const auth = useLukkAuth()
-    useState<string | null>(ACCESS_KEY, () => null).value = 'A'
+    useLukkSecret('access').value = 'A'
     api.mockImplementationOnce(async () => { await slowA.promise; return { id: 'A' } })
 
     const loading = auth.fetchUser()
@@ -938,7 +948,7 @@ describe('claiming the session a sign-in issued', () => {
     ['a password login', (auth: ReturnType<typeof useLukkAuth>) => auth.login({ email: 'b', password: 'p' })],
     ['a registration', (auth: ReturnType<typeof useLukkAuth>) => auth.register({ email: 'b', password: 'p', password_confirmation: 'p' })],
     ['a two-factor challenge', async (auth: ReturnType<typeof useLukkAuth>) => {
-      useState<string | null>(CHALLENGE_KEY, () => null).value = 'challenge'
+      useLukkSecret('challenge').value = 'challenge'
       await auth.verifyTwoFactor('123456')
     }],
     ['a passkey login', async () => {
@@ -1064,7 +1074,7 @@ describe('after clearNuxtState()', () => {
     boot()
     const auth = useLukkAuth()
     useState(USER_KEY, () => null).value = undefined
-    useState(CHALLENGE_KEY, () => null).value = undefined
+    useLukkSecret('challenge').value = undefined
     useState(RESTORE_FAILED_KEY, () => false).value = undefined
 
     expect(auth.loggedIn.value).toBe(false)
@@ -1138,7 +1148,7 @@ describe('a logout while a sign-in is on the wire', () => {
     ['a password login', (auth: ReturnType<typeof useLukkAuth>) => auth.login({ email: 'b', password: 'p' }), 'login'],
     ['a registration', (auth: ReturnType<typeof useLukkAuth>) => auth.register({ email: 'b', password: 'p', password_confirmation: 'p' }), 'register'],
     ['a two-factor challenge', (auth: ReturnType<typeof useLukkAuth>) => {
-      useState<string | null>(CHALLENGE_KEY, () => null).value = 'challenge'
+      useLukkSecret('challenge').value = 'challenge'
       return auth.verifyTwoFactor('123456')
     }, 'twoFactorChallenge'],
     ['a passkey login', () => {
@@ -1248,7 +1258,7 @@ describe('a logout while a sign-in is on the wire', () => {
 
     await useLukkPasskeys().login()
 
-    expect(useState<string | null>(CHALLENGE_KEY).value).toBe('c')
+    expect(useLukkSecret('challenge').value).toBe('c')
   })
 
   it('does not end a session that a registration never issued', async () => {

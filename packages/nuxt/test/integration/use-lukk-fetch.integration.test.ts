@@ -32,6 +32,8 @@ function ssrFetch(baseURL: string) {
     canRefresh: false,
     getCookieHeader: () => '__Host-lukk-session=sealed',
     getBearer: () => null,
+    getConfirmation: () => null,
+    confirmationHeader: 'X-Lukk-Confirmation',
     refresh: async () => null,
     onRedirect: () => {},
     fetchImpl: ofetch,

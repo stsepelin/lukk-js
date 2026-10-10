@@ -112,6 +112,19 @@ describe('reachesLukk', () => {
     expect(reachesLukk('https://api.test/authors', 'https://api.test/auth')).toBe(false)
   })
 
+  it.each(['/index.php/auth/login', '/INDEX.PHP/auth/refresh', '/app.php/auth', '/index%2Ephp/auth/login', '/index.php/index.php/auth/login'])('sees through a PHP front controller: %s reaches lukk', (path) => {
+    // Laravel served through its front controller routes `/index.php/auth/login` exactly as `/auth/login`
+    // (Symfony strips the script name), so with `api.target` at the app root it streamed the token pair out.
+    expect(reachesLukk(`https://api.test${path}`, 'https://api.test/auth')).toBe(true)
+  })
+
+  it('lets an app\'s own routes behind a front controller, and .php names elsewhere, through', () => {
+    expect(reachesLukk('https://api.test/index.php/users', 'https://api.test/auth')).toBe(false)
+    expect(reachesLukk('https://api.test/files/report.php', 'https://api.test/auth')).toBe(false)
+    expect(reachesLukk('https://api.test/index.php', 'https://api.test/auth')).toBe(false)
+    expect(reachesLukk('https://api.test/index.phpx/auth/login', 'https://api.test/auth')).toBe(false) // not a .php script
+  })
+
   it('decides a root base on the origin', () => {
     expect(reachesLukk('https://api.test/users', 'https://api.test')).toBe(true)
     expect(reachesLukk('https://API.test/users', 'https://api.test/')).toBe(true)
@@ -219,9 +232,12 @@ describe('rejectUnresolvedTarget', () => {
     // The regression this guards: a bad baseURL used to answer "Invalid path.", sending operators
     // hunting a route mismatch. The body now points at config — without echoing the value.
     expect(body.message).toContain('Proxy target could not be resolved')
+    expect(body.message).toContain('check the `baseURL` configuration')
     expect(body.message).not.toContain('undefined/auth')
     expect(error).toHaveBeenCalledOnce()
     expect(String(error.mock.calls[0]![0])).toContain('undefined/auth')
+    // Named by the setting at fault: the app-API proxy reports its own.
+    expect(rejectUnresolvedTarget(ev(), 'undefined/api', 'lukk `api.target`', '/x').message).toContain('check the lukk `api.target` configuration')
   })
 
   it('logs a broken base once per value, not once per request', () => {

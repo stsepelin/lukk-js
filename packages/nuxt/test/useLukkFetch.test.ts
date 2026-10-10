@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { __test, useState } from './mocks/imports'
-import { ACCESS_KEY } from '../src/runtime/keys'
+import { __test } from './mocks/imports'
+
 import { createLukkFetch } from '../src/runtime/utils/create-lukk-fetch'
 import { useLukkFetch } from '../src/runtime/composables/useLukkFetch'
+import { useLukkSecret } from '../src/runtime/utils/secrets'
 
 // The factory is unit-tested separately; here we only assert the composable wires
 // the right transport-aware deps from config + state. Keep the real `resolveServerBase`.
@@ -32,6 +33,17 @@ describe('useLukkFetch', () => {
     expect(d.canRefresh).toBe(false)
     expect(d.getBearer()).toBeNull()
     expect(d.getCookieHeader()).toBeUndefined() // client (import.meta.server=false)
+    // The proxy injects the sealed step-up token; the browser holds none to send.
+    useLukkSecret('confirmation').value = 'never-here'
+    expect(d.getConfirmation()).toBeNull()
+  })
+
+  it('direct: sends the step-up token it holds, under the configured header', () => {
+    __test.runtimeConfig.public.lukk = { mode: 'direct', apiBaseURL: 'https://api.test', confirmationHeader: 'X-Step-Up' }
+    useLukkSecret('confirmation').value = 'held'
+    useLukkFetch()
+    expect(deps().getConfirmation()).toBe('held')
+    expect(deps().confirmationHeader).toBe('X-Step-Up')
   })
 
   it('BFF: the app-API base sits under the app\'s own base path', () => {
@@ -73,7 +85,7 @@ describe('useLukkFetch', () => {
 
   it('direct: canRefresh on the client, bearer from the access state', () => {
     __test.runtimeConfig.public.lukk = { mode: 'direct', apiBaseURL: 'https://api.example.com' }
-    useState<string | null>(ACCESS_KEY, () => null).value = 'tok'
+    useLukkSecret('access').value = 'tok'
     useLukkFetch()
     const d = deps()
     expect(d.baseURL).toBe('https://api.example.com')

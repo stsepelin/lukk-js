@@ -149,7 +149,7 @@ export function createLukkClient(hooks: LukkClientHooks) {
     register: (input: RegisterInput) => request<RegisterResult>('/register', json(input), false).then(commit),
     login: (c: LoginInput) => request<LoginResult>('/login', json(c), false).then(commit),
     twoFactorChallenge: (i: TwoFactorInput) => request<TokenPair>('/two-factor-challenge', json(i), false).then(commit),
-    /** Direct mode passes the refresh token; cookie/BFF mode relies on the cookie. */
+    /** Body mode passes the refresh token; cookie mode (including lukk-nuxt's direct mode) omits it and relies on lukk's cookie. */
     refreshTokens: (refresh_token?: string) => request<TokenPair>('/refresh', json(refresh_token ? { refresh_token } : {}), false),
     /** Silently restore a session on app load (returns null when there's no valid refresh). */
     restore: () => request<TokenPair>('/refresh', json({}), false).then(commit).catch(() => null as TokenPair | null),
@@ -354,8 +354,15 @@ async function toLukkError(res: Response): Promise<LukkError> {
   try { body = JSON.parse(await res.text()) }
   catch { /* non-JSON error body */ }
   const error = lukkError(res.status, res.statusText, body)
-  // Delay-seconds only (RFC 9110 §10.2.3); the HTTP-date form is left out rather than guessed at.
-  const retryAfter = res.headers.get('retry-after')
-  if (retryAfter && /^\d+$/.test(retryAfter)) error.retryAfter = Number(retryAfter)
+  const retryAfter = retryAfterSeconds(res.headers.get('retry-after'))
+  if (retryAfter !== undefined) error.retryAfter = retryAfter
   return error
+}
+
+/**
+ * A `Retry-After` header's delay-seconds (RFC 9110 §10.2.3), or undefined — the HTTP-date form is left out
+ * rather than guessed at. Exported so lukk-nuxt's app-API errors carry it the same way.
+ */
+export function retryAfterSeconds(value: string | null): number | undefined {
+  return value && /^\d+$/.test(value) ? Number(value) : undefined
 }

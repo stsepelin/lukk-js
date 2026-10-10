@@ -1,8 +1,13 @@
 import { REFRESHED_WITHOUT_TOKEN } from 'lukk-core'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ACCESS_KEY, READY_KEY } from '../src/runtime/keys'
+import { READY_KEY } from '../src/runtime/keys'
 import { restoreState } from '../src/runtime/utils/restore-state'
-import { __test, useState } from './mocks/imports'
+import { __test, ssrPayload, useState } from './mocks/imports'
+
+import clientPlugin, { REPLACED_SESSION_RETRY_DELAY_MS } from '../src/runtime/plugins/client'
+
+import sessionPlugin from '../src/runtime/plugins/session.client'
+import { useLukkSecret } from '../src/runtime/utils/secrets'
 
 const captured: {
   hooks?: Record<string, (...a: unknown[]) => unknown>
@@ -25,11 +30,6 @@ const user: { value: { abilities?: string[] } | null } = { value: null }
 const restoreFailed = { value: false }
 vi.mock('../src/runtime/composables/useLukkAuth', () => ({ useLukkAuth: () => ({ initSession, loggedIn, fetchUser, user, logout, restoreFailed }) }))
 
-// eslint-disable-next-line import/first
-import clientPlugin, { REPLACED_SESSION_RETRY_DELAY_MS } from '../src/runtime/plugins/client'
-// eslint-disable-next-line import/first
-import sessionPlugin from '../src/runtime/plugins/session.client'
-
 afterEach(() => { __test.reset(); captured.hooks = undefined; loggedIn.value = false; restoreFailed.value = false; user.value = null; vi.clearAllMocks(); vi.useRealTimers() })
 
 describe('client plugin', () => {
@@ -42,11 +42,22 @@ describe('client plugin', () => {
     expect(h.baseURL).toBe('https://api/auth')
     expect(await h.getAccessToken()).toBeNull()
     expect(await h.getConfirmationToken()).toBeNull()
+    useLukkSecret('confirmation').value = 'held'
+    expect(await h.getConfirmationToken()).toBe('held') // the very token useLukkConfirmation records
     await h.onTokens({ access_token: 'a', expires_in: 900 })
     expect(await h.getAccessToken()).toBe('a')
     h.onUnauthenticated()
     expect(await h.getAccessToken()).toBeNull()
     expect(await h.refresh()).toEqual({ access_token: 'fresh', expires_in: 900 })
+  })
+
+  it('holds the direct-mode access token off the payload a reload persists', async () => {
+    __test.runtimeConfig.public.lukk = { mode: 'direct', baseURL: 'https://api/auth', confirmationHeader: 'X-Lukk-Confirmation' }
+    ;(clientPlugin as unknown as () => unknown)()
+    await captured.hooks!.onTokens({ access_token: 'ACCESS-SECRET', expires_in: 900 })
+
+    expect(await captured.hooks!.getAccessToken()).toBe('ACCESS-SECRET')
+    expect(JSON.stringify(ssrPayload())).not.toContain('ACCESS-SECRET')
   })
 
   it('targets the local proxy in bff mode', () => {
@@ -97,7 +108,7 @@ describe('client plugin', () => {
     // Even a pair: the browser never holds a token in BFF mode.
     captured.client!.refreshTokens.mockResolvedValueOnce({ access_token: 'leaked', expires_in: 900 })
     expect(await provide.lukkRefresh()).toBe(REFRESHED_WITHOUT_TOKEN)
-    expect(useState(ACCESS_KEY, () => null).value).toBeNull()
+    expect(useLukkSecret('access').value).toBeNull()
   })
 
   it('reloads the user when the BFF refuses to renew a session another tab replaced', async () => {
@@ -378,7 +389,7 @@ describe('session.client plugin — a logout the previous page never finished', 
     const jwt = (claims: object) => `h.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.s`
     const restoresAs = (fid: string | undefined) => initSession.mockImplementationOnce(async () => {
       loggedIn.value = fid !== undefined
-      useState<string | null>(ACCESS_KEY, () => null).value = fid === undefined ? null : jwt({ sub: 1, fid })
+      useLukkSecret('access').value = fid === undefined ? null : jwt({ sub: 1, fid })
     })
     afterEach(() => { vi.unstubAllGlobals(); store.clear() })
 
@@ -416,7 +427,7 @@ describe('session.client plugin — a logout the previous page never finished', 
       // `loadUser` skips without an endpoint, so `loggedIn` stays false even though the restore rotated
       // and produced a token for exactly the session the note names.
       initSession.mockImplementationOnce(async () => {
-        useState<string | null>(ACCESS_KEY, () => null).value = `h.${Buffer.from(JSON.stringify({ sub: 1, fid: 'F1' })).toString('base64url')}.s`
+        useLukkSecret('access').value = `h.${Buffer.from(JSON.stringify({ sub: 1, fid: 'F1' })).toString('base64url')}.s`
       })
 
       await run()

@@ -2,14 +2,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { nextTick } from 'vue'
 import { READY_KEY, RESTORE_FAILED_KEY } from '../src/runtime/keys'
 import { restoreState } from '../src/runtime/utils/restore-state'
-import { __test, useState } from './mocks/imports'
+import { __test, ssrPayload, useState } from './mocks/imports'
+
+import { useLukkAuth } from '../src/runtime/composables/useLukkAuth'
+import { useLukkSecret } from '../src/runtime/utils/secrets'
 
 // fetchUser goes through useLukkFetch — mock it with a controllable fake.
 const { api } = vi.hoisted(() => ({ api: vi.fn() }))
 vi.mock('../src/runtime/composables/useLukkFetch', () => ({ useLukkFetch: () => api }))
-
-// eslint-disable-next-line import/first
-import { useLukkAuth } from '../src/runtime/composables/useLukkAuth'
 
 type Restore = () => Promise<{ pair: unknown, unavailable: boolean }>
 const signedOut: Restore = () => Promise.resolve({ pair: null, unavailable: false })
@@ -47,6 +47,37 @@ describe('useLukkAuth', () => {
     expect(await login({ email: 'e', password: 'p' })).toEqual({ two_factor: true, challenge_token: 'c' })
     expect(user.value).toBeNull()
     expect(api).not.toHaveBeenCalled()
+  })
+
+  it('never puts a 2FA challenge or a step-up token in useState — the payload a reload persists', async () => {
+    // Nuxt's chunk-reload writes payload.state to sessionStorage (`nuxt:reload:state`), and
+    // `experimental.restoreState` re-applies it: a single-use challenge or a step-up token must not be there.
+    withApp({ login: vi.fn().mockResolvedValue({ two_factor: true, challenge_token: 'CHALLENGE-SECRET' }) })
+    const { login, pendingTwoFactor } = useLukkAuth()
+    await login({ email: 'e', password: 'p' })
+    const { useLukkConfirmation } = await import('../src/runtime/composables/useLukkConfirmation')
+    useLukkConfirmation().record({ confirmation_token: 'CONFIRM-SECRET' })
+
+    expect(pendingTwoFactor.value).toBe(true)
+    expect(useLukkSecret('confirmation').value).toBe('CONFIRM-SECRET')
+    expect(JSON.stringify(ssrPayload())).not.toMatch(/CHALLENGE-SECRET|CONFIRM-SECRET/)
+  })
+
+  it('drops a challenge from an earlier attempt when a later sign-in issues tokens', async () => {
+    // Left pending, `pendingTwoFactor` stayed true over the new session, and `verifyTwoFactor` redeemed the
+    // old challenge — replacing the session the user had just signed in to.
+    const login = vi.fn()
+      .mockResolvedValueOnce({ two_factor: true, challenge_token: 'old-challenge' })
+      .mockResolvedValueOnce({ access_token: 'a', expires_in: 900 })
+    withApp({ login })
+    const auth = useLukkAuth()
+    await auth.login({ email: 'e', password: 'p' })
+    expect(auth.pendingTwoFactor.value).toBe(true)
+
+    await auth.login({ email: 'other', password: 'p' })
+
+    expect(auth.pendingTwoFactor.value).toBe(false)
+    expect(useLukkSecret('challenge').value).toBeNull()
   })
 
   it('registers, then loads the user (auto-login, like login)', async () => {
@@ -170,7 +201,7 @@ describe('useLukkAuth', () => {
   it('records which account the loaded user belongs to, and forgets it on sign-out', async () => {
     const token = `h.${Buffer.from('{"sub":"7"}').toString('base64url')}.s`
     withApp({ logout: vi.fn().mockResolvedValue(undefined) })
-    useState<string | null>('lukk:access', () => null).value = token
+    useLukkSecret('access').value = token
     const { fetchUser, logout } = useLukkAuth()
 
     await fetchUser()
@@ -188,9 +219,14 @@ describe('useLukkAuth', () => {
   it('logout clears state on success', async () => {
     withApp({ logout: vi.fn().mockResolvedValue(undefined) })
     const { user, logout } = useLukkAuth()
+    useLukkSecret('confirmation').value = 'step-up'
+    useLukkSecret('challenge').value = 'pending'
     user.value = { id: 1 }
     await logout()
     expect(user.value).toBeNull()
+    // The credentials the session held go with it.
+    expect(useLukkSecret('confirmation').value).toBeNull()
+    expect(useLukkSecret('challenge').value).toBeNull()
   })
 
   it('logout clears state, even when the request rejects', async () => {

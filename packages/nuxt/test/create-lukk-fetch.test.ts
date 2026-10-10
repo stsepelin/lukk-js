@@ -25,6 +25,8 @@ function build(overrides: Partial<LukkFetchDeps> = {}) {
     canRefresh: false,
     getCookieHeader: () => undefined,
     getBearer: () => null,
+    getConfirmation: () => null,
+    confirmationHeader: 'X-Lukk-Confirmation',
     refresh: vi.fn(async () => ({ access_token: 'new' })),
     onRedirect: vi.fn(),
     fetchImpl,
@@ -406,6 +408,16 @@ describe('createRequestFetch (server-BFF)', () => {
     expect((requestFetch.mock.calls[1] as [string, FetchOptions])[1].baseURL).toBe('/api')
   })
 
+  it('marks its requests as a render\'s own, so the app-API proxy never rotates for them', async () => {
+    const requestFetch = vi.fn(async () => ({ ok: true }))
+    const { deps } = build({ baseURL: '/api' })
+    await createRequestFetch(requestFetch, deps)('/me', { headers: { 'x-app': '1' } })
+
+    const headers = new Headers((requestFetch.mock.calls[0] as [string, FetchOptions])[1].headers as HeadersInit)
+    expect(headers.get('x-lukk-ssr')).toBe('1')
+    expect(headers.get('x-app')).toBe('1')
+  })
+
   it('blanks the inbound cookie for a target that is not the API — the transport attaches it before our hook', async () => {
     // Nuxt's request-aware fetch is h3's `fetchWithEvent`, which merges the visitor's whole inbound
     // `Cookie` into every request — absolute targets included — and does it BEFORE ofetch runs
@@ -450,7 +462,7 @@ describe('createRequestFetch (server-BFF)', () => {
 
     await createRequestFetch(requestFetch, deps)('https://collector.example/x', { headers: new Headers({ 'x-trace': '1' }) })
 
-    expect((requestFetch.mock.calls[0] as [string, FetchOptions])[1].headers).toEqual({ 'x-trace': '1', 'cookie': '' })
+    expect((requestFetch.mock.calls[0] as [string, FetchOptions])[1].headers).toEqual({ 'x-trace': '1', 'cookie': '', 'x-lukk-ssr': '1' })
   })
 
   it('judges a relative path by the per-call base it will actually be sent to', async () => {
@@ -493,7 +505,7 @@ describe('createRequestFetch (server-BFF)', () => {
     const scoped = api.create({ headers: { 'x-app': 'a' } })
     await scoped('https://collector.example/x')
     const [, opts] = requestFetch.mock.calls.at(-1) as [string, FetchOptions]
-    expect(opts.headers).toEqual({ 'x-app': 'a', 'cookie': '' })
+    expect(opts.headers).toEqual({ 'x-app': 'a', 'cookie': '', 'x-lukk-ssr': '1' })
     expect(opts.redirect).toBe('manual')
 
     expect(api.native).toBe(globalThis.fetch)

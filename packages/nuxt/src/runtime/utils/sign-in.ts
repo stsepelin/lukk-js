@@ -1,4 +1,5 @@
 import type { LoginResult } from 'lukk-core'
+import type { BffSignInResult } from '../composables/useLukkAuth'
 
 /**
  * The shared sign-in completion `useLukkAuth` carries under this symbol, for lukk-nuxt's own composables.
@@ -7,4 +8,4 @@ import type { LoginResult } from 'lukk-core'
  */
 export const SIGN_IN = Symbol('lukk.signIn')
 
-export type SignInWith = (send: () => Promise<LoginResult>) => Promise<LoginResult>
+export type SignInWith = (send: () => Promise<LoginResult>) => Promise<LoginResult | BffSignInResult>

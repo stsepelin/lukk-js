@@ -1,6 +1,6 @@
 import { defineEventHandler, getRequestHeader, proxyRequest, setResponseStatus, useSession } from 'h3'
 import { useRuntimeConfig } from '#imports'
-import { LUKK_BFF_PREFIX, confirmationHeaderName, isResolvableBase, isSessionCookieName, sessionCookieName, signedOutCookieName } from '../shared'
+import { LUKK_BFF_PREFIX, LUKK_SSR_HEADER, confirmationHeaderName, isResolvableBase, isSessionCookieName, sessionCookieName, signedOutCookieName } from '../shared'
 import { accessExpired } from './access-token'
 import { hopByHopHeaders, isForeignOrigin, isForeignSubresource, reachesLukk, reportProxyFailure, rejectUnresolvedTarget, resolveTarget, SPOOFABLE_FORWARDING, viaHeader, visitorIp } from './proxy-utils'
 import { sessionEnded, sessionKey } from './ended-sessions'
@@ -106,7 +106,10 @@ export default defineEventHandler(async (event) => {
   // And re-seals it with the newest pair, should the session have rotated the one sealed here meanwhile.
   let resealNewest: ((queued: string[]) => Promise<string[]>) | null = null
   let rotatedRefresh: string | undefined
-  if (access && sealed.refresh && accessExpired(access)) {
+  // Not for a page render's own in-process request (`LUKK_SSR_HEADER`): its rotation's cookie would go back
+  // to the render, never to the browser, which then replayed the consumed token. The token goes on as it is.
+  const inRender = getRequestHeader(event, LUKK_SSR_HEADER) === '1'
+  if (!inRender && access && sealed.refresh && accessExpired(access)) {
     const session = await useSession<TokenSession>(event, {
       password: sessionPassword,
       name: sessionName,
@@ -175,6 +178,8 @@ export default defineEventHandler(async (event) => {
     // The app's origin is this proxy's to police; the upstream's CORS decision must not apply to it.
     'origin': '',
     'cookie': '',
+    // The render marker is this app's own, not the API's.
+    [LUKK_SSR_HEADER]: '',
     'authorization': access ? `Bearer ${access}` : '',
     // The visitor when a trusted `clientIpHeader` is set, else our socket address — this proxy has
     // always asserted something, and the socket is first-hand fact about this hop. Read straight

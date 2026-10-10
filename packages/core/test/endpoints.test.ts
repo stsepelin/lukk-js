@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createLukkClient, isTokenPair, type LukkClient } from '../src/client'
+import { createLukkClient, isTokenPair, type LukkClient, retryAfterSeconds } from '../src/client'
 import { isRegistrationPending, isTwoFactorChallenge } from '../src/types'
 
 function json(body: unknown, status = 200): Response {
@@ -105,6 +105,18 @@ describe('the Retry-After an error names', () => {
     await expect(createLukkClient({ baseURL: 'https://x/auth', fetch: answer({ 'Retry-After': 'Wed, 21 Oct 2026 07:28:00 GMT' }) }).refreshTokens()).rejects.not.toHaveProperty('retryAfter')
     await expect(createLukkClient({ baseURL: 'https://x/auth', fetch: answer({ 'Retry-After': '5s' }) }).refreshTokens()).rejects.not.toHaveProperty('retryAfter')
     await expect(createLukkClient({ baseURL: 'https://x/auth', fetch: answer({ 'Retry-After': 'x5' }) }).refreshTokens()).rejects.not.toHaveProperty('retryAfter')
+  })
+})
+
+describe('retryAfterSeconds', () => {
+  it('reads delay-seconds, and nothing else', () => {
+    expect(retryAfterSeconds('5')).toBe(5)
+    expect(retryAfterSeconds('120')).toBe(120)
+    expect(retryAfterSeconds(null)).toBeUndefined()
+    expect(retryAfterSeconds('')).toBeUndefined()
+    expect(retryAfterSeconds('Wed, 21 Oct 2026 07:28:00 GMT')).toBeUndefined()
+    expect(retryAfterSeconds('5s')).toBeUndefined()
+    expect(retryAfterSeconds('x5')).toBeUndefined()
   })
 })
 

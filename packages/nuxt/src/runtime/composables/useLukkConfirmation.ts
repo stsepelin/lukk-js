@@ -1,6 +1,7 @@
 import type { ComputedRef, Ref } from 'vue'
 import { computed, useNuxtApp, useState, watch } from '#imports'
-import { CONFIRM_REQUIRED_KEY, CONFIRMATION_KEY, CONFIRMED_KEY } from '../keys'
+import { CONFIRM_REQUIRED_KEY, CONFIRMED_KEY } from '../keys'
+import { useLukkSecret } from '../utils/secrets'
 
 /**
  * Declared rather than inferred: the module build cannot resolve `#imports`, so an inferred return type
@@ -37,7 +38,7 @@ export interface LukkConfirmation {
 export function useLukkConfirmation(): LukkConfirmation {
   const nuxtApp = useNuxtApp()
   const { $lukk } = nuxtApp
-  const token = useState<string | null>(CONFIRMATION_KEY, () => null)
+  const token = useLukkSecret('confirmation')
   const confirmedFlag = useState<boolean>(CONFIRMED_KEY, () => false)
   const confirmed = computed(() => confirmedFlag.value)
   // True while a `withConfirmation` action is waiting on a fresh step-up — bind your modal to it.
@@ -49,7 +50,9 @@ export function useLukkConfirmation(): LukkConfirmation {
   // the waiter. On the app rather than in `useState`: the app is per request on the server, so nothing
   // leaks between visitors, and unlike `useState` it is never serialised into the payload nor wrapped in a
   // reactive proxy — the caller gets the very error lukk answered with.
-  const stepUp = ((nuxtApp as { _lukkStepUp?: { unearnable?: unknown } })._lukkStepUp ??= {})
+  // `earned` is replaced by a fresh object on every confirmation recorded in this app, so a 423 can tell
+  // whether one landed after the request it answers was sent.
+  const stepUp = ((nuxtApp as { _lukkStepUp?: { unearnable?: unknown, earned?: object } })._lukkStepUp ??= {})
 
   /** Re-confirm with the account password. */
   async function confirmPassword(password: string): Promise<void> {
@@ -93,6 +96,7 @@ export function useLukkConfirmation(): LukkConfirmation {
     if (import.meta.client) {
       if (result.confirmation_token) token.value = result.confirmation_token
       confirmedFlag.value = true
+      stepUp.earned = {}
     }
   }
 
@@ -111,11 +115,16 @@ export function useLukkConfirmation(): LukkConfirmation {
    * middleware instead.
    */
   async function withConfirmation<T>(action: () => Promise<T>): Promise<T> {
+    const earnedBefore = stepUp.earned
     try {
       return await action()
     }
     catch (error) {
       if ((error as { status?: number }).status !== 423) throw error
+      // A confirmation landed while this request was out — the 423 answers the request, not that
+      // confirmation. Clearing it wiped the step-up just earned (another action's modal) and asked again:
+      // retry once with it instead.
+      if (stepUp.earned !== earnedBefore) return action()
       // The server rejected our confirmation → it's missing or stale; earn a fresh one.
       clear()
       // Reset per CYCLE. `unearnable` is otherwise only ever set, so once one action hit

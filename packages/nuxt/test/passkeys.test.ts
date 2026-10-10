@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { __test, useState } from './mocks/imports'
+import { __test } from './mocks/imports'
+
+import { useLukkConfirmation } from '../src/runtime/composables/useLukkConfirmation'
+
+import { useLukkPasskeys } from '../src/runtime/composables/useLukkPasskeys'
+import { useLukkSecret } from '../src/runtime/utils/secrets'
 
 // The serialization helpers are 100%-tested in lukk-core; here we test orchestration.
 vi.mock('lukk-core', () => ({
@@ -15,11 +20,6 @@ vi.mock('../src/runtime/composables/useLukkAuth', async () => {
   const { SIGN_IN } = await import('../src/runtime/utils/sign-in')
   return { useLukkAuth: () => ({ [SIGN_IN]: signInWith }) }
 })
-
-// eslint-disable-next-line import/first
-import { useLukkConfirmation } from '../src/runtime/composables/useLukkConfirmation'
-// eslint-disable-next-line import/first
-import { useLukkPasskeys } from '../src/runtime/composables/useLukkPasskeys'
 
 function withNavigator(create = vi.fn(), get = vi.fn()) {
   vi.stubGlobal('navigator', { credentials: { create, get } })
@@ -80,7 +80,7 @@ describe('useLukkPasskeys', () => {
     await useLukkPasskeys().confirm()
 
     expect($lukk.confirmPasskey).toHaveBeenCalledWith('cer', { serialized: 'cred-3' })
-    expect(useState<string | null>('lukk:confirmation', () => null).value).toBe('tok')
+    expect(useLukkSecret('confirmation').value).toBe('tok')
   })
 
   it('lists and removes passkeys', async () => {

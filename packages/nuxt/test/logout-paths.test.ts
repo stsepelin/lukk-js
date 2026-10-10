@@ -1,17 +1,17 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ACCESS_KEY, CHALLENGE_KEY, CONFIRMATION_KEY, CONFIRMED_KEY, READY_KEY, RESTORE_FAILED_KEY } from '../src/runtime/keys'
+import { CONFIRMED_KEY, READY_KEY, RESTORE_FAILED_KEY } from '../src/runtime/keys'
 import { restoreState } from '../src/runtime/utils/restore-state'
 import { __test, useState } from './mocks/imports'
 
+import { useLukkAuth } from '../src/runtime/composables/useLukkAuth'
+
+import { useLukkPasskeys } from '../src/runtime/composables/useLukkPasskeys'
+
+import { useLukkConfirmation } from '../src/runtime/composables/useLukkConfirmation'
+import { useLukkSecret } from '../src/runtime/utils/secrets'
+
 const { api } = vi.hoisted(() => ({ api: vi.fn() }))
 vi.mock('../src/runtime/composables/useLukkFetch', () => ({ useLukkFetch: () => api }))
-
-// eslint-disable-next-line import/first
-import { useLukkAuth } from '../src/runtime/composables/useLukkAuth'
-// eslint-disable-next-line import/first
-import { useLukkPasskeys } from '../src/runtime/composables/useLukkPasskeys'
-// eslint-disable-next-line import/first
-import { useLukkConfirmation } from '../src/runtime/composables/useLukkConfirmation'
 
 function withApp(lukk: Record<string, unknown>, extra: Record<string, unknown> = {}, mode: 'direct' | 'bff' = 'direct') {
   __test.nuxtApp = { $lukk: lukk, ...extra }
@@ -40,9 +40,9 @@ describe('useLukkAuth — what a fresh app starts from', () => {
     withApp({})
     useLukkAuth()
 
-    expect(useState(ACCESS_KEY, () => 'x').value).toBeNull()
-    expect(useState(CHALLENGE_KEY, () => 'x').value).toBeNull()
-    expect(useState(CONFIRMATION_KEY, () => 'x').value).toBeNull()
+    expect(useLukkSecret('access').value).toBeNull()
+    expect(useLukkSecret('challenge').value).toBeNull()
+    expect(useLukkSecret('confirmation').value).toBeNull()
     expect(useState(CONFIRMED_KEY, () => true).value).toBe(false)
     expect(useState(READY_KEY, () => true).value).toBe(false)
     expect(useState(RESTORE_FAILED_KEY, () => true).value).toBe(false)

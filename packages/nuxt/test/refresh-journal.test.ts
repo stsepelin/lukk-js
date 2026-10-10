@@ -29,7 +29,7 @@ import apiProxy from '../src/runtime/server/api-proxy'
 // eslint-disable-next-line import/first
 import { resolveHydrationAccess, withholdIfReplaced } from '../src/runtime/server/hydrate'
 // eslint-disable-next-line import/first
-import { refreshOnce } from '../src/runtime/server/refresh'
+import { currentPair, refreshOnce } from '../src/runtime/server/refresh'
 // eslint-disable-next-line import/first
 import { endSession } from '../src/runtime/server/ended-sessions'
 
@@ -220,7 +220,8 @@ describe('a rotation nobody received, adopted by the next request', () => {
     }
     const otherTab = async (sid: string) => {
       await vi.advanceTimersByTimeAsync(5_000)
-      await refreshOnce({ id: 'h3', data: { refresh: 't1', sid } }, 'https://lukk.test/auth')
+      // …and its response carries t2 home at once: from then, thirty seconds for the t1 → t2 link.
+      currentPair(sid, (await refreshOnce({ id: 'h3', data: { refresh: 't1', sid } }, 'https://lukk.test/auth')).pair!)
       await vi.advanceTimersByTimeAsync(85_000)
     }
     const sessionOn = (on: H3Event) => ({ id: 'h3', data: { ...sealed }, update: vi.fn(async (pair: TokenSession) => {
@@ -321,5 +322,34 @@ describe('a rotation nobody received, adopted by the next request', () => {
     expect(proxied.node.res.getHeader('set-cookie')).toEqual(['other=1'])
     const logout = fetchSpy.mock.calls.find(call => String(call[0]).endsWith('/logout'))!
     expect(new Headers(logout[1]!.headers).get('authorization')).toBe('Bearer a2')
+  })
+
+  it('starts a link\'s straggler window when its cookie LEAVES, not when its rotation landed — a slow upstream', async () => {
+    // t0 R (an app-API long-poll, a slow upload) rotates T0 → T1 and waits on its upstream; the browser still
+    // holds T0. Counted from the landing, the link was gone at 30 s, and the browser's next T0 refresh at 40 s
+    // replayed it past lukk's grace window: revoked. It lasts until R's cookie leaves, then thirty seconds.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({ access_token: 'a1', refresh_token: 't1', expires_in: 900 }), { status: 200 }))
+    const sid = `slow-upstream-${Math.random()}`
+    sealed = { access: expired(), refresh: 't0', sid }
+    const r = event()
+    rw = { id: 'h3', data: { ...sealed }, update: vi.fn() }
+    let answer!: () => Promise<void>
+    proxyRequest.mockImplementationOnce(async (ev: unknown, _target: string, opts: { onResponse?: (e: unknown, x: unknown) => Promise<void> }) => {
+      await new Promise<void>((resolve) => { answer = async () => { await opts.onResponse!(ev, { status: 200, type: 'basic', headers: new Headers() }); resolve() } })
+      return {}
+    })
+    const proxied = (apiProxy as unknown as (e: H3Event) => Promise<unknown>)(r)
+    await vi.advanceTimersByTimeAsync(40_000)
+
+    // The browser's next request, at 40 s, still with T0: adopts T1 — no replay.
+    await expect(refreshOnce({ id: 'h3', data: { refresh: 't0', sid } }, 'https://lukk.test/auth')).resolves.toMatchObject({ pair: { refresh: 't1' } })
+    expect(fetchSpy).toHaveBeenCalledOnce()
+
+    await answer() // R's headers leave at 40 s: from here, thirty seconds
+    await proxied
+    await vi.advanceTimersByTimeAsync(30_000)
+    fetchSpy.mockImplementation(async () => new Response('{}', { status: 401 }))
+    await expect(refreshOnce({ id: 'h3', data: { refresh: 't0', sid } }, 'https://lukk.test/auth')).resolves.toEqual({ pair: null, retryable: false })
   })
 })

@@ -1,7 +1,8 @@
 import type { $Fetch, FetchContext, FetchOptions, FetchRequest, FetchResponse } from 'ofetch'
 // Reuse core's guard + error builder so the same-origin check and the LukkError shape
 // stay identical across the two transports (no drift on a security-critical path).
-import { carriesOrigin, isSameOrigin, lukkError } from 'lukk-core'
+import { carriesOrigin, isSameOrigin, lukkError, retryAfterSeconds } from 'lukk-core'
+import { LUKK_SSR_HEADER } from '../shared'
 
 export interface LukkFetchDeps {
   /** App-API base — the same-origin proxy mount (BFF) or the API URL (direct). */
@@ -17,6 +18,14 @@ export interface LukkFetchDeps {
   getCookieHeader: () => string | undefined
   /** Direct mode: the in-memory access token. BFF: null (the proxy injects it). */
   getBearer: () => string | null
+  /**
+   * Direct mode: the step-up token held in client memory, sent like the bearer — only to the API's own
+   * origin — so a `lukk.confirm`-gated route of the app's API can be reached. BFF: null (the proxy injects
+   * it from the sealed session).
+   */
+  getConfirmation: () => string | null
+  /** The header carrying it — lukk's `confirm.header`. */
+  confirmationHeader: string
   /** Single-flight token refresh (shared with `$lukk`); resolves truthy on success. */
   refresh: () => Promise<unknown>
   /**
@@ -88,6 +97,8 @@ export function lukkFetchOptions(deps: LukkFetchDeps): FetchOptions {
         }
         const bearer = deps.getBearer()
         if (bearer) headers.set('authorization', `Bearer ${bearer}`)
+        const confirmation = deps.getConfirmation()
+        if (confirmation) headers.set(deps.confirmationHeader, confirmation)
       }
       options.headers = headers
     },
@@ -103,7 +114,11 @@ export function lukkFetchOptions(deps: LukkFetchDeps): FetchOptions {
       if (retryable && await deps.refresh()) {
         return
       }
-      throw lukkError(ctx.response.status, ctx.response.statusText, ctx.response._data as { message?: string, errors?: Record<string, string[]> })
+      const error = lukkError(ctx.response.status, ctx.response.statusText, ctx.response._data as { message?: string, errors?: Record<string, string[]> })
+      // As lukk-core's own errors do: a throttle or maintenance answer says when to come back.
+      const retryAfter = retryAfterSeconds(ctx.response.headers.get('retry-after'))
+      if (retryAfter !== undefined) error.retryAfter = retryAfter
+      throw error
     },
   }
 }
@@ -137,13 +152,13 @@ function targetIsOurs(deps: LukkFetchDeps, url: string, baseURL: unknown): boole
   // differently to each was cleared as the API and sent elsewhere. A falsy base (`''`, `null`) is
   // ofetch's "none".
   if (baseURL && typeof baseURL !== 'string') return false
+  const apiIsRelative = !/^https?:\/\//i.test(deps.baseURL)
   const perCall = baseURL ? baseURL as string : undefined
   const known = (base: string | undefined, target: string) => {
     // Stryker disable next-line ConditionalExpression: equivalent — `isSameOrigin` refuses an absolute target against an undefined base (its `https?://` base test fails), and every relative target is already accepted by the API-base check this is OR-ed with. Its own line, so the comparison below stays under test. This also hides `→ true`, which "accepts an ABSOLUTE per-call baseURL (or URL) on this app's own origin" kills.
     if (base === undefined) return false
     return isSameOrigin(base, target)
   }
-  const apiIsRelative = !/^https?:\/\//i.test(deps.baseURL)
   // This app's own origin stands in for the API's ONLY where the API base is the relative proxy mount:
   // there `isSameOrigin` refuses every absolute URL, and same-origin is exactly what the mount means.
   // With an ABSOLUTE API base the app's origin is a different host that the bearer was never scoped to.
@@ -151,6 +166,13 @@ function targetIsOurs(deps: LukkFetchDeps, url: string, baseURL: unknown): boole
   // host header) said, so an absolute URL on a host the request named was cleared as "this app" and
   // handed the visitor's sealed session. There, an absolute URL is simply not ours.
   const appOrigin = apiIsRelative && !deps.isServer ? deps.origin : undefined
+  // An explicitly empty base stops ofetch joining, so a RELATIVE path goes to the page's own origin — not
+  // the API's, when the API base is absolute. Ours only if the API is this app (a relative base), or the
+  // page is on the API's origin; and the page's origin is known only in the browser (on the server it is
+  // the request's `Host`). `loadUser` passes exactly this for a relative `user.endpoint` in direct mode.
+  if (!baseURL && !carriesOrigin(url)) {
+    return apiIsRelative || (!deps.isServer && known(deps.origin, deps.baseURL))
+  }
   const perCallOk = perCall === undefined
     ? true
     : carriesOrigin(perCall)
@@ -189,7 +211,9 @@ export function createRequestFetch(requestFetch: RequestFetch, deps: LukkFetchDe
     // `fetchWithEvent` spreads the caller's headers over its own, and a `Headers` spreads to nothing.
     const url = typeof request === 'string' ? request : request.url
     const ours = targetIsOurs(deps, url, merged.baseURL ?? options.baseURL) && !carriesOrigin(deps.baseURL)
-    const headers = ours ? merged.headers : { ...Object.fromEntries(new Headers(merged.headers)), cookie: '' }
+    // Always a plain object, marked as the render's own (see `LUKK_SSR_HEADER`): the app-API proxy must not
+    // rotate for it.
+    const headers = { ...Object.fromEntries(new Headers(merged.headers)), [LUKK_SSR_HEADER]: '1', ...(ours ? {} : { cookie: '' }) }
     // `redirect` sits AFTER the caller's opts, mirroring `lukk-core`'s ordering: a caller passing
     // `redirect: 'follow'` would otherwise re-enable chasing a 3xx, and this fetch attaches the
     // sealed session cookie on the server.

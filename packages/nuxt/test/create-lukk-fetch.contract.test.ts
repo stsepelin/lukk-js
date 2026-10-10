@@ -16,13 +16,13 @@ import { createLukkFetch, type LukkFetchDeps } from '../src/runtime/utils/create
  * ofetch hands them to `fetch`. Keep it small — it exists to catch the mock drifting from the library,
  * not to re-test every rule.
  */
-function drive(overrides: Partial<LukkFetchDeps> = {}) {
+function drive(overrides: Partial<LukkFetchDeps> = {}, respond = () => new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } })) {
   const seen: { url: string, headers: Headers, credentials?: string }[] = []
   const fetchImpl = createFetch({
     fetch: (async (input: string | Request, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input.url
       seen.push({ url, headers: new Headers(init?.headers as HeadersInit), credentials: init?.credentials })
-      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } })
+      return respond()
     }) as typeof globalThis.fetch,
     Headers: OFetchHeaders as unknown as typeof globalThis.Headers,
   }) as unknown as $Fetch
@@ -33,6 +33,8 @@ function drive(overrides: Partial<LukkFetchDeps> = {}) {
     canRefresh: false,
     getCookieHeader: () => undefined,
     getBearer: () => 'SECRET',
+    getConfirmation: () => null,
+    confirmationHeader: 'X-Lukk-Confirmation',
     refresh: vi.fn(async () => ({ access_token: 'new' })),
     onRedirect: vi.fn(),
     fetchImpl,
@@ -112,6 +114,8 @@ describe('createLukkFetch through real ofetch', () => {
       canRefresh: false,
       getCookieHeader: () => undefined,
       getBearer: () => 'SECRET',
+      getConfirmation: () => null,
+      confirmationHeader: 'X-Lukk-Confirmation',
       refresh: vi.fn(async () => ({ access_token: 'new' })),
       onRedirect: vi.fn(),
       fetchImpl,
@@ -181,5 +185,52 @@ describe('the visitor\'s cookies, on the server', () => {
 
     expect(seen.map(s => s.headers.get('cookie'))).toEqual([null, null])
     expect(seen.map(s => s.credentials)).toEqual(['same-origin', 'same-origin'])
+  })
+})
+
+describe('createLukkFetch through real ofetch — errors, the step-up token, an empty base', () => {
+  it('keeps the server\'s Retry-After on the LukkError, in seconds — as lukk-core does', async () => {
+    const { api } = drive({}, () => new Response('{"message":"Busy"}', { status: 503, headers: { 'content-type': 'application/json', 'retry-after': '7' } }))
+    await expect(api('/me')).rejects.toMatchObject({ status: 503, message: 'Busy', retryAfter: 7 })
+
+    const { api: dated } = drive({}, () => new Response('{}', { status: 503, headers: { 'content-type': 'application/json', 'retry-after': 'Wed, 21 Oct 2026 07:28:00 GMT' } }))
+    await expect(dated('/me')).rejects.not.toHaveProperty('retryAfter')
+  })
+
+  it('attaches the held step-up token on the API\'s own origin, and never elsewhere (direct mode)', async () => {
+    // A `lukk.confirm`-gated route of the app's own API answered 423 forever: nothing sent the token there.
+    const { api, seen } = drive({ getConfirmation: () => 'CONFIRMED', confirmationHeader: 'X-Step-Up' })
+
+    await api('/account')
+    await api('/collect', { baseURL: 'https://collector.example' })
+
+    expect(seen[0]!.headers.get('x-step-up')).toBe('CONFIRMED')
+    expect(seen[1]!.headers.get('x-step-up')).toBeNull()
+
+    // And none at all when none is held — not the string "null".
+    const empty = drive()
+    await empty.api('/account')
+    expect(empty.seen[0]!.headers.has('x-lukk-confirmation')).toBe(false)
+  })
+
+  it('sends no credential for a relative path with an explicitly EMPTY base, when that lands on another origin', async () => {
+    // `''` stops ofetch joining, so `/me` goes to the PAGE's origin — not the API's when the API is absolute.
+    const away = drive({ origin: 'https://app.example.com' })
+    await away.api('/me', { baseURL: '' })
+    expect(away.seen[0]!.url).toBe('/me')
+    expect(away.seen[0]!.headers.get('authorization')).toBeNull()
+    expect(away.seen[0]!.credentials).toBe('same-origin')
+
+    // …but when the page IS on the API's origin, or the API base is relative, that is the API.
+    const same = drive({ origin: 'https://api.example.com' })
+    await same.api('/me', { baseURL: '' })
+    expect(same.seen[0]!.headers.get('authorization')).toBe('Bearer SECRET')
+    const relative = drive({ baseURL: '/api', origin: 'https://app.example.com' })
+    await relative.api('/me', { baseURL: '' })
+    expect(relative.seen[0]!.headers.get('authorization')).toBe('Bearer SECRET')
+    // On the server the page's origin is the request's Host — not ours to trust.
+    const server = drive({ origin: 'https://api.example.com', isServer: true })
+    await server.api('/me', { baseURL: '' })
+    expect(server.seen[0]!.headers.get('authorization')).toBeNull()
   })
 })

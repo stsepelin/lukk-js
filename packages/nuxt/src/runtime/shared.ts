@@ -4,6 +4,14 @@
 export const LUKK_BFF_PREFIX = '/api/_lukk'
 
 /**
+ * Marks a page render's own in-process request to the app-API proxy (see `createRequestFetch`): the proxy
+ * never rotates the session for one, because the Set-Cookie of that rotation goes back to the render, not
+ * to the browser — which then replays the consumed token. SSR hydration is the one place a render renews
+ * the session. A browser sending it only keeps its own token from being renewed on that request.
+ */
+export const LUKK_SSR_HEADER = 'x-lukk-ssr'
+
+/**
  * A root-relative path as this app serves it: under `app.baseURL`, where Nitro mounts every server
  * route. With `/admin/` the BFF proxy lives at `/admin/api/_lukk`; a bare `/api/_lukk` reached the
  * origin root — a 404, or another app co-hosted there. An absolute URL is left alone.
@@ -199,7 +207,7 @@ export const SPOOFABLE_FORWARDING: Record<string, string> = {
  * proxy then blanked or overwrote the token on every request.
  */
 const RESERVED_HEADERS = new Set([
-  'accept', 'authorization', 'content-type', 'cookie', 'host', 'x-forwarded-for', 'via',
+  'accept', 'authorization', 'content-type', 'cookie', 'host', 'x-forwarded-for', 'via', LUKK_SSR_HEADER,
   ...Object.keys(SPOOFABLE_FORWARDING),
 ])
 

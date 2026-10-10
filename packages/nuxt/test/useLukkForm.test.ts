@@ -395,6 +395,58 @@ describe('useLukkForm', () => {
     expect(form.processing).toBe(false)
   })
 
+  it('rejects a cancelled submit with the AbortError itself — through real ofetch, which wraps it in a FetchError', async () => {
+    // ofetch rejects an aborted request with its own FetchError, the AbortError only on `.cause`; the
+    // docblock promised an AbortError, and `error.name === 'AbortError'` never matched.
+    const { createFetch, Headers: OFetchHeaders } = await import('ofetch')
+    const { createLukkFetch } = await import('../src/runtime/utils/create-lukk-fetch')
+    const real = createLukkFetch({
+      baseURL: '/api',
+      isServer: false,
+      canRefresh: false,
+      getCookieHeader: () => undefined,
+      getBearer: () => null,
+      getConfirmation: () => null,
+      confirmationHeader: 'X-Lukk-Confirmation',
+      refresh: vi.fn(),
+      onRedirect: vi.fn(),
+      fetchImpl: createFetch({
+        // Like fetch: an already-aborted signal rejects at once, a later abort when it comes.
+        fetch: ((_input: unknown, init?: RequestInit) => new Promise((_resolve, reject) => {
+          if (init?.signal?.aborted) return reject(init.signal.reason)
+          init?.signal?.addEventListener('abort', () => reject(init.signal!.reason))
+        })) as typeof globalThis.fetch,
+        Headers: OFetchHeaders as unknown as typeof globalThis.Headers,
+      }) as never,
+    })
+    api.mockImplementationOnce((url: string, opts: object) => real(url, opts as never))
+    const onError = vi.fn()
+    const form = useLukkForm({ a: 1 })
+
+    const pending = form.post('/slow', { onError })
+    form.cancel()
+
+    const error = await pending.catch((e: unknown) => e)
+    expect(error).toBeInstanceOf(DOMException)
+    expect((error as DOMException).name).toBe('AbortError')
+    expect(onError).toHaveBeenCalledWith(error)
+  })
+
+  it('leaves any other failure as it came — a timeout is not a cancel', async () => {
+    const timedOut = Object.assign(new Error('[POST] "/x": <no response> timeout'), { cause: new DOMException('timed out', 'TimeoutError') })
+    api.mockRejectedValueOnce(timedOut)
+    await expect(useLukkForm({ a: 1 }).post('/x')).rejects.toBe(timedOut)
+  })
+
+  it('still runs onFinish when onError throws — it is the finally-hook', async () => {
+    api.mockRejectedValueOnce(val422({ name: ['Required.'] }))
+    const onFinish = vi.fn()
+    const form = useLukkForm({ name: '' })
+
+    await expect(form.post('/x', { onError: () => { throw new Error('from the hook') }, onFinish })).rejects.toThrow('from the hook')
+    expect(onFinish).toHaveBeenCalledOnce()
+  })
+
   it('nestedErrors expands Laravel dotted keys into a nested object (flat errors still work)', async () => {
     const form = useLukkForm({ name: '', address: { street: '', city: '' } })
     api.mockRejectedValueOnce(val422({ 'name': ['Required.'], 'address.street': ['Street.'], 'address.city': ['City.'] }))

@@ -21,10 +21,9 @@ export interface TokenSession {
 const inflightRefresh: Map<string, Flight> = ((globalThis as { __lukkInflightRefresh?: Map<string, Flight> }).__lukkInflightRefresh ??= new Map())
 // What each rotation produced is journalled in `refresh-journal.ts`.
 
-/** A refresh on the wire, and how many callers are still waiting on it. */
+/** A refresh on the wire. */
 interface Flight {
   run: Promise<RefreshResult>
-  waiting: number
   /** When it left — about when lukk rotated, since lukk rotates on receipt. */
   startedAt: number
 }
@@ -80,21 +79,22 @@ export const REFRESH_INFLIGHT_MAX_MS = 5 * 60_000
  * cookie after one of them had rotated it, and to a straggler handed a pair whose token the session was
  * rotating at that very moment (it now waits on that rotation and is handed what it produced).
  *
- * Each link lives on its own: `REFRESH_HOLD_MS` for its first taker when no caller received it, and
- * `REFRESH_STRAGGLER_MS` once its pair has reached the session — from when the BFF got the pair if a caller
- * received it; from when a request first adopts through it otherwise (outright, so a hold lasts at most
- * `REFRESH_HOLD_MS` + `REFRESH_STRAGGLER_MS`: the burst of a user returning near its end still has its
- * thirty seconds); and cut to that window when the rotation of the pair it handed out lands. After that its
- * end is only ever brought forward, and never past the end of the link after it in its chain. And a caller
- * about to seal a pair it was handed asks the journal again at the last moment (`currentPair`): the session
- * may have rotated it meanwhile — and if the links that would say so have already expired, the session's
- * HEAD (`refreshHeads`, kept `REFRESH_INFLIGHT_MAX_MS` past each rotation) still does, and the cookie is
- * withheld. So answers from the journal can come up to a refresh's duration + 30 s
- * after lukk rotated — past lukk's own grace window, on a slow refresh. That is deliberate: counted from
- * lukk's rotation instead, a slow refresh's link was gone as it landed, and the requests still out with the
- * old cookie replayed it into a revoke. The whole journal goes when the session presents a token outside it (it has moved
- * on), when lukk refuses one of its tokens outright, and when the session ends; a retryable failure keeps
- * it. Never recorded for a session that has ended. At most `REFRESH_JOURNAL_MAX_LINKS` per session.
+ * Each link lives on its own. It is held `REFRESH_HOLD_MS` until its pair is DELIVERED — until a caller's
+ * cookie carrying it leaves (`currentPair`, at the last moment before each caller's response goes out) —
+ * and from then `REFRESH_STRAGGLER_MS`, for the requests already out with the old cookie. Not from when the
+ * rotation landed: a caller whose cookie leaves later (an app-API long-poll, a slow upload, a long render)
+ * left the browser on the consumed token after a window counted from the landing had closed, and its next
+ * refresh was revoked. The first delivery sets the window outright (so a hold lasts at most `REFRESH_HOLD_MS`
+ * + `REFRESH_STRAGGLER_MS`: the burst of a user returning near its end still has its thirty seconds), and a
+ * link is also cut to it when the rotation of the pair it handed out lands. After that its end is only ever
+ * brought forward, and never past the end of the link after it in its chain. If the session has moved past
+ * a pair altogether and the links that would say so have expired, the session's HEAD (`refreshHeads`, kept
+ * `REFRESH_INFLIGHT_MAX_MS` past each rotation) still does, and the cookie is withheld. So answers from the
+ * journal can come well after lukk rotated — past lukk's own grace window, on a slow refresh or a slow
+ * response. That is deliberate: the alternative replays a token the browser still holds into a revoke.
+ * The whole journal goes when the session presents a token outside it (it has moved on), when lukk refuses
+ * one of its tokens outright, and when the session ends; a retryable failure keeps it. Never recorded for a
+ * session that has ended. At most `REFRESH_JOURNAL_MAX_LINKS` per session.
  *
  * Tokens are kept as they are, not as digests: comparing synchronously leaves no `await` between "nothing
  * recorded, no refresh out" and starting one, in which a concurrent request could replay a spent token.
@@ -109,14 +109,14 @@ export const REFRESH_INFLIGHT_MAX_MS = 5 * 60_000
  * another instance replays the consumed token, and only lukk's grace window stands between it and a revoke.
  *
  * An accepted limit: a link's window can close before the browser has the pair — the response that carried
- * it was lost (a navigation aborts it). Its replay then revokes the family, the same exposure an ordinary
+ * it was lost after leaving (a navigation aborts it). Its replay then revokes the family, the same exposure an ordinary
  * rotation has when its response is lost. A longer window would widen the time in which an old cookie
  * somewhere else is answered with a live pair.
  */
 export const REFRESH_HOLD_MS = 10 * 60_000
 
 /**
- * How long a link stays adoptable once a caller has received or taken it: for the requests already out
+ * How long a link stays adoptable once its pair has been delivered: for the requests already out
  * with the old cookie (a page coming back fires several at once). At least a caller's wait plus its
  * `Retry-After`, and comparable to lukk's own grace window. Past it, a request presenting the consumed token
  * is not this browser catching up — it is an old cookie somewhere else, and lukk's reuse detection is the
@@ -137,7 +137,7 @@ export function refreshOnce(session: { id?: string, data: TokenSession }, baseUR
   // No id → don't key the map (an empty key would collapse distinct sessions).
   if (!id) {
     const startedAt = Date.now()
-    return waitOn({ run: rawRefresh(token, baseURL, clientIp).then(result => countedDown(result, startedAt)), waiting: 0, startedAt })
+    return waitOn({ run: rawRefresh(token, baseURL, clientIp).then(result => countedDown(result, startedAt)), startedAt })
   }
 
   const journal = refreshJournals.get(id)
@@ -152,10 +152,9 @@ export function refreshOnce(session: { id?: string, data: TokenSession }, baseUR
 }
 
 /**
- * The head of the chain `token`'s link starts, for a request presenting it. Every link on the way has now
- * delivered its pair to the session, so it lasts at most the straggler window from here — and no link lasts
- * longer than the one after it: an older link outliving the newer ones handed an old cookie a pair rotated
- * since.
+ * The head of the chain `token`'s link starts, for a request presenting it. Nothing is taken here: the pair
+ * reaches the browser only when this request's cookie leaves, and that caller's `currentPair` takes the
+ * links then.
  *
  * While the head's own token is being rotated, the request waits for that rotation and is handed what it
  * produced — the new head, journalled as it lands; handing out the head as it stood gave the straggler a
@@ -163,7 +162,7 @@ export function refreshOnce(session: { id?: string, data: TokenSession }, baseUR
  * a caller that stops waiting, or a throttle, is told so, and retrying finds the chain where it was.
  */
 function adopt(id: string, journal: Map<string, Link>, token: string): Promise<RefreshResult> {
-  const head = takeChain(id, chainFrom(journal, token))
+  const head = chainFrom(journal, token).at(-1)![1]
   const rotating = inflightRefresh.get(flightKey(id, head.pair.refresh!))
   return rotating ? waitOn(rotating) : Promise.resolve(handOut(head))
 }
@@ -171,15 +170,30 @@ function adopt(id: string, journal: Map<string, Link>, token: string): Promise<R
 /**
  * Take every link of `path`, from the head back: each gets the straggler window from now — outright on its
  * first taking, so the burst it belongs to has its thirty seconds even near the end of a ten-minute hold —
- * but never past the end of the one after it. Returns the head.
+ * but never past the end of the one after it: an older link outliving the newer ones handed an old cookie a
+ * pair rotated since.
  */
-function takeChain(id: string, path: [string, Link][]): Link {
+function takeChain(id: string, path: [string, Link][]): void {
   let until = Date.now() + REFRESH_STRAGGLER_MS
   for (const [hop, link] of [...path].reverse()) {
     take(id, hop, link, until)
     until = link.expiresAt
   }
-  return path.at(-1)![1]
+}
+
+/** Every link whose chain leads to `token`, in order, ending with the one that produced it. */
+function chainInto(journal: Map<string, Link>, token: string): [string, Link][] {
+  const path: [string, Link][] = []
+  let target = token
+  // Bounded by the journal's size, as `chainFrom` is — a loop would otherwise never end.
+  // Stryker disable next-line EqualityOperator: equivalent — one more hop around a loop lands on a link of the same loop, and lukk never issues a token it consumed, so outside a loop the `break` ends it first.
+  for (let hops = 0; hops < journal.size; hops++) {
+    const into = [...journal].find(([, link]) => link.pair.refresh === target)
+    if (!into) break
+    path.unshift(into)
+    target = into[0]
+  }
+  return path
 }
 
 /** `token`'s link and every link after it, in order: consumed token → link, ending at the head. */
@@ -199,22 +213,31 @@ function chainFrom(journal: Map<string, Link>, token: string): [string, Link][] 
 
 /**
  * What a caller about to seal `pair` — handed to it a moment ago — should seal instead, or `null` for
- * nothing at all.
+ * nothing at all; and, for what it returns, the moment of DELIVERY.
  *
  * The session may have rotated it since (a restore in another tab, a sibling request), and a cookie sealed
  * with it would then land over the newer one with a token already spent, whose next refresh revokes the
- * family. So each caller asks again at the last moment before its cookie leaves — the auth proxy's retry as
- * it seals, the app-API proxy when the upstream's headers arrive, SSR hydration once the page has rendered:
- *  - a live link leads on from it: the newest pair, its links taken as an adoption takes them;
+ * family. So each caller asks again at the last moment before its cookie leaves — the auth proxy as it
+ * seals, the app-API proxy when the upstream's headers arrive, SSR hydration once the page has rendered:
+ *  - a live link leads on from it: the newest pair;
  *  - it is the session's head, or the session is unknown here: `pair` itself;
  *  - otherwise the session has moved past it, and the links that led on have expired (a response slower
  *    than their window): `null` — withhold the cookie, and the browser keeps the newer one it holds.
+ *
+ * Whatever pair it returns is now on its way to the browser, so every link leading to it is TAKEN here,
+ * from the head back (`takeChain`): from now, a request still presenting an older token is a straggler,
+ * with thirty seconds. Not before: until this cookie leaves, the browser has nothing newer than the token
+ * it presents — counted from when the rotation landed, a slow upstream (a long-poll, an upload) let the
+ * window close while the browser still held the consumed token, and its next refresh was revoked.
  */
 export function currentPair(id: string | undefined, pair: TokenSession): TokenSession | null {
   const journal = refreshJournals.get(id!)
-  if (journal?.has(pair.refresh!)) return takeChain(id!, chainFrom(journal, pair.refresh!)).pair
   const head = refreshHeads.get(id!)
-  return !head || head.token === pair.refresh ? pair : null
+  const newest = journal?.has(pair.refresh!)
+    ? chainFrom(journal, pair.refresh!).at(-1)![1].pair
+    : (!head || head.token === pair.refresh ? pair : null)
+  if (newest && journal) takeChain(id!, chainInto(journal, newest.refresh!))
+  return newest
 }
 
 /** A link's pair, with what is LEFT of its access token's lifetime. */
@@ -235,13 +258,7 @@ function countedDown(result: RefreshResult, since: number): RefreshResult {
 }
 
 /**
- * Record that rotating `consumed` produced `result` — received by a caller, or for a first taker to come.
- *
- * Its window counts from NOW, when the BFF got the pair, not from when the refresh left. Counted from the
- * departure, a slow refresh's link was gone, or nearly, the moment it landed: the requests still out with
- * the old cookie found nothing, replayed it past lukk's grace window, and the family was revoked. The cost,
- * taken deliberately: an answer from the journal can come up to the refresh's duration + 30 s after lukk
- * rotated — beyond lukk's own grace window, on a slow refresh.
+ * Record that rotating `consumed` produced `result` — held until a caller delivers it (`currentPair`).
  */
 function record(id: string, consumed: string, result: RefreshResult, flight: Flight): void {
   const journal = refreshJournals.get(id) ?? new Map<string, Link>()
@@ -259,13 +276,14 @@ function record(id: string, consumed: string, result: RefreshResult, flight: Fli
   // A second rotation of the same token (one the in-flight backstop gave up on, then both answered): the
   // newer one stands, on its own lifetime.
   clearTimeout(journal.get(consumed)?.timer)
-  const received = flight.waiting > 0
-  const link = { pair: result.pair!, expiresIn: result.expiresIn, mintedAt: flight.startedAt, taken: received } as Link
-  expire(id, consumed, link, now + (received ? REFRESH_STRAGGLER_MS : REFRESH_HOLD_MS))
+  // Untaken until its pair is delivered — when a caller's cookie carrying it leaves (`currentPair`).
+  const link = { pair: result.pair!, expiresIn: result.expiresIn, mintedAt: flight.startedAt, taken: false } as Link
+  expire(id, consumed, link, now + REFRESH_HOLD_MS)
   journal.set(consumed, link)
-  // The session's head, for as long as a response it might still be sealing can be out (see `refreshHeads`).
+  // The session's head, for as long as a response it might still be sealing can be out (see `refreshHeads`) —
+  // the end of the chain this rotation joins, not its own pair: a slow rotation can land after the next one.
   clearTimeout(refreshHeads.get(id)?.timer)
-  refreshHeads.set(id, { token: result.pair!.refresh!, timer: unref(setTimeout(() => refreshHeads.delete(id), REFRESH_INFLIGHT_MAX_MS)) })
+  refreshHeads.set(id, { token: chainFrom(journal, consumed).at(-1)![1].pair.refresh!, timer: unref(setTimeout(() => refreshHeads.delete(id), REFRESH_INFLIGHT_MAX_MS)) })
   if (journal.size > REFRESH_JOURNAL_MAX_LINKS) {
     const [oldest, dropped] = journal.entries().next().value!
     clearTimeout(dropped.timer)
@@ -311,7 +329,7 @@ function fly(id: string, token: string, baseURL: string, clientIp: string): Flig
   const startedAt = Date.now()
   // lukk's answer as sent, for the journal; its callers get it counted down from when it was minted.
   const settled = rawRefresh(token, baseURL, clientIp)
-  const flight: Flight = { run: settled.then(result => countedDown(result, startedAt)), waiting: 0, startedAt }
+  const flight: Flight = { run: settled.then(result => countedDown(result, startedAt)), startedAt }
   const key = flightKey(id, token)
   inflightRefresh.set(key, flight)
   // Only ever THIS entry: once the backstop has dropped it, a newer refresh may hold the key.
@@ -323,8 +341,7 @@ function fly(id: string, token: string, baseURL: string, clientIp: string): Flig
   // Before `forget`, synchronously: there is no moment when the session has neither a flight nor the
   // journal entry, in which a request with the old token could start a replay. Never for a session that
   // ended while it was out. A refusal ends the chain; a retryable failure leaves it be.
-  // Registered after the countdown above, so it runs before any caller is handed the result — and sees how
-  // many are still waiting.
+  // Registered after the countdown above, so it runs before any caller is handed the result.
   settled.then((result) => {
     if (result.pair) {
       if (!isSessionEnded(id)) record(id, token, result, flight)
@@ -339,13 +356,9 @@ function fly(id: string, token: string, baseURL: string, clientIp: string): Flig
 
 /** The flight's outcome, or "retry shortly" once `REFRESH_WAIT_MS` has passed — the flight carries on regardless. */
 function waitOn(flight: Flight): Promise<RefreshResult> {
-  flight.waiting++
   let timer: ReturnType<typeof setTimeout> | undefined
   const gaveUp = new Promise<RefreshResult>((resolve) => {
-    timer = unref(setTimeout(() => {
-      flight.waiting--
-      resolve({ pair: null, retryable: true, retryAfter: REFRESH_RETRY_AFTER_S })
-    }, REFRESH_WAIT_MS))
+    timer = unref(setTimeout(() => resolve({ pair: null, retryable: true, retryAfter: REFRESH_RETRY_AFTER_S }), REFRESH_WAIT_MS))
   })
   return Promise.race([flight.run, gaveUp]).finally(() => clearTimeout(timer))
 }
@@ -414,7 +427,12 @@ async function rawRefresh(refreshToken: string, baseURL: string, clientIp: strin
     return { pair: null, retryable: res.status !== 401 && res.status !== 403 }
   }
 
-  const pair = await res.json() as { access_token: string, refresh_token?: string, expires_in?: number }
+  let pair: { access_token: string, refresh_token?: string, expires_in?: number }
+  // A body that breaks off mid-read, or is not JSON: an outage, not a verdict — and not a throw, which
+  // rejected every caller sharing this flight (the BFF's /refresh answered 500). Whether lukk rotated is
+  // unknown; a retry replays inside its grace window.
+  try { pair = await res.json() as typeof pair }
+  catch { return { pair: null, retryable: true } }
 
   // No fallback to the token just sent: lukk has consumed it. Kept, the next refresh would replay it
   // past the grace window and reuse detection would revoke the family as stolen. Without a new one the

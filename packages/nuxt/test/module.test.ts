@@ -386,6 +386,14 @@ describe('lukk-nuxt module', () => {
     expect(error).toHaveBeenCalledWith(expect.stringContaining('session.maxAge'))
   })
 
+  it('reserves `storage`: only the sealed cookie exists, so any other value fails the build', () => {
+    // It was copied into runtimeConfig and read by nothing, while its docblock promised a server-side token
+    // store — a mount name configured for one silently stored tokens in the cookie anyway.
+    expect(() => setup({ baseURL: 'https://api/auth', mode: 'bff', storage: 'redis' })).toThrow(/`storage`.*'cookie'/s)
+    const ok = setup({ baseURL: 'https://api/auth', mode: 'bff', storage: 'cookie' })
+    expect(ok.options.runtimeConfig.lukk).not.toHaveProperty('storage')
+  })
+
   it('passes the auth proxy\'s body limit through, defaulting to 1 MiB', () => {
     const dflt = setup({ baseURL: 'https://api/auth', mode: 'bff' })
     expect((dflt.options.runtimeConfig.lukk as { bodyLimit: number }).bodyLimit).toBe(1024 * 1024)

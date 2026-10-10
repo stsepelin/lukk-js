@@ -1,7 +1,7 @@
 import { credentialToJSON, type LoginResult, type PasskeyLoginOptions, type PasskeySummary, toCreationOptions, toRequestOptions } from 'lukk-core'
 import { useNuxtApp } from '#imports'
 import { SIGN_IN, type SignInWith } from '../utils/sign-in'
-import { useLukkAuth } from './useLukkAuth'
+import { type BffSignInResult, useLukkAuth } from './useLukkAuth'
 import { useLukkConfirmation } from './useLukkConfirmation'
 
 /**
@@ -10,7 +10,7 @@ import { useLukkConfirmation } from './useLukkConfirmation'
  */
 export interface LukkPasskeys {
   register: (name?: string) => Promise<void>
-  login: () => Promise<LoginResult>
+  login: () => Promise<LoginResult | BffSignInResult>
   confirm: () => Promise<void>
   list: () => Promise<{ passkeys: PasskeySummary[] }>
   remove: (id: string) => Promise<void>
@@ -45,7 +45,7 @@ export function useLukkPasskeys(): LukkPasskeys {
    * with confirmed two-factor gets a challenge instead (lukk ≥ 0.7): `pendingTwoFactor` turns true and
    * `useLukkAuth().verifyTwoFactor()` completes it, as after a password sign-in.
    */
-  async function login(): Promise<LoginResult> {
+  async function login(): Promise<LoginResult | BffSignInResult> {
     const assertion = await assert()
     // The password sign-in's own completion: the same handover, challenge handling and — when a logout
     // overtook it — the same logout of its own for the session it issued.

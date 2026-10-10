@@ -98,6 +98,26 @@ export function routeWithin(target: string, base: string): string | null {
  * own host everything is refused; on another host nothing is (lukk bound to a separate domain).
  */
 export function reachesLukk(target: string, base: string): boolean {
+  if (reaches(target, base)) return true
+  // Behind a PHP front controller too. Laravel served through it routes `/index.php/auth/login` exactly as
+  // `/auth/login` — Symfony strips the script name — so with `api.target` at the app's root that path
+  // streamed lukk's token pair out. A first segment naming a `.php` script is read as such a controller
+  // (decoded, as the server would): judged again without it, as often as it repeats.
+  const { origin, pathname } = new URL(target)
+  let path = pathname
+  // Ends when a segment is not a `.php` script — every round strips one, so the path runs out of them. (Its
+  // mutants that stop stripping, or stop checking, loop forever synchronously: their Stryker timeout is the
+  // detection, as for `revealsDotSegment`'s.)
+  for (;;) {
+    const first = path.slice(1).split('/', 1)[0]!
+    if (!/\.php$/i.test(decodeAscii(first))) return false
+    path = path.slice(1 + first.length)
+    if (reaches(`${origin}${path}`, base)) return true
+  }
+}
+
+/** `reachesLukk` for one reading of the path — the front controller aside. */
+function reaches(target: string, base: string): boolean {
   const b = new URL(base.toLowerCase())
   let t = new URL(target.toLowerCase())
 
@@ -239,7 +259,8 @@ export function rejectUnresolvedTarget(event: H3Event, base: string, label: stri
     // treat a total auth outage as the server error it is, instead of filing it as client noise.
     setResponseStatus(event, 500)
     reportUnusableBase(label, base)
-    return { message: 'Proxy target could not be resolved — check the lukk baseURL configuration.' }
+    // Named by the setting at fault: the auth proxy's `baseURL`, or the app-API proxy's `api.target`.
+    return { message: `Proxy target could not be resolved — check the ${label} configuration.` }
   }
   setResponseStatus(event, 400)
   // Truncated + JSON-escaped (no forged lines) and capped: this is reachable unauthenticated on a

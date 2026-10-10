@@ -1,6 +1,7 @@
 import type { Ref } from 'vue'
 import { CONFIRM_REQUIRED_KEY, RESTORE_FAILED_KEY } from '../keys'
 import { clearPendingLogout, noteSignIn } from './pending-logout'
+import { lukkSecret } from './secrets'
 import { shallowRef, useState } from '#imports'
 
 /**
@@ -263,6 +264,9 @@ export function beginSession(nuxtApp: object, sentAt: number): void {
   // A step-up still waiting belongs to the session this one replaces, possibly another account's: cancel
   // it, or the next confirmation would run the old action under the new account.
   cancelPendingStepUp()
+  // So does a 2FA challenge from an earlier attempt: left pending, `verifyTwoFactor` redeemed it and
+  // replaced the session just begun.
+  lukkSecret(nuxtApp, 'challenge').value = null
   // A logout never finished is moot once a sign-in is sent after it — here, or in a tab that left and
   // returns. One asked for while this sign-in was already out still stands.
   clearPendingLogout(state.scope, sentAt)

@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { CHALLENGE_KEY } from '../../src/runtime/keys'
-import { __test, ssrPayload, useState } from '../mocks/imports'
+
+import { __test, ssrPayload } from '../mocks/imports'
+
+import { useLukkAuth } from '../../src/runtime/composables/useLukkAuth'
+import { useLukkSecret } from '../../src/runtime/utils/secrets'
 
 vi.mock('../../src/runtime/composables/useLukkFetch', () => ({ useLukkFetch: () => vi.fn() }))
-
-// eslint-disable-next-line import/first
-import { useLukkAuth } from '../../src/runtime/composables/useLukkAuth'
 
 afterEach(() => { __test.reset(); vi.restoreAllMocks() })
 
@@ -21,7 +21,7 @@ describe('a two-factor challenge answered during a server render', () => {
     const result = await (auth[method] as (input: unknown) => Promise<unknown>)({ email: 'e', password: 'p' })
 
     expect(result).toEqual(answer)
-    expect(useState<string | null>(CHALLENGE_KEY, () => null).value).toBeNull()
+    expect(useLukkSecret('challenge').value).toBeNull()
     expect(JSON.stringify(ssrPayload())).not.toContain('live-challenge')
   })
 })

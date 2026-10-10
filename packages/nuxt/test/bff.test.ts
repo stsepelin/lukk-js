@@ -1176,6 +1176,98 @@ describe('a rotation that lands after the request waiting on it gave up', () => 
     expect(straggler.update).not.toHaveBeenCalled()
   })
 
+  it('/refresh seals the NEWEST pair when the session rotated its own meanwhile', async () => {
+    // A shared-store check between the rotation and the seal is real I/O: another request can rotate the
+    // pair just produced while it is out, and sealing it then put a spent token over the newer cookie.
+    const sid = `refresh-newest-${Math.random()}`
+    mockFetch().fetch = vi.fn(async (_url: string, init?: RequestInit) => {
+      const n = Number(String(init?.body).match(/"t(\d+)"/)![1]) + 1
+      return jsonRes({ access_token: `a${n}`, refresh_token: `t${n}`, expires_in: 900 })
+    })
+    let asked = 0
+    useSharedEndedSessions({ mark: async () => {}, has: async () => {
+      if (++asked === 2) await refreshOnce({ id: 'h3', data: { refresh: 't1', sid } }, 'https://lukk/auth')
+      return false
+    } })
+    try {
+      const s = makeSession({ refresh: 't0', sid } as TokenSession)
+      // Its own lifetime is known only for the pair this request rotated; a newer one's is left out.
+      expect(await run(makeEvent({ path: '/api/_lukk/refresh', method: 'POST', headers: { ...sameOrigin }, body: '{}', session: s }))).toEqual({ ok: true })
+      expect(s.update).toHaveBeenCalledWith({ access: 'a2', refresh: 't2' })
+    }
+    finally { useSharedEndedSessions(undefined) }
+  })
+
+  it('/refresh seals nothing, and answers 409, when the session moved past its pair during those checks', async () => {
+    // A backstop: here the journal overflows while the check is out, so the pair just produced is no
+    // longer linked and is not the session's head.
+    const sid = `refresh-stale-${Math.random()}`
+    // Once t0 → t1 has landed, t1 … t17 rotate while the post-refresh check is out (the store answers
+    // only when they are done).
+    let overflowing: Promise<void> | undefined
+    mockFetch().fetch = vi.fn(async (_url: string, init?: RequestInit) => {
+      const n = Number(String(init?.body).match(/"t(\d+)"/)![1]) + 1
+      if (n === 1) {
+        overflowing = new Promise(resolve => setTimeout(resolve, 0)).then(async () => {
+          for (let m = 1; m <= 17; m++) await refreshOnce({ id: 'h3', data: { refresh: `t${m}`, sid } }, 'https://lukk/auth')
+        })
+      }
+      return jsonRes({ access_token: `a${n}`, refresh_token: `t${n}`, expires_in: 900 })
+    })
+    useSharedEndedSessions({ mark: async () => {}, has: async () => {
+      await overflowing
+      return false
+    } })
+    try {
+      const s = makeSession({ refresh: 't0', sid } as TokenSession)
+      const event = makeEvent({ path: '/api/_lukk/refresh', method: 'POST', headers: { ...sameOrigin }, body: '{}', session: s })
+      expect(await run(event)).toEqual({ message: 'The session was replaced.' })
+      expect(event.status).toBe(409)
+      expect(s.update).not.toHaveBeenCalled()
+    }
+    finally { useSharedEndedSessions(undefined) }
+  })
+
+  it('records a step-up onto the NEWEST pair when the session rotated the request\'s own meanwhile', async () => {
+    // Not a 401 retry: the request's access token was valid. But the confirmation capture re-seals the whole
+    // session as it arrived — and another request rotated its refresh token while the step-up was out.
+    let answer!: () => void
+    mockFetch().fetch = vi.fn(async (url: string, init?: RequestInit) => {
+      if (String(url).endsWith('/refresh')) return jsonRes({ access_token: 'a2', refresh_token: 't2', expires_in: 900 })
+      expect(new Headers(init?.headers).get('authorization')).toBe('Bearer a1')
+      return new Promise<Response>((resolve) => { answer = () => resolve(jsonRes({ confirmation_token: 'c1' })) })
+    })
+    const sid = `confirm-newest-${Math.random()}`
+    const s = makeSession({ access: 'a1', refresh: 't1', sid } as TokenSession)
+    const pending = run(makeEvent({ path: '/api/_lukk/confirm-password', method: 'POST', body: '{"password":"p"}', headers: { ...sameOrigin, 'content-type': 'application/json' }, session: s }))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    await refreshOnce({ id: 'h3', data: { refresh: 't1', sid } }, 'https://lukk/auth') // another request
+    answer()
+
+    expect(await pending).toEqual({ ok: true })
+    expect(s.update).toHaveBeenCalledWith({ access: 'a2', refresh: 't2', confirmation: 'c1' })
+  })
+
+  it('answers 409 to a step-up on a pair the session moved past, even without a retry', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    try {
+      mockFetch().fetch = vi.fn(async (url: string) => (String(url).endsWith('/refresh')
+        ? jsonRes({ access_token: 'a2', refresh_token: 't2', expires_in: 900 })
+        : jsonRes({ confirmation_token: 'c1' })))
+      const sid = `confirm-stale-${Math.random()}`
+      const { currentPair } = await import('../src/runtime/server/refresh')
+      currentPair(sid, (await refreshOnce({ id: 'h3', data: { refresh: 't1', sid } }, 'https://lukk/auth')).pair!) // delivered elsewhere
+      await vi.advanceTimersByTimeAsync(31_000) // its link is gone; the session's head is t2
+
+      const s = makeSession({ access: 'a1', refresh: 't1', sid } as TokenSession) // an old tab's cookie
+      const event = makeEvent({ path: '/api/_lukk/confirm-password', method: 'POST', body: '{"password":"p"}', headers: { ...sameOrigin, 'content-type': 'application/json' }, session: s })
+      expect(await run(event)).toEqual({ message: 'Your session was renewed meanwhile. Please confirm again.' })
+      expect(event.status).toBe(409)
+      expect(s.update).not.toHaveBeenCalled()
+    }
+    finally { vi.useRealTimers() }
+  })
+
   it('a rotation a request DID receive is adopted by a straggler\'s 401 retry within the window', async () => {
     // A page's burst: one request renewed the session and carried the new cookie home; another, already out
     // with the old one, comes back seconds later. It is handed that same rotation — never a replay.

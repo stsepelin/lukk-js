@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { __test, useState } from './mocks/imports'
-import { ACCESS_KEY } from '../src/runtime/keys'
+import { __test } from './mocks/imports'
+import { useLukkSecret } from '../src/runtime/utils/secrets'
 import { useLukkChangePassword } from '../src/runtime/composables/useLukkChangePassword'
 
 afterEach(() => { __test.reset(); vi.clearAllMocks() })
@@ -44,7 +44,8 @@ describe('useLukkChangePassword', () => {
     // they just changed their password in.
     const changePassword = vi.fn().mockResolvedValue(undefined)
     __test.nuxtApp = { $lukk: { changePassword } }
-    const access = useState<string | null>(ACCESS_KEY, () => 'live-token')
+    const access = useLukkSecret('access')
+    access.value = 'live-token'
 
     await useLukkChangePassword().changePassword(input)
 

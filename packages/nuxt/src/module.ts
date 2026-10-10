@@ -107,8 +107,9 @@ export interface ModuleOptions {
   /** Header carrying the step-up token. @default 'X-Lukk-Confirmation' */
   confirmationHeader: string
   /**
-   * BFF token storage. `cookie` = stateless sealed session (default, no infra);
-   * or a Nitro `useStorage` mount name for a server-side store.
+   * Reserved. BFF tokens are kept in the sealed session cookie, the only store there is; any value but
+   * `'cookie'` fails the build rather than be silently ignored. (A server-side token store is not
+   * implemented — for the record of ended sessions shared across instances, see `session.sharedStore`.)
    * @default 'cookie'
    */
   storage: string
@@ -294,13 +295,12 @@ export default defineNuxtModule<ModuleOptions>({
     publicCookies.logoutCookie ??= options.mode === 'bff' ? logoutCookieName(cookieSecure, options.session.name) : ''
     publicCookies.signedOutCookie ??= options.mode === 'bff' ? signedOutCookieName(cookieSecure, options.session.name) : ''
 
-    // Server-only config (the real lukk URL + storage choice for the BFF proxy,
+    // Server-only config (the real lukk URL and the sealed-session settings for the BFF proxy,
     // plus the optional app-API proxy target — fixed here, never request-derived).
 
     nuxt.options.runtimeConfig.lukk = defu(nuxt.options.runtimeConfig.lukk,
       {
         baseURL: options.baseURL,
-        storage: options.storage,
         sessionPassword: options.session.password,
         cookieSecure,
         // Per-app namespace (data only). The full cookie NAME is derived at each runtime site from
@@ -343,6 +343,11 @@ export default defineNuxtModule<ModuleOptions>({
     // auth proxy, clobbers Accept/Content-Type). Both fail loudly here rather than at request time.
     if (!isUsableConfirmationHeader(options.confirmationHeader)) {
       fail(`[lukk-nuxt] confirmationHeader "${options.confirmationHeader}" must be a valid HTTP header name that neither the proxies nor the transport already own (not Authorization, Accept, Content-Type, Cookie, a forwarding header, a hop-by-hop or browser-forbidden header like Connection or Origin, or a Proxy-/Sec- name). Use a token such as X-Lukk-Confirmation.`)
+    }
+
+    // Read by nothing: refuse a value that would have meant something, rather than drop it silently.
+    if (options.storage !== 'cookie') {
+      fail(`[lukk-nuxt] \`storage\` is reserved: the only token store is the sealed session cookie, 'cookie' (got ${JSON.stringify(options.storage)}). For the record of ended sessions shared across instances, use \`session.sharedStore\`.`)
     }
 
     // BFF mode seals tokens with this secret; fail loudly at build, not per-request.
@@ -474,7 +479,8 @@ export default defineNuxtModule<ModuleOptions>({
     // first paint. Default on; opt out with `ssrHydrate: false`. No-op in direct mode.
     if (options.mode === 'bff' && options.ssrHydrate !== false) {
       addPlugin({ src: resolver.resolve('./runtime/plugins/session.server'), mode: 'server' })
-      // Marks streamable renders, which don't refresh on the server (Nuxt 4 `experimental.ssrStreaming`).
+      // Takes a render that must refresh the session off streaming (Nuxt 4 `experimental.ssrStreaming`), so its
+      // re-sealed cookie can still be set — see `streaming-render.ts`.
       addServerPlugin(resolver.resolve('./runtime/server/plugins/streaming-render'))
     }
 

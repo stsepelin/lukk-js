@@ -10,7 +10,7 @@ import { expectTypeOf } from 'vitest'
 import type { ComputedRef, Ref } from 'vue'
 import { useLukkAbilities } from '../src/runtime/composables/useLukkAbilities'
 import { useLukkAccount } from '../src/runtime/composables/useLukkAccount'
-import { useLukkAuth } from '../src/runtime/composables/useLukkAuth'
+import { type BffSignInResult, useLukkAuth } from '../src/runtime/composables/useLukkAuth'
 import { useLukkChangePassword } from '../src/runtime/composables/useLukkChangePassword'
 import { useLukkConfirmation } from '../src/runtime/composables/useLukkConfirmation'
 import { useLukkEmailVerification } from '../src/runtime/composables/useLukkEmailVerification'
@@ -104,7 +104,7 @@ form.data = { email: '', remember: true }
 // --- useLukkPasskeys --------------------------------------------------------------------------------
 const passkeys = useLukkPasskeys()
 expectTypeOf(passkeys.register).toEqualTypeOf<(name?: string) => Promise<void>>()
-expectTypeOf(passkeys.login).toEqualTypeOf<() => Promise<LoginResult>>()
+expectTypeOf(passkeys.login).toEqualTypeOf<() => Promise<LoginResult | BffSignInResult>>()
 expectTypeOf(passkeys.confirm).toEqualTypeOf<() => Promise<void>>()
 expectTypeOf(passkeys.list).toEqualTypeOf<() => Promise<{ passkeys: PasskeySummary[] }>>()
 expectTypeOf(passkeys.remove).toEqualTypeOf<(id: string) => Promise<void>>()
@@ -139,8 +139,13 @@ expectTypeOf(auth.ready).toEqualTypeOf<ComputedRef<boolean>>()
 expectTypeOf(auth.whenReady).toEqualTypeOf<() => Promise<void>>()
 expectTypeOf(auth.restoreFailed).toEqualTypeOf<ComputedRef<boolean>>()
 expectTypeOf(auth.pendingTwoFactor).toEqualTypeOf<ComputedRef<boolean>>()
-expectTypeOf(auth.register).toEqualTypeOf<(input: RegisterInput) => Promise<RegisterResult>>()
-expectTypeOf(auth.login).toEqualTypeOf<(credentials: LoginInput) => Promise<LoginResult>>()
+expectTypeOf(auth.register).toEqualTypeOf<(input: RegisterInput) => Promise<RegisterResult | BffSignInResult>>()
+expectTypeOf(auth.login).toEqualTypeOf<(credentials: LoginInput) => Promise<LoginResult | BffSignInResult>>()
+// In BFF mode a sign-in resolves to the proxy's `{ ok, expires_in }` — no token reaches the browser — so
+// `access_token` is not something the result can be assumed to have.
+declare const signedIn: Awaited<ReturnType<typeof auth.login>>
+// @ts-expect-error — narrow first (`'access_token' in result`): in BFF mode there is none
+void signedIn.access_token
 expectTypeOf(auth.verifyTwoFactor).toEqualTypeOf<(code: string) => Promise<void>>()
 expectTypeOf(auth.verifyRecoveryCode).toEqualTypeOf<(recoveryCode: string) => Promise<void>>()
 expectTypeOf(auth.logout).toEqualTypeOf<() => Promise<void>>()

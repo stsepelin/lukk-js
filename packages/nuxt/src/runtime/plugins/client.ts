@@ -1,7 +1,7 @@
 import { createLukkClient, type LukkClient, REFRESHED_WITHOUT_TOKEN, type RefreshOutcome, singleFlight, type TokenPair } from 'lukk-core'
-import { defineNuxtPlugin, useNuxtApp, useRuntimeConfig, useState } from '#imports'
+import { defineNuxtPlugin, useNuxtApp, useRuntimeConfig } from '#imports'
 import { useLukkAuth } from '../composables/useLukkAuth'
-import { ACCESS_KEY, CONFIRMATION_KEY } from '../keys'
+import { useLukkSecret } from '../utils/secrets'
 import { confirmationHeaderName, isAuthRejection, LUKK_BFF_PREFIX, underAppBase } from '../shared'
 import { acrossTabs, restoreState, settle } from '../utils/restore-state'
 import { tokenSubject } from '../utils/token-subject'
@@ -49,11 +49,11 @@ export default defineNuxtPlugin({
 
     const baseURL = cfg.mode === 'direct' ? cfg.baseURL : underAppBase((useRuntimeConfig() as { app?: { baseURL?: string } }).app?.baseURL, LUKK_BFF_PREFIX)
 
-    // Access-token holder. Written ONLY on the client (guarded below) so it never
-    // lands in the serialized SSR payload — in BFF mode it stays null (the proxy
-    // holds the token); in direct mode it lives in client memory only.
-    const accessToken = useState<string | null>(ACCESS_KEY, () => null)
-    const confirmation = useState<string | null>(CONFIRMATION_KEY, () => null)
+    // Access-token holder: on the app, never in `useState` (see `lukkSecret`), and written ONLY on the
+    // client (guarded below) — in BFF mode it stays null (the proxy holds the token); in direct mode it
+    // lives in client memory only.
+    const accessToken = useLukkSecret('access')
+    const confirmation = useLukkSecret('confirmation')
 
     // ONE single-flight refresh, shared by `$lukk`'s own 401 path AND `useLukkFetch`'s
     // app-API retry — so a concurrent auth + app-API 401 can't replay the rotating
@@ -274,8 +274,10 @@ export default defineNuxtPlugin({
 
     async function followOtherTab(): Promise<void> {
       const auth = useLukkAuth()
-      // Anything this tab still had in flight belongs to the session that just changed.
+      // Anything this tab still had in flight belongs to the session that just changed — a 2FA challenge
+      // pending here too: redeemed, it would replace the session the other tab began.
       state.epoch++
+      useLukkSecret('challenge').value = null
 
       if (cfg.mode === 'direct') {
         // The in-memory token is the old session's; the cookie is the new one's. Renew from the cookie,
