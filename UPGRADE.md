@@ -10,8 +10,8 @@ package's changelog; this file is only the "you may need to do something" subset
 
 **lukk-js is pre-1.0 (`0.x`).** Per [SemVer §4](https://semver.org/#spec-item-4), a **minor**
 bump (`0.x.0`) may carry a breaking change; a **patch** bump (`0.x.y`) never does. The two
-packages version independently (this is a changesets monorepo), so check the changelog for the
-package you actually depend on. Each entry below is tagged **High / Medium / Low impact**.
+packages are released together, always at the same version (a fixed changesets group), so one
+version number covers both. Each entry below is tagged **High / Medium / Low impact**.
 
 Because lukk-js only ever *speaks* [lukk](https://github.com/stsepelin/lukk)'s HTTP contract,
 a server upgrade can also require a client change (or vice-versa) — when it does, the entry
@@ -26,10 +26,256 @@ default is safe.
 
 ## Upgrading to `lukk-nuxt` 0.12.0 / `lukk-core` 0.12.0 (unreleased)
 
-Everything before this release was additive. This one is not: the published type declarations
-stopped lying, which can fail a typecheck that passed before, and one route-middleware decision
-changed. No runtime API was renamed or removed, so an app that doesn't typecheck its own code
-has only the middleware entry to read.
+Everything before this release was additive. This one is not. No runtime API was renamed or removed,
+but behaviour changed in ways an app can notice even without typechecking:
+
+- passkey sign-in can return a two-factor challenge, and the `amr` values changed (lukk 0.7);
+- the account export's `passkeys[].last_used_at` is an ISO-8601 string, no longer unix seconds, and
+  lukk 0.7 answers a few requests it used to accept with a `409` or a `422`;
+- the proxies refuse more — lukk's own routes through the app-API proxy, oversized and unsized bodies,
+  cross-site subresource requests to either proxy, any `/refresh` but a POST — and sealed sessions
+  expire;
+- in BFF mode `$lukkRefresh()` resolves to a symbol rather than `{ ok, expires_in }`;
+- SSR forwards cookies only to a relative API base, and `useLukkForm` drafts moved keys;
+- `useLukkFetch` sends credentials only to a target it has judged same-origin, so a call that replaces
+  its `onRequest` hook or points it at another origin goes out without them.
+
+The published type declarations also stopped lying, which can fail a typecheck that passed before, and
+one route-middleware decision changed. Each is its own entry below.
+
+### lukk 0.7: passkey sign-in can return a two-factor challenge, and `amr` changed values
+
+**Medium impact — if you use passkeys with two-factor, or read `amr`.**
+
+`useLukkPasskeys().login()` now resolves to a `LoginResult`. When lukk answers a single-factor
+passkey with a two-factor challenge, `pendingTwoFactor` turns true and no user is loaded: show the
+same code form as after a password sign-in. `confirm()` asks the new
+`POST /auth/confirm-passkey/options` and falls back to the login options on a 404. The `Amr` type is
+now `'pwd' | 'otp' | 'pop' | 'user' | 'mfa'`; anything comparing against `'webauthn'` must move to
+`'pop'`, or to `'mfa'` for "was this multi-factor". See lukk's
+[upgrade notes](https://github.com/stsepelin/lukk/blob/main/UPGRADE.md#upgrading-to-070-from-06x).
+
+### lukk 0.7: the export's passkey times are strings, and new refusals
+
+**Low impact — if you read the account export's passkeys, or manage two-factor or passwords.**
+
+- **`AccountExport.passkeys[]`** (`GET /auth/account/export`, `useLukkAccount().exportAccount()`)
+  states every passkey field erasure destroys: `created_at`, `aaguid` (the authenticator model) and
+  `transports` (`string[]`) join `credential_id` and `name`, and **`last_used_at` is an ISO-8601 string**
+  like every other time in the export — it was unix seconds. Code that did
+  `new Date(entry.last_used_at * 1000)` now fails to typecheck, and at runtime gets `NaN`: parse the
+  string instead. The three new fields are optional in the type, as lukk 0.6.0 does not send them (and
+  sends `last_used_at` as a number). `PasskeySummary` from `GET /auth/passkeys` is unchanged — still
+  `{ id, name, last_used_at }` with unix seconds.
+- **`useLukkTwoFactor().confirm()`** rejects with a `409` (on `code`) when two-factor is already on: it
+  used to answer `204` and announce a new authenticator again. **`regenerateRecoveryCodes()`** rejects
+  with a `409` (on `two_factor`) on an account whose two-factor is neither on nor being enrolled. Both
+  are ordinary `LukkError`s — no retry, nothing signed out — for a form to show.
+- **`useLukkConfirmation().confirmPassword()`** can reject with a `422` on `password` even with the right
+  password, on the same terms: an account with a second factor, from a session that is not a recent
+  multi-factor sign-in. There the step-up is a user-verifying passkey (`useLukkPasskeys().confirm()`) or
+  a fresh sign-in with the second factor; a modal that only asks for the password should offer one.
+- **`useLukkChangePassword().changePassword()`** can reject with a `422` on `current_password` even with
+  the right password: on an account with an enforced TOTP or a user-verifying passkey, lukk refuses a
+  change from a session that is not a recent multi-factor sign-in (NIST SP 800-63B-4 §4.1.2.1), before
+  the password is checked, so no lockout attempt is spent. `useLukkForm` maps it onto the field like any
+  other; the remedy is signing in again with the second factor.
+- A two-factor challenge issued before the password changed (or by a lukk without the fingerprint) is
+  refused with the same `422` on `challenge_token` as an expired one, before the code is checked. Nothing
+  changes client-side: the user signs in again.
+
+### The proxies refuse more, and seals expire
+
+**Low impact — check if you relied on the old behaviour.**
+
+- The app-API proxy answers **404** for any target under lukk's own base path, so lukk's routes are
+  reachable only through the auth proxy and its route policy.
+- The BFF auth proxy caps request bodies at the new `bodyLimit` (1 MiB): over it is **413**, and a
+  chunked body without a length is **411**.
+- Sealed sessions carry a lifetime, the new `session.maxAge` (30 days). A seal written before this
+  release has none until it is next re-sealed.
+- In direct mode, SSR forwards the visitor's cookies only to a relative API base. An absolute API
+  no longer receives them; send what it needs explicitly.
+- `useLukkForm` drafts live under `lukk:form:<rememberKey>`, so a draft remembered under the old key
+  is not carried over.
+- The BFF session cookie now persists for `session.maxAge` (30 days) instead of ending with the
+  browser, so BFF users stay signed in across restarts, as direct-mode users already did.
+- A `withConfirmation()` still waiting for a step-up is cancelled — it rejects — when the session ends
+  by logout or when any sign-in replaces it, so its action can no longer run under the next account.
+- In BFF mode, `$lukkRefresh()` resolves to the `REFRESHED_WITHOUT_TOKEN` symbol instead of the
+  proxy's `{ ok, expires_in }`; code reading `.expires_in` from it gets `undefined`. Both are truthy on
+  success. `$lukkRestore()`'s `pair` carries the same symbol.
+- Every BFF auth-proxy response carries `X-Content-Type-Options: nosniff`, and a non-JSON upstream body
+  goes out as `text/plain`.
+- Route checks collapse repeated slashes, so `/api//auth/login` is refused like `/api/auth/login`.
+- The app-API proxy refuses (`404`) any path in which a round of percent-decoding reveals a whole `.` or
+  `..` segment (`/api/x/%252e%252e/y`), wherever it would lead — including one behind an ENCODED
+  separator, which h3 leaves encoded: `/api/files/a%2F..%2Fb`, `/api/files/foo%2F.%2Fbar.txt`,
+  `/api/..%2Fx`, `/api/a%5c..%5cb` now answer **404**, and so does a dot segment a tab, LF or CR splits
+  (`.%2509.`). A dot inside a segment name (`v1.2`, `.well-known`, `..y`) is unaffected.
+- The app-API proxy also refuses a path that a further round of percent-decoding would turn into one
+  of lukk's routes (`/api/x/%252e%252e/auth/login`, `/api/%2561uth/login`) with **404**.
+- Both proxies refuse a cross-site or same-site GET that is not a **top-level** navigation with **403** —
+  the app-API proxy now too, and a navigation into an `<iframe>`, `<frame>`, `<embed>` or `<object>` no
+  longer counts as one. A link the visitor follows still works.
+- `/api/_lukk/refresh` answers anything but `POST` with **405** and `Allow: POST`.
+- App-API proxy responses carry `X-Content-Type-Options: nosniff`, and every response that is neither
+  JSON nor a PDF also carries `Content-Security-Policy: sandbox` (added to the upstream's own policy), so
+  an HTML or SVG document from your API renders without script and outside the app's origin. Serve such
+  documents from another origin if they need to run script.
+- Request headers the app-API proxy strips (`Origin`, `Cookie`, spoofable forwarding headers, anything
+  the client named in `Connection`) are now removed rather than forwarded empty.
+- `session.maxAge` must be a positive whole number of seconds: anything else fails the build, and a
+  runtime override that is not one makes every write of the session throw.
+
+### `storage` is reserved
+
+**Low impact — if you set the `storage` module option.**
+
+It was copied into runtime config and read by nothing: BFF tokens always lived in the sealed session
+cookie, whatever it said. Any value but `'cookie'` now fails the build. Remove the option (or set
+`'cookie'`); for the record of ended sessions shared across instances, use `session.sharedStore`.
+
+### `login()`, `register()` and passkey `login()` are typed for BFF mode too
+
+**Medium impact — if you run `vue-tsc` / `nuxi typecheck` and read `access_token` from their result.**
+
+In BFF mode they resolve to the proxy's `{ ok: true, expires_in }` (the new `BffSignInResult`) — the
+token pair stays server-side — while the types promised a token pair. They now return
+`LoginResult | BffSignInResult` (`RegisterResult | BffSignInResult`), so reading `access_token` needs a
+narrowing first (`'access_token' in result`, or `isTwoFactorChallenge`).
+
+### Direct mode keeps its credentials out of `useState`
+
+**Low impact — if you read lukk's state by its `useState` keys.**
+
+The access token, the step-up token and a pending 2FA challenge are no longer in `useState`
+(`lukk:access`, `lukk:confirmation`, `lukk:challenge`): `useState` is the payload, and Nuxt's
+chunk-reload persists it to `sessionStorage`. They are held on the Nuxt app instead; use the
+composables (`useLukkAuth`, `useLukkConfirmation`) rather than those keys, which are gone.
+`clearNuxtState()` no longer clears them — `logout()` does.
+
+### `useLukkFetch` sends credentials only where it has checked they belong
+
+**Medium impact — if you pass your own `onRequest` to `useLukkFetch()`, or a per-call `baseURL`.**
+
+The instance used to default to `credentials: 'include'` and narrow it in its own `onRequest` hook.
+ofetch merges per-call options by spreading, so a call passing its own `onRequest` **replaced** that
+hook and kept `include` — sending the visitor's cookies to wherever the call pointed. The default is now
+`'same-origin'`, upgraded to `include` (and the bearer attached) only once the target is known to be on
+the API's origin. The same decision now also looks at a per-call `baseURL`: an absolute one is honoured
+only on the API's own origin (or this app's, in BFF mode).
+
+What changes for you: a call that replaces the hook, or that redirects the base to another origin, now
+goes out **without** the session cookie or bearer and gets a `401`. Wrap lukk's instance instead of
+replacing its hook, and keep authenticated calls on the API's origin.
+
+### Smaller changes you may notice
+
+**Low impact.**
+
+- **The account calls resolve to `{ status }`.** `forgotPassword`, `resetPassword`, `changePassword` and
+  `sendEmailVerification` resolved to `void` in the types; they resolve to the new exported `LukkStatus`
+  (`{ status: string }`), which is what lukk always sent. Code that ignored the result is unaffected.
+- **`LukkError.retryAfter` (lukk-core).** An error response carrying `Retry-After` in seconds keeps it, so
+  a binding can come back when the server asked.
+- **`logout({ refreshToken })` (lukk-core).** Presents the refresh token in the logout body, so lukk 0.7
+  ends the session even when the access token has expired (RFC 7009 §2.1). Optional; older lukk
+  releases ignore it.
+- **In BFF mode `user.endpoint` resolves under `app.baseURL`**, like every other BFF route. An app mounted
+  under a base path that worked around this with an absolute endpoint can drop the workaround. **Action
+  needed** if it worked around it with a base-prefixed RELATIVE endpoint instead — `user.endpoint:
+  '/admin/api/me'` under `app.baseURL: '/admin/'` now resolves to `/admin/admin/api/me` and 404s, which
+  signs everyone out on load. Drop the prefix: `user.endpoint: '/api/me'`.
+- **Direct mode no longer prefixes a relative `api.target` with `app.baseURL`** in `useLukkFetch`. The
+  prefix came in earlier in this release cycle and never shipped; only a direct-mode app tracking the
+  branch would notice.
+- **A refresh is never abandoned on a timer.** lukk commits a rotation as soon as it receives the
+  request, so giving up after 15 s lost the new token and the next refresh past the grace window revoked
+  the whole session. Other upstream calls keep the 15 s deadline, which now also covers reading the body.
+  No request waits on a slow refresh for longer than 15 s either. What it gets then depends on the
+  caller: `/api/_lukk/refresh` answers `503` with `Retry-After: 5` (the session is kept, and lukk-nuxt's
+  own client retries once after it); a proxied auth call or app-API call goes ahead with the old access
+  token and gets lukk's `401`; an SSR render leaves the session to the client restore. The rotation
+  carries on regardless, and what it produces is journalled per session: a link from the refresh token
+  it consumed to the pair it produced. A request still presenting a consumed token — any of those callers
+  — is handed the newest pair in that chain and seals it, rather than replaying a spent token; if that
+  pair's own token is being rotated right then, it waits and is handed the result. A link is held ten
+  minutes until its pair is delivered — until a response carrying it leaves, which for an app-API
+  long-poll or a slow render is well after the rotation landed — and 30 s from then, for the requests
+  already out with the old cookie (so a hold lasts at most 10 min + 30 s); it is also cut to 30 s when the
+  rotation of the pair it handed out lands. After that its end is only ever brought forward, and never past the end of
+  the link after it. A response about to seal an adopted pair re-checks the journal first and seals the
+  newest pair if the session rotated it meanwhile — or seals nothing, leaving the browser its newer cookie,
+  if the session has moved past it and the links that led on are gone: for the app-API proxy and SSR, a
+  response slower than the links' window (30 s from delivery, up to 10 min 30 s for one never delivered); for the
+  auth proxy, which gives up on lukk after 15 s, only a journal that overflowed meanwhile. A step-up
+  confirmation answering on such a request is not recorded: the auth proxy answers `409` ("Your session was
+  renewed meanwhile. Please confirm again.") and the user is asked to confirm again. So the journal can answer a replay well
+  after lukk rotated — past lukk's own grace window, on a slow refresh or a slow response — and such a
+  replay never reaches lukk: its reuse detection and `RefreshFamilyForked` do not see it. Both are deliberate
+  deviations (the second from RFC 9700 §4.14.2's "replay means theft" signal), bounded to these windows,
+  traded against the false logout of a slow refresh's stragglers. The journal is
+  dropped when the session presents a token outside it, when lukk refuses one of its tokens outright, and
+  when the session is logged out or replaced; a throttle or an outage keeps it. A response the browser has
+  already gone from when it is about to leave (a navigation aborted the request, the tab closed) takes
+  nothing, at every delivery point — the auth proxy's `/refresh`, its 401 retry and step-up capture, the
+  app-API proxy and the end of an SSR render — so the link stays held. One limit is accepted: if the
+  response is lost AFTER it left and the link's window closes first, the browser's replay of the consumed
+  token revokes the session — the same exposure as any rotation whose response is lost. **The journal is per process**: behind a multi-instance BFF without sticky sessions,
+  a next request that reaches another instance replays the old token, and only lukk's grace window
+  (`LUKK_GRACE`, 30 s by default) keeps that from revoking the session. Use sticky sessions there, or
+  raise the grace window if your lukk can be slow to rotate.
+- **An unearnable step-up is remembered per app**, not per `useLukkConfirmation()` call: a modal and a
+  page using separate instances now both see the refusal, and the action waiting in one is rejected.
+
+### More of the smaller changes
+
+**Low impact — informational.**
+
+- **`useLukkForm`**: a cancelled submit rejects with the `AbortError` itself (ofetch's `FetchError` wrapped
+  it); `onFinish` runs even when `onError` throws.
+- **`useLukkFetch` in direct mode attaches the held step-up token** (`confirmationHeader`) to requests on
+  the API's own origin, as it does the bearer, so `withConfirmation()` can reach a `lukk.confirm`-gated
+  route of your API. Never to another origin.
+- **A relative path with an explicitly empty `baseURL`** (`api('/me', { baseURL: '' })`) goes to the page's
+  origin; in direct mode with an absolute API base it now carries no credentials unless the page is on the
+  API's origin.
+- **App-API errors carry `retryAfter`** from a numeric `Retry-After`, as `lukk-core`'s do.
+- **`withConfirmation()`** retries once, instead of asking again, when a confirmation landed while its
+  request was out; a 2FA challenge left from an earlier attempt is dropped by any later sign-in (and when
+  another tab changes the session).
+- **The app-API proxy refuses lukk's routes behind a PHP front controller** (`/api/index.php/auth/login`)
+  with `404` — wherever the script sits, so a Laravel app under a sub-path (`api.target` at
+  `https://host/app`, lukk at `/app/auth`) is covered at `/app/index.php/auth/login` too. Any path segment
+  ending in `.php` is read as a front controller (also after a decoding hop, and with the tab, LF and CR
+  such a hop strips), in the path and in `baseURL` alike (Laravel without URL
+  rewriting, `baseURL` at `https://host/index.php/auth`); the path is also judged as written, so such a
+  segment never hides an encoded `/`, `?`, `#` or `..`. It cannot see lukk's extra guard mounts
+  (`lukk.guards.*.path`, e.g. `admin/auth`) on the same host: keep them off `api.target`'s host, or out of
+  its reach. Nor can it see how your server maps URLs to the PHP script (`SCRIPT_NAME`): where the front
+  controller's directory is not part of the public URLs — shared hosting whose `.htaccess` rewrites into
+  `public/index.php`, so `/public/auth/login` routes as `/auth/login`, or Symfony trimming any URI that
+  contains `index.php` — no path check contains it. The only robust layout is an `api.target` (host or
+  prefix) that does not serve lukk's routes at all: lukk on its own host, or under a prefix the app API is
+  not reachable through.
+- **The app-API proxy no longer renews the session for a page render's own requests** — `useLukkFetch`,
+  and Nuxt's own `useFetch('/api/…')`, `useRequestFetch()` and `event.$fetch` alike: the page request is
+  marked (`x-lukk-ssr`, set by a BFF server plugin; removed before a request reaches your API). The BFF
+  auth proxy (`/api/_lukk/*`) honours it too: a marked request's `401` goes back as it came, and a marked
+  `/refresh` answers `401` without rotating (a logout still renews, to revoke). The session is renewed once,
+  before the render — by SSR hydration, or with `ssrHydrate: false` by a renew-only step that loads no
+  user (and marks the render `no-store`) — and its cookie leaves with the page. With `ssrHydrate: false` a
+  page load after the access token aged out therefore rotates twice — the server's renewal, then the
+  client's own restore — and both count against lukk's per-IP refresh throttle
+  (`lukk.rate_limits.refresh`, 30 a minute by default). Requests a server ROUTE makes (`event.$fetch('/api/…')`
+  from `server/api/*`) are not a render and are not marked: one that needs the session should read it
+  with `getLukkAccessToken` rather than proxy through `/api`.
+- **A rotation's straggler window starts when its cookie leaves**, not when it landed — see the refresh entry.
+- **Packaging**: `refreshOnce` is no longer auto-imported into your server code; `h3` is a declared
+  dependency; `LUKK_BFF_PREFIX` and `LUKK_SESSION_COOKIE` import as values again.
+- **The app-API proxy** drops the upstream's `Access-Control-*` and hop-by-hop response headers, and removes
+  the browser's `Origin` from the request it forwards.
 
 ### Every composable now declares its return type
 

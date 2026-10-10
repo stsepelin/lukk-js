@@ -1,7 +1,7 @@
 import type { H3Event } from 'h3'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { __test } from './mocks/imports'
-import type { TokenSession } from '../src/runtime/server/utils/refresh'
+import type { TokenSession } from '../src/runtime/server/refresh'
 
 // The sealed session the read-only unseal returns, and the read-write handle `useSession` opens.
 let cookieValue: string | undefined // getCookie's return (present seal vs anonymous)
@@ -27,7 +27,8 @@ vi.mock('h3', () => ({
 }))
 
 const refreshOnce = vi.fn<(s: unknown, b: string) => Promise<TokenSession | null>>()
-vi.mock('../src/runtime/server/utils/refresh', () => ({ refreshOnce: (...a: unknown[]) => refreshOnce(...(a as [unknown, string])) }))
+// `deliverPair` as the identity: these suites hand out pairs no journal knows newer versions of.
+vi.mock('../src/runtime/server/refresh', () => ({ refreshOnce: (...a: unknown[]) => refreshOnce(...(a as [unknown, string])), deliverPair: (_event: unknown, _id: unknown, pair: unknown) => pair }))
 const revokeDroppedSession = vi.fn()
 vi.mock('../src/runtime/server/revoke-dropped', () => ({ revokeDroppedSession: (...a: unknown[]) => revokeDroppedSession(...a) }))
 
@@ -154,6 +155,18 @@ describe('resolveHydrationAccess', () => {
     expect(event.node.req.headers.cookie).toBe('locale=en; __Host-lukk-session=FRESH_SEAL')
   })
 
+  it('gives the reseal the same lifetime the auth proxy does — 30 days unless configured', async () => {
+    unsealResult = { data: { access: expiredJwt(), refresh: 'r' } }
+    refreshOnce.mockResolvedValue({ pair: { access: 'NEW', refresh: 'r2' }, retryable: false })
+    await resolveHydrationAccess(ev('__Host-lukk-session=STALE'))
+    expect(useSession).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ seal: { ttl: 2592000 * 1000 } }))
+
+    configure({ sessionMaxAge: 60 })
+    refreshOnce.mockResolvedValue({ pair: { access: 'NEW2', refresh: 'r3' }, retryable: false })
+    await resolveHydrationAccess(ev('__Host-lukk-session=STALE'))
+    expect(useSession).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ seal: { ttl: 60 * 1000 } }))
+  })
+
   it('reseals with the same cookie the auth proxy sets — Strict, HttpOnly, whole-site — and never from a header', async () => {
     // Pinned on `bff.ts`, and this is the OTHER place the session cookie is written: dropping
     // `httpOnly` hands the seal to page script, a narrower `path` leaves the old seal in place for the
@@ -164,7 +177,8 @@ describe('resolveHydrationAccess', () => {
     await resolveHydrationAccess(ev('__Host-lukk-session=STALE'))
 
     expect(useSession).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-      cookie: { sameSite: 'strict', secure: true, httpOnly: true, path: '/' },
+      // `maxAge` added: without it the cookie was a session cookie, dropped on browser restart.
+      cookie: { sameSite: 'strict', secure: true, httpOnly: true, path: '/', maxAge: 2592000 },
       sessionHeader: false,
     }))
   })
@@ -374,6 +388,8 @@ describe('resolveHydrationAccess', () => {
 
       await expect(withholdIfReplaced(event)).resolves.toBeUndefined()
       expect(event.node.res.getHeader('set-cookie')).toHaveLength(3)
+      // The cookie is out of reach, but the tokens it carries are not: they are still revoked.
+      expect(revokeDroppedSession).toHaveBeenCalledOnce()
     })
 
     it('does not throw when the response starts between the check and the write', async () => {

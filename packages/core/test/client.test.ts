@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { carriesOrigin, createLukkClient, isSameOrigin, lukkError } from '../src/client'
+import { carriesOrigin, createLukkClient, isSameOrigin, lukkError, REFRESHED_WITHOUT_TOKEN } from '../src/client'
 
 describe('lukkError', () => {
   it('shapes a Laravel error, and falls back to statusText / omits errors without a body', () => {
@@ -196,6 +196,51 @@ describe('createLukkClient', () => {
     expect(await client.request('/passkeys')).toEqual({ passkeys: [] })
     expect(onTokens).toHaveBeenCalledOnce()
     expect(access).toBe('new')
+  })
+
+  it('retries once when the refresh hook says the session was renewed somewhere it cannot see (a BFF)', async () => {
+    // A BFF proxy rotates and re-seals server-side and answers the browser without a token — there is
+    // nothing to hand `onTokens`, and the shape gate rightly refuses the `{ ok: true }` it does answer. So
+    // no 401 was EVER retried in BFF mode, even right after the session had been renewed.
+    let protectedCalls = 0
+    const fetch = vi.fn(async () => {
+      protectedCalls++
+      return protectedCalls === 1 ? json({ message: 'unauth' }, 401) : json({ passkeys: [] })
+    })
+    const onTokens = vi.fn()
+    const onUnauthenticated = vi.fn()
+    const refresh = vi.fn(async () => REFRESHED_WITHOUT_TOKEN)
+    const client = createLukkClient({ baseURL: 'https://x/auth', fetch, refresh, onTokens, onUnauthenticated })
+
+    expect(await client.request('/passkeys')).toEqual({ passkeys: [] })
+    expect(fetch).toHaveBeenCalledTimes(2)
+    expect(refresh).toHaveBeenCalledOnce()
+    expect(onTokens).not.toHaveBeenCalled() // there is no token to store
+    expect(onUnauthenticated).not.toHaveBeenCalled()
+  })
+
+  it('retries that once only — a second 401 is the answer', async () => {
+    const fetch = vi.fn(async () => json({ message: 'unauth' }, 401))
+    const refresh = vi.fn(async () => REFRESHED_WITHOUT_TOKEN)
+    const client = createLukkClient({ baseURL: 'https://x/auth', fetch, refresh })
+
+    await expect(client.request('/passkeys')).rejects.toMatchObject({ status: 401 })
+    expect(fetch).toHaveBeenCalledTimes(2)
+    expect(refresh).toHaveBeenCalledOnce()
+  })
+
+  it('still refuses a 2xx body that merely LOOKS like success — only the sentinel itself signals it', async () => {
+    // The shape gate is a security fix: nothing a server can send may stand in for the signal. A symbol
+    // cannot come out of JSON.
+    const fetch = vi.fn(async () => json({ message: 'unauth' }, 401))
+    const onUnauthenticated = vi.fn()
+    for (const answer of [{ ok: true, expires_in: 900 }, String(REFRESHED_WITHOUT_TOKEN), true, { description: 'lukk.refreshed-without-token' }]) {
+      fetch.mockClear()
+      const client = createLukkClient({ baseURL: 'https://x/auth', fetch, refresh: vi.fn(async () => answer as never), onUnauthenticated })
+      await expect(client.request('/passkeys')).rejects.toMatchObject({ status: 401 })
+      expect(fetch).toHaveBeenCalledOnce()
+    }
+    expect(onUnauthenticated).toHaveBeenCalledTimes(4)
   })
 
   it('single-flights concurrent refreshes (one refresh for a burst of 401s)', async () => {
@@ -770,5 +815,16 @@ describe('the last client.ts guards', () => {
     call = 0
     await expect(client.logout({ retry: false })).rejects.toMatchObject({ status: 401 })
     expect(refresh).not.toHaveBeenCalled()
+  })
+})
+
+describe('the reason lukk names on an error', () => {
+  it('is kept, so a client can branch on it rather than on English text', () => {
+    // lukk answers a confirmation that belongs to another session with 423 and
+    // `reason: "confirmation_session_mismatch"`, distinct from a missing confirmation.
+    expect(lukkError(423, 'Locked', { message: 'This confirmation belongs to a different session.', reason: 'confirmation_session_mismatch' }))
+      .toEqual({ status: 423, message: 'This confirmation belongs to a different session.', reason: 'confirmation_session_mismatch' })
+    expect(lukkError(423, 'Locked', { message: 'This action requires confirmation.' })).not.toHaveProperty('reason')
+    expect(lukkError(423, 'Locked', { reason: 42 } as never)).not.toHaveProperty('reason')
   })
 })

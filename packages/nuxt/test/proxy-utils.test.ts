@@ -6,7 +6,7 @@ vi.mock('h3', () => ({
 }))
 
 // eslint-disable-next-line import/first
-import { hopByHopHeaders, isForeignOrigin, rejectUnresolvedTarget, reportProxyFailure, resolveTarget, SPOOFABLE_FORWARDING, viaHeader, visitorIp } from '../src/runtime/server/proxy-utils'
+import { fetchUpstream, hopByHopHeaders, isForeignOrigin, isForeignSubresource, reachesLukk, rejectUnresolvedTarget, reportProxyFailure, resolveTarget, routeWithin, SPOOFABLE_FORWARDING, viaHeader, visitorIp } from '../src/runtime/server/proxy-utils'
 
 const ev = () => ({ status: 200 } as { status: number })
 
@@ -45,8 +45,226 @@ describe('resolveTarget', () => {
     expect(resolveTarget('https://api.example.com/auth#frag', '/login')).toBe('https://api.example.com/auth/login')
   })
 
+  it('keeps a decoded `?` or `#` in the subpath as path data', () => {
+    // The subpath arrives DECODED, so these were `%3F` / `%23` on the wire. Left bare, the parser made
+    // them a query or fragment, and the upstream received a different path than policy had looked at.
+    expect(resolveTarget('https://api.example.com/auth', '/refresh#x')).toBe('https://api.example.com/auth/refresh%23x')
+    expect(resolveTarget('https://api.example.com/auth', '/a?b?c#d')).toBe('https://api.example.com/auth/a%3Fb%3Fc%23d')
+  })
+
   it('keeps containment for a sibling path that merely shares a prefix', () => {
     expect(resolveTarget('https://api.example.com/auth', '../auth2/x')).toBeNull()
+  })
+})
+
+describe('routeWithin', () => {
+  it('reads repeated slashes the way a slash-merging hop delivers them', () => {
+    // Laravel alone never routes `//auth/login`, but nginx (`merge_slashes on`, the default) or an
+    // ingress in front of it hands lukk `/auth/login`. Read as distinct, `/api//auth/login` slipped past
+    // the app-API proxy's refusal and `/_lukk//refresh` past the BFF's never-proxy-refresh rule.
+    expect(routeWithin('https://l.test//auth/login', 'https://l.test/auth')).toBe('/login')
+    expect(routeWithin('https://l.test/auth//refresh', 'https://l.test/auth')).toBe('/refresh')
+    expect(routeWithin('https://l.test/auth/%2F%2Frefresh', 'https://l.test/auth')).toBe('/refresh')
+    expect(routeWithin('https://l.test/auth///', 'https://l.test/auth')).toBe('/')
+  })
+
+  // What lukk's router will match, not what the URL string looks like: Laravel trims trailing slashes
+  // from the raw path and then `rawurldecode`s it (Illuminate\\Routing\\Matching\\UriValidator).
+  it.each([
+    ['https://l.test/auth/refresh', '/refresh'],
+    ['https://l.test/auth/refresh/', '/refresh'],
+    ['https://l.test/auth/refresh//', '/refresh'],
+    ['https://l.test/auth/refresh%2F', '/refresh/'], // trimmed BEFORE decoding, as Laravel does
+    ['https://l.test/auth%2Frefresh', '/refresh'],
+    ['https://l.test/auth/refres%68', '/refresh'],
+    ['https://l.test/auth/refres%6A', '/refresj'], // upper-case hex too
+    ['https://l.test/auth/caf%C3%A9', '/caf%C3%A9'], // non-ASCII escapes stay as they are
+    ['https://l.test/auth/%7Ftail', '/\u007Ftail'], // the top of the ASCII range is decoded
+    ['https://l.test/auth/%80tail', '/%80tail'], // and the byte after it is not
+    ['https://l.test/auth', '/'],
+    ['https://l.test/auth/', '/'],
+  ])('%s is %s to lukk', (target, route) => {
+    expect(routeWithin(target, 'https://l.test/auth')).toBe(route)
+  })
+
+  it('trims the base the same way', () => {
+    expect(routeWithin('https://l.test/auth/login', 'https://l.test/auth/')).toBe('/login')
+    expect(routeWithin('https://l.test/auth/login', 'https://l.test/aut%68')).toBe('/login')
+  })
+
+  it('is null for a path that only shares the prefix, or lies outside', () => {
+    expect(routeWithin('https://l.test/authors', 'https://l.test/auth')).toBeNull()
+    expect(routeWithin('https://l.test/users', 'https://l.test/auth')).toBeNull()
+  })
+
+  it('places everything under a root base', () => {
+    expect(routeWithin('https://l.test/login', 'https://l.test')).toBe('/login')
+    expect(routeWithin('https://l.test/', 'https://l.test/')).toBe('/')
+  })
+})
+
+describe('reachesLukk', () => {
+  it('decides a non-root base on the path, whatever the host', () => {
+    expect(reachesLukk('https://api.test/auth/login', 'https://api.test/auth')).toBe(true)
+    expect(reachesLukk('https://api.test/auth/login', 'http://internal:8000/auth')).toBe(true)
+    expect(reachesLukk('https://api.test/Auth/LOGIN', 'https://api.test/auth')).toBe(true)
+    expect(reachesLukk('https://api.test/auth/login', 'https://api.test/AUTH')).toBe(true)
+    expect(reachesLukk('https://api.test/authors', 'https://api.test/auth')).toBe(false)
+  })
+
+  it.each(['/index.php/auth/login', '/INDEX.PHP/auth/refresh', '/app.php/auth', '/index%2Ephp/auth/login', '/index.php/index.php/auth/login', '/index.php%2Fauth/login', '/index%252ephp/auth/login', '/index.php%252Fauth/login', '/index.php%5cauth/login', '/index.php%255Cauth/login'])('sees through a PHP front controller: %s reaches lukk', (path) => {
+    // Laravel served through its front controller routes `/index.php/auth/login` exactly as `/auth/login`
+    // (Symfony strips the script name), so with `api.target` at the app root it streamed the token pair out.
+    expect(reachesLukk(`https://api.test${path}`, 'https://api.test/auth')).toBe(true)
+  })
+
+  it.each([
+    ['https://h.test/app/index.php/auth/login', 'https://h.test/app/auth'],
+    ['https://h.test/api/index.php/auth/login', 'https://h.test/api/auth'],
+    ['https://h.test/app/x/index.php/auth/login', 'https://h.test/app/x/auth'],
+  ])('sees through a front controller under a sub-path too: %s', (target, base) => {
+    // Laravel under `/app` routes `/app/index.php/auth/login` as `/app/auth/login`: the script can be any
+    // segment, not only the first.
+    expect(reachesLukk(target, base)).toBe(true)
+  })
+
+  it.each([
+    ['https://h.test/index.php/auth/login', 'https://h.test/index.php/auth'],
+    ['https://h.test/auth/login', 'https://h.test/index.php/auth'],
+    ['https://h.test/app/index.php/auth/login', 'https://h.test/app/index.php/auth'],
+  ])('sees a base that names the front controller itself (Laravel without rewriting): %s', (target, base) => {
+    // `baseURL` at `https://h/index.php/auth`, `api.target` at `https://h`: judged with the script dropped from
+    // the target alone, `/api/index.php/auth/login` read as `/auth/login` against `/index.php/auth` and passed.
+    expect(reachesLukk(target, base)).toBe(true)
+  })
+
+  it.each([
+    '/auth%2Flogin%3F.php',
+    '/auth%2Flogin%23.php',
+    '/auth%252Flogin%253F.php',
+    '/auth%253Flogin.php',
+    '/%2561uth%252Flogin%253F.php',
+    '/x%2F..%2Fauth%2Flogin%3F.php',
+    '/files/a%2F..%2Fb.php',
+    '/..%2Fx.php',
+    '/a%5c..%5cb.php',
+  ])('never drops a .php segment that hides a separator or a dot segment before judging it: %s', (path) => {
+    // Dropped whole, the segment took its encoded `/`, `?`, `#` or `..` with it — and the path that decodes to
+    // lukk's route, or traverses, was never looked at.
+    expect(reachesLukk(`https://api.test${path}`, 'https://api.test/auth')).toBe(true)
+  })
+
+  it.each([
+    ['https://h.test/index.php%250D/auth/login', 'https://h.test/auth'],
+    ['https://h.test/index.php%2509/auth/refresh', 'https://h.test/auth'],
+    ['https://h.test/index.ph%2509p/auth/passkeys/login', 'https://h.test/auth'],
+    ['https://h.test/app/index.php%250A/auth/confirm-password', 'https://h.test/app/auth'],
+  ])('sees a script whose name a control-character-stripping hop completes: %s', (target, base) => {
+    // A hop that decodes and re-parses (WHATWG) strips tab, LF and CR from anywhere in the URL: decoded once,
+    // `index.php%09` and `index.ph%09p` become `index.php`, which Symfony then reads as the script.
+    expect(reachesLukk(target, base)).toBe(true)
+  })
+
+  it('lets an app\'s own routes behind a front controller, and .php names elsewhere, through', () => {
+    expect(reachesLukk('https://api.test/index.php/users', 'https://api.test/auth')).toBe(false)
+    expect(reachesLukk('https://api.test/files/report.php', 'https://api.test/auth')).toBe(false)
+    expect(reachesLukk('https://api.test/index.php', 'https://api.test/auth')).toBe(false)
+    expect(reachesLukk('https://api.test/index.phpx/auth/login', 'https://api.test/auth')).toBe(false) // not a .php script
+    expect(reachesLukk('https://api.test/auth/login', 'https://api.test/app.phpx/auth')).toBe(false) // nor in baseURL
+    expect(reachesLukk('https://api.test/index%25252ephp/auth/login', 'https://api.test/auth')).toBe(true) // three decodings deep
+  })
+
+  it('decides a root base on the origin', () => {
+    expect(reachesLukk('https://api.test/users', 'https://api.test')).toBe(true)
+    expect(reachesLukk('https://API.test/users', 'https://api.test/')).toBe(true)
+    expect(reachesLukk('https://api.test/users', 'https://auth.test')).toBe(false)
+  })
+
+  it('follows the path through further rounds of decoding, collapsing the dot segments each one produces', () => {
+    const base = 'https://api.test/auth'
+    expect(reachesLukk('https://api.test/x/%252e%252e/auth/login', base)).toBe(true) // ../ after one more round
+    expect(reachesLukk('https://api.test/%2561uth/login', base)).toBe(true) // /auth after one more round
+    expect(reachesLukk('https://api.test/x/%2525252e%2525252e/auth/login', base)).toBe(true) // the third round
+    // A leading `//` a round produces stays a path on the TARGET's host — it is not read as an authority.
+    expect(reachesLukk('https://api.test/%252f%252fauth.test/auth/login', 'https://auth.test')).toBe(false)
+  })
+
+  it.each(['my%20file.pdf', '%7Bid%7D', 'a%22b', '%3Cx%3E', 'a%5Eb', 'a%60b', 'a%7Fb'])('lets /files/%s through — an escape the parser puts straight back is settled, not still decoding', (name) => {
+    // `new URL` re-encodes these after a round decodes them, so the decoded STRING never equals the parsed
+    // path. Compared that way the path never settled, ran out of rounds and was refused: every download
+    // with a space in its name answered 404.
+    expect(reachesLukk(`https://api.test/files/${name}`, 'https://api.test/auth')).toBe(false)
+  })
+
+  it('refuses nothing on this host when lukk is mounted at the root of ANOTHER one, whatever the encoding', () => {
+    expect(reachesLukk('https://api.test/files/my%20file.pdf', 'https://auth.test')).toBe(false)
+    expect(reachesLukk('https://api.test/x/%252e%252e/login', 'https://auth.test/')).toBe(false)
+  })
+
+  it.each([
+    '/api/x%3F/%252e%252e/auth/login', // `%3F` decodes to `?`, which a re-parse would read as the query
+    '/api/x%23/%252e%252e/auth/login', // `#` likewise, as the fragment
+    '/api/x%253F/%25252e%25252e/auth/login', // and the same one round later
+  ])('follows %s past a decoded `?` or `#` — a hop that decodes it may well keep it in the path', (path) => {
+    // Re-parsed, the path was cut at the decoded `?`/`#`, so the dot segments after it never collapsed and
+    // the route lukk would see behind such a hop was never looked at. Both readings are checked now.
+    expect(reachesLukk(`https://api.test${path.slice('/api'.length)}`, 'https://api.test/auth')).toBe(true)
+  })
+
+  it('checks each reading on its own: as lukk routes it now, and cut at a `?` a further round decodes', () => {
+    const base = 'https://api.test/auth'
+    // Under lukk's base as lukk itself decodes it, even though one more round would walk it back out.
+    expect(reachesLukk('https://api.test/auth/%252e%252e/x', base)).toBe(true)
+    // Only a hop that decodes twice and cuts at the `?` lands on lukk's base — the encoded reading settles.
+    expect(reachesLukk('https://api.test/auth%253Flogin', base)).toBe(true)
+  })
+
+  it.each([
+    '/x//%252e%252e/auth/login', // a slash-merging hop, then a decoding one
+    '/login/%25252e%25252e/%252e%252e/auth/login', // dot segments decoding at different depths
+    '/x/%252e/../%252e%252e%255cauth/login', // a backslash a decoding round reveals
+    '/x/%252E%252E/y', // whatever it would reach — the case of the escape does not matter
+    '/x/%252e/y', // a lone `.` too
+    // A tab, LF or CR a round reveals: the URL parser strips them anywhere before it collapses dots.
+    '/x//%252e%252e%2509/auth/login',
+    '/x//%252e%252e%250a/auth/login',
+    '/x//%252e%252e%250d/auth/login',
+    '/x//%252e%2509%252e/auth/login',
+    '/x//%2509%252e%252e/auth/login',
+    '/x//.%2509./auth/login',
+    // A backslash a round reveals, after merged slashes — only the split on `\` sees this one.
+    '/x//%252e%252e%255cauth/login',
+  ])('refuses %s: a decoding round reveals a dot segment, and no chain of hops is simulated to see where it lands', (path) => {
+    // Simulating hops misses chains — merge slashes, then decode, then collapse — so a `.` or `..` segment
+    // that only DECODING reveals is refused outright: no app path is written that way on purpose.
+    expect(reachesLukk(`https://api.test${path}`, 'https://api.test/auth')).toBe(true)
+  })
+
+  it.each(['/files/a%2F..%2Fb', '/files/foo%2F.%2Fbar.txt', '/..%2Fx', '/a%5c..%5cb'])('refuses %s: a dot segment hidden behind an encoded slash is traversal-shaped too', (path) => {
+    // h3 leaves `%2F` encoded, so the URL parser sees one segment — but any hop that decodes once sees `..`.
+    expect(reachesLukk(`https://api.test${path}`, 'https://api.test/auth')).toBe(true)
+  })
+
+  it('refuses a revealed dot segment for a non-root lukk on another host too — the path decides there', () => {
+    expect(reachesLukk('https://api.test/x/%252e%252e/y', 'http://internal:8000/auth')).toBe(true)
+  })
+
+  it.each(['/search%3Fq', '/files/my%20file.pdf', '/x%2520', '/a;b', '/q/%23tag', '/authors', '//x', '/a%253Fb', '/v1.2/x', '/file.tar.gz', '/.well-known/x', '/x/..y', '/x/.../y', '/x/%252e%252ey'])('lets %s through: no decoding round reveals a whole `.` or `..` segment', (path) => {
+    expect(reachesLukk(`https://api.test${path}`, 'https://api.test/auth')).toBe(false)
+  })
+
+  it('still follows a decoding round to a control character, or to a backslash the parser reads as a slash', () => {
+    const base = 'https://api.test/auth'
+    expect(reachesLukk('https://api.test/x%255c..%255cauth/login', base)).toBe(true)
+    expect(reachesLukk('https://api.test/auth%2509/login', base)).toBe(true)
+  })
+
+  it('lets an app path through once decoding settles, and refuses one still decoding after four rounds', () => {
+    const base = 'https://api.test/auth'
+    // Settles on the fourth look (`/x%252541` → `/x%2541` → `/x%41` → `/xA`), never under /auth.
+    expect(reachesLukk('https://api.test/x%252541', base)).toBe(false)
+    // One level deeper is still changing when the rounds run out: no telling where the next lands.
+    expect(reachesLukk('https://api.test/x%25252541', base)).toBe(true)
   })
 })
 
@@ -63,9 +281,12 @@ describe('rejectUnresolvedTarget', () => {
     // The regression this guards: a bad baseURL used to answer "Invalid path.", sending operators
     // hunting a route mismatch. The body now points at config — without echoing the value.
     expect(body.message).toContain('Proxy target could not be resolved')
+    expect(body.message).toContain('check the `baseURL` configuration')
     expect(body.message).not.toContain('undefined/auth')
     expect(error).toHaveBeenCalledOnce()
     expect(String(error.mock.calls[0]![0])).toContain('undefined/auth')
+    // Named by the setting at fault: the app-API proxy reports its own.
+    expect(rejectUnresolvedTarget(ev(), 'undefined/api', 'lukk `api.target`', '/x').message).toContain('check the lukk `api.target` configuration')
   })
 
   it('logs a broken base once per value, not once per request', () => {
@@ -416,5 +637,73 @@ describe('reportProxyFailure', () => {
 
     expect(error).toHaveBeenCalledTimes(20)
     expect(String(error.mock.calls[19]![0])).toContain('further proxy failures will not be logged')
+  })
+})
+
+describe('isForeignSubresource', () => {
+  const event = (method: string, headers: Record<string, string>) => ({ method, headers }) as never
+
+  it('names a GET or HEAD from another site or a same-site sibling that is not a navigation', () => {
+    expect(isForeignSubresource(event('GET', { 'sec-fetch-site': 'same-site', 'sec-fetch-mode': 'no-cors' }))).toBe(true)
+    expect(isForeignSubresource(event('HEAD', { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'cors' }))).toBe(true)
+  })
+
+  it('names a NESTED navigation too — only a top-level document is a link the visitor followed', () => {
+    // `Sec-Fetch-Mode: navigate` is also sent for an iframe, frame, embed or object; only
+    // `Sec-Fetch-Dest: document` is a top-level navigation.
+    for (const dest of ['iframe', 'frame', 'embed', 'object', '']) {
+      expect(isForeignSubresource(event('GET', { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': dest })), dest).toBe(true)
+    }
+    expect(isForeignSubresource(event('GET', { 'sec-fetch-site': 'same-site', 'sec-fetch-mode': 'navigate' }))).toBe(true)
+  })
+
+  it('leaves alone a top-level navigation, the app\'s own requests, a caller with no fetch metadata, and other methods', () => {
+    expect(isForeignSubresource(event('GET', { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document' }))).toBe(false)
+    expect(isForeignSubresource(event('GET', { 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'cors' }))).toBe(false)
+    expect(isForeignSubresource(event('GET', {}))).toBe(false)
+    // Another method is the origin check's to judge.
+    expect(isForeignSubresource(event('POST', { 'sec-fetch-site': 'same-site', 'sec-fetch-mode': 'no-cors' }))).toBe(false)
+  })
+})
+
+describe('fetchUpstream', () => {
+  afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks() })
+
+  /** A response whose headers arrive at once and whose body never does — unless the call is aborted. */
+  const stalledBody = (signal?: AbortSignal | null) => new Response(new ReadableStream({
+    start(controller) { signal?.addEventListener('abort', () => controller.error(signal.reason)) },
+  }), { status: 200 })
+
+  it('abandons a call lukk never answers, saying why', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    vi.spyOn(globalThis, 'fetch').mockImplementation((_input, init) => new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(init.signal!.reason))
+    }))
+
+    const call = fetchUpstream('https://lukk.test/auth/logout', { method: 'POST' }, res => res.text())
+    const failed = expect(call).rejects.toThrow('lukk did not answer within 15000 ms')
+    await vi.advanceTimersByTimeAsync(15_000)
+    await failed
+  })
+
+  it('holds the deadline over the body too, not only the headers', async () => {
+    // A server that sends its headers and then stalls the body otherwise hung the caller for as long as
+    // the runtime's own socket timeout allowed — the very wait the deadline exists to bound.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => stalledBody(init?.signal))
+
+    const call = fetchUpstream('https://lukk.test/auth/user', { method: 'GET' }, res => res.text())
+    const failed = expect(call).rejects.toThrow('lukk did not answer within 15000 ms')
+    await vi.advanceTimersByTimeAsync(15_000)
+    await failed
+  })
+
+  it('hands back what the reader read, and leaves no timer behind once it has', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"ok":true}', { status: 200 }))
+
+    await expect(fetchUpstream('https://lukk.test/auth/logout', { method: 'POST' }, res => res.text())).resolves.toBe('{"ok":true}')
+
+    expect(vi.getTimerCount()).toBe(0)
   })
 })

@@ -32,6 +32,8 @@ function ssrFetch(baseURL: string) {
     canRefresh: false,
     getCookieHeader: () => '__Host-lukk-session=sealed',
     getBearer: () => null,
+    getConfirmation: () => null,
+    confirmationHeader: 'X-Lukk-Confirmation',
     refresh: async () => null,
     onRedirect: () => {},
     fetchImpl: ofetch,
@@ -39,12 +41,15 @@ function ssrFetch(baseURL: string) {
 }
 
 describe('useLukkFetch SSR (real ofetch + upstream)', () => {
-  it('forwards the session cookie server-side against an absolute base (direct mode / resolved)', async () => {
+  it('fetches an absolute base server-side WITHOUT the visitor\'s cookies (direct mode)', async () => {
+    // This asserted the opposite — "the SSR fix: cookie transits" — which is the defect: every cookie the
+    // app's origin holds went to another host. An absolute API base never gets them now; the BFF's own
+    // mount does, through the request-aware fetch (see create-lukk-fetch.test.ts).
     const data = await ssrFetch(`${origin}/api`)('/me') // absolute base — as in direct mode
 
     expect(data).toEqual({ id: 1 })
     expect(received.path).toBe('/api/me')
-    expect(received.cookie).toBe('__Host-lukk-session=sealed') // the SSR fix: cookie transits
+    expect(received.cookie).toBeUndefined()
     expect(received.accept).toBe('application/json')
     expect(received.auth).toBeUndefined() // BFF: no bearer
   })

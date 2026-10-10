@@ -1,12 +1,14 @@
 import { isSameOrigin } from 'lukk-core'
 import { type $Fetch, ofetch } from 'ofetch'
-import { navigateTo, useNuxtApp, useRequestFetch, useRequestHeaders, useRequestURL, useRuntimeConfig, useState } from '#imports'
-import { ACCESS_KEY } from '../keys'
+import { confirmationHeaderName, underAppBase } from '../shared'
+import { navigateTo, useNuxtApp, useRequestFetch, useRequestHeaders, useRequestURL, useRuntimeConfig } from '#imports'
+import { useLukkSecret } from '../utils/secrets'
 import { createLukkFetch, createRequestFetch, type LukkFetchDeps, type RequestFetch } from '../utils/create-lukk-fetch'
 
 interface PublicLukk {
   mode: 'bff' | 'direct'
   apiBaseURL: string
+  confirmationHeader?: string
 }
 
 /**
@@ -25,8 +27,8 @@ interface PublicLukk {
  */
 export function useLukkFetch(): $Fetch {
   const cfg = useRuntimeConfig().public.lukk as PublicLukk
-  // Stryker disable next-line ArrowFunction: equivalent — the bearer is attached only when truthy, so undefined and null read alike.
-  const access = useState<string | null>(ACCESS_KEY, () => null)
+  const access = useLukkSecret('access')
+  const confirmation = useLukkSecret('confirmation')
   const nuxtApp = useNuxtApp() as { $lukkRefresh?: () => Promise<unknown> }
   const isDirect = cfg.mode === 'direct'
   // Capture the request cookie eagerly, in valid Nuxt context — reading it lazily inside
@@ -40,7 +42,10 @@ export function useLukkFetch(): $Fetch {
   }
 
   const deps: LukkFetchDeps = {
-    baseURL: cfg.apiBaseURL,
+    // BFF: under the app's base path — the app-API proxy is a server route of THIS app. Direct: as written.
+    // There `api.target` names where the API lives, and a relative one (`/api`) is a server beside this app
+    // on the same origin, not a route under its base; prefixing it sent every call where nothing answers.
+    baseURL: isDirect ? cfg.apiBaseURL : underAppBase((useRuntimeConfig() as { app?: { baseURL?: string } }).app?.baseURL, cfg.apiBaseURL),
     // Stryker disable next-line ConditionalExpression: the mutation run compiles the client, where this is `false` already; the server half is pinned in test/server-env/use-lukk-fetch.test.ts.
     isServer: import.meta.server === true,
     // Direct mode holds the token in client memory; SSR has none, so nothing to refresh.
@@ -49,6 +54,9 @@ export function useLukkFetch(): $Fetch {
     getCookieHeader: () => cookie,
     origin: requestOrigin(),
     getBearer: () => (isDirect ? access.value : null),
+    // Direct mode holds the step-up token itself; BFF's proxy injects the sealed one.
+    getConfirmation: () => (isDirect ? confirmation.value : null),
+    confirmationHeader: confirmationHeaderName(cfg.confirmationHeader),
     refresh: () => nuxtApp.$lukkRefresh?.() ?? Promise.resolve(null),
     // `external: true` opts out of Nuxt's absolute-URL block, so contain it ourselves: only follow
     // a redirect that stays on the API's own origin. Unreachable today (the browser sees an opaque

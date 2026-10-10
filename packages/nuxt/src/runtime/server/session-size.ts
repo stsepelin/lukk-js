@@ -1,4 +1,4 @@
-import type { TokenSession } from './utils/refresh'
+import type { TokenSession } from './refresh'
 
 // RFC 6265bis §5.6: the browser silently drops a cookie whose name+value exceeds 4096 octets. The sealed
 // lukk session cookie holds access + refresh + confirmation, so a backend embedding many claims via

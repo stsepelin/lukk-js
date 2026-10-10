@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { useLukkConfirmation } from '../src/runtime/composables/useLukkConfirmation'
-import { __test, useState } from './mocks/imports'
+import { __test } from './mocks/imports'
+import { useLukkSecret } from '../src/runtime/utils/secrets'
 
 afterEach(() => __test.reset())
 
@@ -17,7 +18,7 @@ describe('useLukkConfirmation', () => {
     expect(token.value).toBe('tok')
     expect(confirmed.value).toBe(true)
     // the client's getConfirmationToken reads the same shared state → auto-attaches it
-    expect(useState<string | null>('lukk:confirmation', () => null).value).toBe('tok')
+    expect(useLukkSecret('confirmation').value).toBe('tok')
   })
 
   it('marks confirmed without storing a token when the proxy strips it (BFF mode)', async () => {
@@ -166,6 +167,62 @@ describe('an unearnable step-up reported to the caller', () => {
 
     await expect(confirmPassword('secret')).rejects.toMatchObject({ status: 403 })
     await expect(gated).rejects.toMatchObject({ status: 403 })
+  })
+})
+
+describe('a 423 answering a request sent before the current confirmation', () => {
+  it('retries once with the confirmation that landed meanwhile, instead of clearing it and asking again', async () => {
+    // Two gated actions out at once: the first's 423 opens the modal, the user confirms, and THEN the
+    // second's 423 — sent before that confirmation existed — arrives. Clearing on it wiped the confirmation
+    // just earned and reopened the modal.
+    __test.nuxtApp = { $lukk: { confirmPassword: vi.fn().mockResolvedValue({ confirmation_token: 'fresh' }) } }
+    const { confirmPassword, withConfirmation, required, confirmed } = useLukkConfirmation()
+    let reject423!: () => void
+    const second = vi.fn()
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { reject423 = () => reject({ status: 423 }) }))
+      .mockResolvedValueOnce('done')
+
+    const pending = withConfirmation(second)
+    await confirmPassword('secret') // landed while the second was out
+    reject423()
+
+    await expect(pending).resolves.toBe('done')
+    expect(second).toHaveBeenCalledTimes(2)
+    expect(required.value).toBe(false)
+    expect(confirmed.value).toBe(true)
+  })
+})
+
+describe('the unearnable error is the app\'s, not one composable instance\'s', () => {
+  it('reaches the action waiting in ANOTHER instance — the page wraps, the modal confirms', async () => {
+    // The documented shape: a page calls `withConfirmation()` from its own `useLukkConfirmation()`, and the
+    // modal bound to `required` calls `confirmPassword()` from ITS own. Held per instance, the 403 landed
+    // in the modal's copy, and the page's action rejected as "cancelled" — the misreport this exists to stop.
+    const refused = { status: 403, message: 'This token was issued with a fixed set of abilities' }
+    __test.nuxtApp = { $lukk: { confirmPassword: vi.fn().mockRejectedValue(refused) } }
+    const page = useLukkConfirmation()
+    const modal = useLukkConfirmation()
+
+    const gated = page.withConfirmation(() => Promise.reject({ status: 423 }))
+    await Promise.resolve()
+    expect(modal.required.value).toBe(true)
+
+    await expect(modal.confirmPassword('secret')).rejects.toBe(refused)
+    // The very error, not a copy or a reactive proxy of it.
+    await expect(gated).rejects.toBe(refused)
+  })
+
+  it('never carries over to another app — on the server, another request', async () => {
+    __test.nuxtApp = { $lukk: { confirmPassword: vi.fn().mockRejectedValue({ status: 403 }) } }
+    useLukkConfirmation().abandonIfUnearnable({ status: 403 })
+
+    __test.nuxtApp = { $lukk: {} }
+    const next = useLukkConfirmation()
+    const waiting = next.withConfirmation(() => Promise.reject({ status: 423 }))
+    await Promise.resolve()
+    next.cancel()
+
+    await expect(waiting).rejects.toThrow('lukk: confirmation cancelled')
   })
 })
 

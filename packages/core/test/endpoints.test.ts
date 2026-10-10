@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createLukkClient, isTokenPair, type LukkClient } from '../src/client'
+import { createLukkClient, isTokenPair, type LukkClient, retryAfterSeconds } from '../src/client'
 import { isRegistrationPending, isTwoFactorChallenge } from '../src/types'
 
 function json(body: unknown, status = 200): Response {
@@ -19,6 +19,7 @@ describe('endpoint methods → route + verb', () => {
     ['exportAccount', c => c.exportAccount(), 'https://x/auth/account/export', undefined],
     ['confirmPassword', c => c.confirmPassword('p'), 'https://x/auth/confirm-password', 'POST'],
     ['confirmPasskey', c => c.confirmPasskey('cid', { id: 'c' }), 'https://x/auth/confirm-passkey', 'POST'],
+    ['passkeyConfirmationOptions', c => c.passkeyConfirmationOptions(), 'https://x/auth/confirm-passkey/options', 'POST'],
     ['twoFactorChallenge', c => c.twoFactorChallenge({ challenge_token: 't', code: '1' }), 'https://x/auth/two-factor-challenge', 'POST'],
     ['refreshTokens(token)', c => c.refreshTokens('rt'), 'https://x/auth/refresh', 'POST'],
     ['refreshTokens()', c => c.refreshTokens(), 'https://x/auth/refresh', 'POST'],
@@ -56,6 +57,24 @@ describe('logout request shape', () => {
     expect(init.keepalive).toBe(true)
   })
 
+  it('presents a refresh token it is given, so a session whose access token expired still ends', async () => {
+    // lukk accepts the refresh token on logout (RFC 7009 revocation by the token the client holds): a client
+    // in body mode, whose access token has lapsed, otherwise had to spend a rotation just to log out — or
+    // could not log out at all while refreshing was throttled or failing.
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockRejectedValueOnce(new TypeError('keepalive refused'))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+    const client = createLukkClient({ baseURL: 'https://x/auth', fetch })
+
+    await client.logout({ refreshToken: 'rt-1' })
+    expect((fetch.mock.calls[0]![1] as RequestInit).body).toBe('{"refresh_token":"rt-1"}')
+
+    // The same body on the resend a browser that refuses keepalive gets, or it is not the same logout.
+    await client.logout({ refreshToken: 'rt-2' })
+    expect((fetch.mock.calls[2]![1] as RequestInit).body).toBe('{"refresh_token":"rt-2"}')
+  })
+
   it('sends it again without keepalive where the browser refuses one needing a preflight', async () => {
     const fetch = vi.fn()
       .mockRejectedValueOnce(new TypeError('Preflight request for request with keepalive specified is currently not supported'))
@@ -69,6 +88,35 @@ describe('logout request shape', () => {
     const fetch = vi.fn(async () => new Response(JSON.stringify({ message: 'Server Error' }), { status: 500 }))
     await expect(createLukkClient({ baseURL: 'https://x/auth', fetch }).logout()).rejects.toMatchObject({ status: 500 })
     expect(fetch).toHaveBeenCalledOnce()
+  })
+})
+
+describe('the Retry-After an error names', () => {
+  it('is kept as seconds, so a binding can come back when the server asked', async () => {
+    const fetch = vi.fn(async () => new Response(JSON.stringify({ message: 'Unauthenticated.' }), { status: 503, headers: { 'Retry-After': '5' } }))
+    await expect(createLukkClient({ baseURL: 'https://x/auth', fetch }).refreshTokens()).rejects.toEqual({ status: 503, message: 'Unauthenticated.', retryAfter: 5 })
+    const longer = vi.fn(async () => new Response('{}', { status: 503, headers: { 'Retry-After': '120' } }))
+    await expect(createLukkClient({ baseURL: 'https://x/auth', fetch: longer }).refreshTokens()).rejects.toMatchObject({ retryAfter: 120 })
+  })
+
+  it('is left out when absent, or given as a date rather than seconds', async () => {
+    const answer = (headers: Record<string, string>) => vi.fn(async () => new Response('{"message":"x"}', { status: 503, headers }))
+    await expect(createLukkClient({ baseURL: 'https://x/auth', fetch: answer({}) }).refreshTokens()).rejects.not.toHaveProperty('retryAfter')
+    await expect(createLukkClient({ baseURL: 'https://x/auth', fetch: answer({ 'Retry-After': 'Wed, 21 Oct 2026 07:28:00 GMT' }) }).refreshTokens()).rejects.not.toHaveProperty('retryAfter')
+    await expect(createLukkClient({ baseURL: 'https://x/auth', fetch: answer({ 'Retry-After': '5s' }) }).refreshTokens()).rejects.not.toHaveProperty('retryAfter')
+    await expect(createLukkClient({ baseURL: 'https://x/auth', fetch: answer({ 'Retry-After': 'x5' }) }).refreshTokens()).rejects.not.toHaveProperty('retryAfter')
+  })
+})
+
+describe('retryAfterSeconds', () => {
+  it('reads delay-seconds, and nothing else', () => {
+    expect(retryAfterSeconds('5')).toBe(5)
+    expect(retryAfterSeconds('120')).toBe(120)
+    expect(retryAfterSeconds(null)).toBeUndefined()
+    expect(retryAfterSeconds('')).toBeUndefined()
+    expect(retryAfterSeconds('Wed, 21 Oct 2026 07:28:00 GMT')).toBeUndefined()
+    expect(retryAfterSeconds('5s')).toBeUndefined()
+    expect(retryAfterSeconds('x5')).toBeUndefined()
   })
 })
 
@@ -138,5 +186,29 @@ describe('guards', () => {
   it('isRegistrationPending', () => {
     expect(isRegistrationPending({ registered: true, requires_verification: true })).toBe(true)
     expect(isRegistrationPending({ access_token: 'a', expires_in: 1 })).toBe(false)
+  })
+})
+
+describe('refusals that change nothing surface as a LukkError, sent once', () => {
+  // lukk's 2FA management answers 409 where there is nothing to bind — confirming two-factor already on
+  // (`code`), regenerating recovery codes on an account without it (`two_factor`) — and a password step-up
+  // or change from a session below the account's step-up level is a 422 (`password`, `current_password`). None is a 401: no
+  // refresh, no retry, no sign-out — the caller gets the error with its field, for `useLukkForm` to map.
+  it.each([
+    ['confirmTwoFactor (already enabled)', (c: LukkClient) => c.confirmTwoFactor('123456'), 409, { code: ['Two-factor authentication is already enabled.'] }],
+    ['regenerateRecoveryCodes (no two-factor)', (c: LukkClient) => c.regenerateRecoveryCodes(), 409, { two_factor: ['Two-factor authentication is not enabled.'] }],
+    ['confirmPassword (below the account\'s step-up level)', (c: LukkClient) => c.confirmPassword('p'), 422, { password: ['This account has a second factor. Confirm with a passkey that verifies you, or sign in again with your second factor first.'] }],
+    ['changePassword (below the account\'s step-up level)', (c: LukkClient) => c.changePassword({ current_password: 'p', password: 'n', password_confirmation: 'n' }), 422, { current_password: ['Confirm with your second factor first.'] }],
+  ])('%s', async (_name, call, status, errors) => {
+    const fetch = vi.fn(async () => json({ message: 'Refused.', errors }, status))
+    const refresh = vi.fn()
+    const onUnauthenticated = vi.fn()
+
+    const failure = call(createLukkClient({ baseURL: 'https://x/auth', fetch, refresh, onUnauthenticated }))
+
+    await expect(failure).rejects.toMatchObject({ status, message: 'Refused.', errors })
+    expect(fetch).toHaveBeenCalledOnce()
+    expect(refresh).not.toHaveBeenCalled()
+    expect(onUnauthenticated).not.toHaveBeenCalled()
   })
 })

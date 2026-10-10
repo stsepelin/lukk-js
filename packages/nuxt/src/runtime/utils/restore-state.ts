@@ -1,6 +1,7 @@
 import type { Ref } from 'vue'
-import { RESTORE_FAILED_KEY } from '../keys'
+import { CONFIRM_REQUIRED_KEY, RESTORE_FAILED_KEY } from '../keys'
 import { clearPendingLogout, noteSignIn } from './pending-logout'
+import { lukkSecret } from './secrets'
 import { shallowRef, useState } from '#imports'
 
 /**
@@ -45,6 +46,8 @@ export interface RestoreState {
    * signed the new session out.
    */
   ending: Promise<unknown> | null
+  /** The `logout()` call in progress in this tab, which a second call joins (see `useLukkAuth().logout`). */
+  loggingOut?: Promise<void> | null
   /** Tell other tabs of this app that the session changed. Set by the client plugin where supported. */
   announce?: () => void
   /** The Web Lock shared by this app's tabs. Set by the client plugin where the browser has one. */
@@ -58,6 +61,8 @@ export interface RestoreState {
   finishingLogout?: number
   /** That call stood down without sending: the session it was for had been replaced. Read by the restore plugin. */
   logoutStoodDown?: boolean
+  /** Ends the wait of a refresh holding off for a `Retry-After`, so it can stand down for a logout. */
+  wakeRefreshRetry?: () => void
   /** How many of this tab's operations are using the tab lock — the lock is released when it reaches 0. */
   lockUsers: number
   /** Settles once this tab holds the lock (or gave up waiting for it). */
@@ -256,9 +261,25 @@ export function beginSession(nuxtApp: object, sentAt: number): void {
   // Stryker disable next-line ArrowFunction,BooleanLiteral: equivalent — the initial value is overwritten on the next line.
   const restoreFailed = useState<boolean>(RESTORE_FAILED_KEY, () => false)
   restoreFailed.value = false
+  // A step-up still waiting belongs to the session this one replaces, possibly another account's: cancel
+  // it, or the next confirmation would run the old action under the new account.
+  cancelPendingStepUp()
+  // So does a 2FA challenge from an earlier attempt: left pending, `verifyTwoFactor` redeemed it and
+  // replaced the session just begun.
+  lukkSecret(nuxtApp, 'challenge').value = null
   // A logout never finished is moot once a sign-in is sent after it — here, or in a tab that left and
   // returns. One asked for while this sign-in was already out still stands.
   clearPendingLogout(state.scope, sentAt)
   noteSignIn(state.scope, sentAt)
   state.announce?.()
+}
+
+/**
+ * Cancel a `withConfirmation()` still waiting for a step-up: it rejects as soon as `required` goes false.
+ * Called when the session it was asked for ends — at logout, and when a sign-in replaces it.
+ */
+export function cancelPendingStepUp(): void {
+  // Stryker disable next-line ArrowFunction,BooleanLiteral: equivalent — the initial value is overwritten on the next line.
+  const required = useState<boolean>(CONFIRM_REQUIRED_KEY, () => false)
+  required.value = false
 }

@@ -13,7 +13,7 @@ let upstream: Server
 let auth: Server
 let proxy: Server
 let proxyURL = ''
-let received: { method?: string, contentType?: string, accept?: string, authorization?: string, xForwardedFor?: string, visitorCountry?: string, body: Buffer } = { body: Buffer.alloc(0) }
+let received: { url?: string, method?: string, contentType?: string, accept?: string, authorization?: string, xForwardedFor?: string, visitorCountry?: string, headerNames?: string[], body: Buffer } = { body: Buffer.alloc(0) }
 let refreshCalls = 0
 
 const port = (s: Server) => (s.address() as { port: number }).port
@@ -43,7 +43,7 @@ beforeAll(async () => {
         res.end(JSON.stringify({ ok: true }))
         return
       }
-      received = { method: req.method, contentType: req.headers['content-type'], accept: req.headers.accept, authorization: req.headers.authorization, xForwardedFor: req.headers['x-forwarded-for'] as string | undefined, visitorCountry: req.headers['x-visitor-country'] as string | undefined, body: Buffer.concat(chunks) }
+      received = { url: req.url, method: req.method, contentType: req.headers['content-type'], accept: req.headers.accept, authorization: req.headers.authorization, xForwardedFor: req.headers['x-forwarded-for'] as string | undefined, visitorCountry: req.headers['x-visitor-country'] as string | undefined, headerNames: Object.keys(req.headers), body: Buffer.concat(chunks) }
       res.setHeader('content-type', 'application/json')
       res.end(JSON.stringify({ ok: true }))
     })
@@ -156,6 +156,90 @@ describe('api-proxy integration (real h3 + upstream)', () => {
     expect(received.visitorCountry).toBe('EE')
   })
 
+  it('keeps an encoded `?` in the path as path data, and the query exactly as sent (real h3 decoding)', async () => {
+    // h3 decodes `event.path` before the handler runs, so `%3F` arrives as a bare `?`. Splitting that
+    // on `?` moved part of the PATH into an invented query on the way upstream.
+    const res = await fetch(`${proxyURL}/api/files/a%3Fb?x=%23&y=1`)
+    expect(res.status).toBe(200)
+    expect(received.url).toBe('/files/a%3Fb?x=%23&y=1')
+  })
+
+  it('refuses lukk\'s own routes when the app API and lukk are the same server', async () => {
+    // The documented layout: `api.target` is the app, `baseURL` the same app under /auth. Proxied, the
+    // login response — a token pair — streamed straight to the browser.
+    const cfg = __test.runtimeConfig.lukk as Record<string, unknown>
+    const baseURL = cfg.baseURL
+    cfg.baseURL = `${cfg.apiTarget as string}/auth`
+    received = { body: Buffer.alloc(0) }
+    try {
+      // The double-encoded ones too, through h3's real decoding: a hop that decodes once more lands on lukk.
+      for (const path of ['/api/auth/login', '/api/auth/./login', '/api/auth%2Flogin', '/api/auth/login/', '/api/x/%252e%252e/auth/login', '/api/%2561uth/login']) {
+        const res = await fetch(`${proxyURL}${path}`, { method: 'POST', body: '{}' })
+        expect(res.status, path).toBe(404)
+      }
+      expect(received.url).toBeUndefined() // nothing reached the upstream
+    }
+    finally {
+      cfg.baseURL = baseURL
+    }
+  })
+
+  it('refuses lukk\'s routes through a PHP front controller — named in the path, in baseURL, or hiding what it encodes', async () => {
+    const cfg = __test.runtimeConfig.lukk as Record<string, unknown>
+    const baseURL = cfg.baseURL
+    received = { body: Buffer.alloc(0) }
+    try {
+      // Laravel without URL rewriting: lukk is reached at `/index.php/auth`, and so is the login through the proxy.
+      cfg.baseURL = `${cfg.apiTarget as string}/index.php/auth`
+      for (const path of ['/api/index.php/auth/login', '/api/auth/login']) {
+        const res = await fetch(`${proxyURL}${path}`, { method: 'POST', body: '{}' })
+        expect(res.status, path).toBe(404)
+      }
+      // A `.php` segment is never dropped with what it hides: an encoded separator, query, fragment or `..`.
+      cfg.baseURL = `${cfg.apiTarget as string}/auth`
+      for (const path of ['/api/index.php/auth/login', '/api/auth%2Flogin%3F.php', '/api/auth%2Flogin%23.php', '/api/auth%252Flogin%253F.php', '/api/x%2F..%2Fauth%2Flogin%3F.php', '/api/..%2Fx.php', '/api/index.php%2Fauth/login', '/api/index%252ephp/auth/login', '/api/index.php%252Fauth/login', '/api/index.php%250D/auth/login', '/api/index.php%2509/auth/refresh', '/api/index.ph%2509p/auth/passkeys/login']) {
+        const res = await fetch(`${proxyURL}${path}`, { method: 'POST', body: '{}' })
+        expect(res.status, path).toBe(404)
+      }
+      expect(received.url).toBeUndefined() // nothing reached the upstream
+    }
+    finally {
+      cfg.baseURL = baseURL
+    }
+  })
+
+  it('removes the headers it blanks — the browser\'s Origin and Cookie never reach the upstream, not even empty', async () => {
+    const res = await fetch(`${proxyURL}/api/me`, { headers: { 'origin': proxyURL, 'cookie': 'tracking=1', 'x-forwarded-host': 'evil.test' } })
+
+    expect(res.status).toBe(200)
+    expect(received.headerNames).not.toContain('origin')
+    expect(received.headerNames).not.toContain('cookie')
+    expect(received.headerNames).not.toContain('x-forwarded-host')
+    expect(received.headerNames).toContain('accept')
+  })
+
+  it('forwards a header the browser itself sent empty — only the proxy\'s own blanks are removed', async () => {
+    const res = await fetch(`${proxyURL}/api/me`, { headers: { 'x-visitor-country': '' } })
+
+    expect(res.status).toBe(200)
+    expect(received.headerNames).toContain('x-visitor-country')
+    expect(received.visitorCountry).toBe('')
+  })
+
+  it('marks every response nosniff, and sandboxes only a document', async () => {
+    const json = await fetch(`${proxyURL}/api/me`)
+    expect(json.headers.get('x-content-type-options')).toBe('nosniff')
+    expect(json.headers.get('content-security-policy')).toBeNull()
+
+    const pdf = await fetch(`${proxyURL}/api/download`)
+    expect(pdf.headers.get('content-security-policy')).toBeNull()
+  })
+
+  it('marks the streamed response as varying by Cookie', async () => {
+    const res = await fetch(`${proxyURL}/api/me`)
+    expect(res.headers.get('vary')).toBe('Cookie')
+  })
+
   it('forwards the socket address, not a client-supplied one, with no trusted header configured', async () => {
     const res = await fetch(`${proxyURL}/api/me`, { headers: { 'x-forwarded-for': '1.2.3.4' } })
 
@@ -227,16 +311,15 @@ it('still strips a header the client legitimately named in Connection', async ()
   // The feature this stripper exists for (RFC 9110 §7.6.1) must keep working — the fix skips only
   // the names fetch manages itself, not custom single-hop headers.
   //
-  // Neutralised by BLANKING, not by removal: `proxyRequest` merges over the inbound headers, so
-  // omitting a key leaves the client's value in place. The upstream therefore sees the header
-  // present-but-empty rather than absent. Strictly §7.6.1 says "remove", and this is as close as
-  // that API allows — what matters is that the client's value does not survive the hop.
+  // REMOVED, as §7.6.1 says: `proxyRequest` merges over the inbound headers, so the proxy blanks the
+  // name to override the client's value, and its `fetch` then drops every blank before sending. (It
+  // used to reach the upstream present-but-empty.)
   const res = await httpGet('/api/echo', {
     'connection': 'keep-alive, x-visitor-country',
     'x-visitor-country': 'SE',
   })
 
   expect(res.status).toBe(200)
-  expect(received.visitorCountry).toBe('')
-  expect(received.visitorCountry).not.toBe('SE')
+  expect(received.headerNames).not.toContain('x-visitor-country')
+  expect(received.visitorCountry).toBeUndefined()
 })

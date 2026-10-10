@@ -24,4 +24,15 @@ describe('useLukkTwoFactor', () => {
     expect(await tf.recoveryCodeCount()).toEqual({ remaining: 3, total: 8 })
     expect(await tf.regenerateRecoveryCodes()).toEqual({ recovery_codes: ['b'] })
   })
+
+  it('passes lukk\'s 409s through as they came — confirming two-factor already on, codes without it', async () => {
+    // Nothing to bind, so nothing changed: the caller gets the LukkError with its field, for a form to show.
+    const already = { status: 409, message: 'Two-factor authentication is already enabled.', errors: { code: ['Two-factor authentication is already enabled.'] } }
+    const without = { status: 409, message: 'Two-factor authentication is not enabled.', errors: { two_factor: ['Two-factor authentication is not enabled.'] } }
+    __test.nuxtApp = { $lukk: { confirmTwoFactor: vi.fn().mockRejectedValue(already), regenerateRecoveryCodes: vi.fn().mockRejectedValue(without) } }
+    const tf = useLukkTwoFactor()
+
+    await expect(tf.confirm('123456')).rejects.toBe(already)
+    await expect(tf.regenerateRecoveryCodes()).rejects.toBe(without)
+  })
 })

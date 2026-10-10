@@ -1,10 +1,12 @@
 import { isRegistrationPending, isTwoFactorChallenge, type LoginInput, type LoginResult, type LukkUser, type RegisterInput, type RegisterResult, shapeUser, userShapeWarning } from 'lukk-core'
 import type { ComputedRef, Ref } from 'vue'
 import { computed, useNuxtApp, useRuntimeConfig, useState } from '#imports'
-import { ACCESS_KEY, CHALLENGE_KEY, CONFIRMATION_KEY, CONFIRMED_KEY, READY_KEY, RESTORE_FAILED_KEY, USER_KEY } from '../keys'
-import { isAuthRejection } from '../shared'
+import { CONFIRMED_KEY, READY_KEY, RESTORE_FAILED_KEY, USER_KEY } from '../keys'
+import { useLukkSecret } from '../utils/secrets'
+import { SIGN_IN } from '../utils/sign-in'
+import { isAuthRejection, underAppBase } from '../shared'
 import { clearPendingLogout, notePendingLogout, signedInSince } from '../utils/pending-logout'
-import { acrossTabs, restoreState, settleRefresh, signIn } from '../utils/restore-state'
+import { acrossTabs, cancelPendingStepUp, restoreState, settleRefresh, signIn } from '../utils/restore-state'
 import { clearLogoutCookie, setLogoutCookie } from '../utils/logout-cookie'
 import { tokenFamily, tokenSubject } from '../utils/token-subject'
 import { isPrematureWait, whenReady as settled } from '../utils/when-ready'
@@ -22,6 +24,16 @@ interface PublicLukk {
 }
 
 /**
+ * What a sign-in resolves to in BFF mode: the proxy's acknowledgement. The token pair stays in the sealed
+ * session server-side, so there is no `access_token` — narrow with `'access_token' in result` (or
+ * `isTwoFactorChallenge`) before reading one.
+ */
+export interface BffSignInResult {
+  ok: true
+  expires_in?: number
+}
+
+/**
  * Declared rather than inferred: the module build cannot resolve `#imports`, so an inferred return type
  * shipped as `any` in the published declarations — and `auth.ready.value = true` type-checked in a
  * consumer app.
@@ -33,8 +45,8 @@ export interface LukkAuth {
   whenReady: () => Promise<void>
   restoreFailed: ComputedRef<boolean>
   pendingTwoFactor: ComputedRef<boolean>
-  register: (input: RegisterInput) => Promise<RegisterResult>
-  login: (credentials: LoginInput) => Promise<LoginResult>
+  register: (input: RegisterInput) => Promise<RegisterResult | BffSignInResult>
+  login: (credentials: LoginInput) => Promise<LoginResult | BffSignInResult>
   verifyTwoFactor: (code: string) => Promise<void>
   verifyRecoveryCode: (recoveryCode: string) => Promise<void>
   logout: () => Promise<void>
@@ -53,17 +65,24 @@ export function useLukkAuth(): LukkAuth {
   // Restore bookkeeping that `clearNuxtState()` cannot erase — see utils/restore-state.
   const state = restoreState(nuxtApp)
   const cfg = useRuntimeConfig().public.lukk as PublicLukk
+  // In BFF mode the user endpoint is a same-origin path served by THIS app (the app-API proxy, or a route of
+  // its own), so it sits under the app's base — fetched with an empty base, `/api/me` from an app served
+  // under `/admin/` resolved against the origin root, outside the app. In direct mode it names the API, as
+  // written. Read here, in valid Nuxt context, not inside the load.
+  const userEndpoint = cfg.mode === 'bff'
+    ? underAppBase((useRuntimeConfig() as { app?: { baseURL?: string } }).app?.baseURL, cfg.userEndpoint)
+    : cfg.userEndpoint
   // Auth-aware fetch for the current-user load — SSR-correct (forwards the session
   // cookie) unlike a bare `$fetch`, and transport-aware for the bearer.
   const api = useLukkFetch()
 
   // Shared with the client plugin (`onTokens` writes the access token here).
-  const access = useState<string | null>(ACCESS_KEY, () => null)
+  const access = useLukkSecret('access')
   const user = useState<LukkUser | null>(USER_KEY, () => null)
   // A pending 2FA challenge token, set by `login` when the user has 2FA enabled.
-  const challenge = useState<string | null>(CHALLENGE_KEY, () => null)
+  const challenge = useLukkSecret('challenge')
   // The step-up confirmation state (managed by `useLukkConfirmation`).
-  const confirmation = useState<string | null>(CONFIRMATION_KEY, () => null)
+  const confirmation = useLukkSecret('confirmation')
   const confirmed = useState<boolean>(CONFIRMED_KEY, () => false)
 
   // Loose `!= null`: `clearNuxtState()` leaves these keys `undefined` (Nuxt 3) or deletes them (Nuxt 4 without `resetOnClear`), and
@@ -132,12 +151,20 @@ export function useLukkAuth(): LukkAuth {
    * `verifyTwoFactor` / `verifyRecoveryCode`. Otherwise the token is persisted
    * and the user loaded.
    */
-  async function login(credentials: LoginInput): Promise<LoginResult> {
-    const { result, current } = await signIn(nuxtApp, () => $lukk.login(credentials), r => !isTwoFactorChallenge(r))
+  function login(credentials: LoginInput): Promise<LoginResult | BffSignInResult> {
+    return signInWith(() => $lukk.login(credentials))
+  }
+
+  /**
+   * Any sign-in that answers with a token pair or a two-factor challenge — a password, or a passkey
+   * (`useLukkPasskeys().login()` reaches it through {@link SIGN_IN}). One path, so a sign-in superseded
+   * by a logout always ends its own session rather than joining the logout that went out before it.
+   */
+  async function signInWith(send: () => Promise<LoginResult>): Promise<LoginResult | BffSignInResult> {
+    const { result, current } = await signIn(nuxtApp, send, r => !isTwoFactorChallenge(r))
     if (!current) return endSupersededSignIn(result, !isTwoFactorChallenge(result))
     if (isTwoFactorChallenge(result)) {
-      // Client-only, for the reason ACCESS_KEY is: a `useState` written during SSR serialises
-      // into `__NUXT_DATA__`. A challenge token is a live single-use credential, and at this point
+      // Client-only, for the reason the access token is: nothing of the session's may be written on the server. A challenge token is a live single-use credential, and at this point
       // in the flow no session cookie exists yet — so `no-store` never fires and a CDN may cache
       // the page with it embedded.
       // Stryker disable next-line ConditionalExpression: the mutation run compiles the client, where this is `true` already; the server half is pinned in test/server-env/challenge.test.ts.
@@ -154,7 +181,7 @@ export function useLukkAuth(): LukkAuth {
    * server issues no session (register-only, or verification required), it resolves to a
    * `{ registered, requires_verification }` shape — route the user on accordingly.
    */
-  async function register(input: RegisterInput): Promise<RegisterResult> {
+  async function register(input: RegisterInput): Promise<RegisterResult | BffSignInResult> {
     const startsSession = (r: RegisterResult) => !isRegistrationPending(r) && !isTwoFactorChallenge(r)
     const { result, current } = await signIn(nuxtApp, () => $lukk.register(input), startsSession)
     if (!current) return endSupersededSignIn(result, startsSession(result))
@@ -195,11 +222,33 @@ export function useLukkAuth(): LukkAuth {
    * (tokens in direct mode, a sealed cookie in BFF) that nothing on screen reflects. End it too.
    */
   async function endSupersededSignIn<T>(result: T, issuedSession: boolean): Promise<T> {
-    if (issuedSession) await logout()
+    // A logout of its own, never one joined: a logout still out went before this session existed and
+    // cannot end it. Started NOW, alongside that one, while the token this sign-in just stored is still
+    // there to send — the earlier logout's cleanup clears it. A `logout()` called meanwhile joins this one.
+    if (issuedSession) await inProgress(runLogout())
     return result
   }
 
-  async function logout(): Promise<void> {
+  /**
+   * One logout per tab at a time: a call while one is out joins it. Run twice — a double click — the
+   * second went out after the first had ended the session, got a 401 it couldn't renew, rejected, and
+   * left the logout note it had just written standing, so the next page load set out to finish a logout
+   * that was already done.
+   */
+  function logout(): Promise<void> {
+    return state.loggingOut ?? inProgress(runLogout())
+  }
+
+  /** Publish `run` as the logout in progress, until it settles — unless a newer one has replaced it. */
+  function inProgress(run: Promise<void>): Promise<void> {
+    const tracked: Promise<void> = run.finally(() => {
+      if (state.loggingOut === tracked) state.loggingOut = null
+    })
+    state.loggingOut = tracked
+    return tracked
+  }
+
+  async function runLogout(): Promise<void> {
     // Until the logout request itself is on the wire it waits — for another tab's lock, for a refresh
     // already out. A page that navigates away in that moment cancelled it, and the session outlived what
     // the user saw. So if the page starts to unload first, send it right away with `keepalive` (which
@@ -279,6 +328,9 @@ export function useLukkAuth(): LukkAuth {
       return true
     }, () => { renewalFailed = true }))
     state.ending = ending
+    // A refresh waiting out a Retry-After would hold this logout for the rest of the wait, then renew the
+    // session it is ending. Wake it: it sees `ending` and stands down.
+    state.wakeRefreshRetry?.()
     try {
       await ending
       // Standing down, the note isn't this logout's to clear: a newer `logout()` may have just written it.
@@ -327,6 +379,8 @@ export function useLukkAuth(): LukkAuth {
       challenge.value = null
       confirmation.value = null
       confirmed.value = false
+      // And a step-up still waiting for this session: the next confirmation must not run its action.
+      cancelPendingStepUp()
       state.announce?.()
     }
   }
@@ -406,7 +460,7 @@ export function useLukkAuth(): LukkAuth {
       // userEndpoint is a full path; `baseURL: ''` keeps it as-is (in server-BFF the
       // request-aware transport resolves the relative endpoint in-process). `shapeUser`
       // auto-unwraps a Laravel `{ data: {...} }` API-Resource wrapper (configurable via `user.key`).
-      const body = await api(cfg.userEndpoint, { baseURL: '' })
+      const body = await api(userEndpoint, { baseURL: '' })
       // Stryker disable next-line BooleanLiteral: equivalent — a stale answer is never read: the caller re-checks `isCurrent()`, and a generation only moves on.
       if (!isCurrent()) return false
       user.value = shapeUser(body, cfg.userKey || false)
@@ -496,5 +550,8 @@ export function useLukkAuth(): LukkAuth {
     return settled(ready, isServer)
   }
 
-  return { user, loggedIn, ready, whenReady, restoreFailed, pendingTwoFactor, register, login, verifyTwoFactor, verifyRecoveryCode, logout, revokeOtherSessions, fetchUser, initSession }
+  const auth: LukkAuth = { user, loggedIn, ready, whenReady, restoreFailed, pendingTwoFactor, register, login, verifyTwoFactor, verifyRecoveryCode, logout, revokeOtherSessions, fetchUser, initSession }
+  // Symbol-keyed and non-enumerable: internal to lukk-nuxt, absent from `LukkAuth` and from spreads.
+  Object.defineProperty(auth, SIGN_IN, { value: signInWith })
+  return auth
 }

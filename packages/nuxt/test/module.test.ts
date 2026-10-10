@@ -102,17 +102,31 @@ describe('lukk-nuxt module', () => {
 
     expect(template.filename).toBe('types/lukk-nuxt.d.ts')
     const contents = template.getContents()
-    expect(contents).toContain(`import type { LukkClient, TokenPair } from 'lukk-core'`)
+    // Was `Promise<TokenPair | null>`, which the BFF default never resolved to: its refresh hands the
+    // browser no token. That assertion pinned the untruthful type, so it changed with it.
+    expect(contents).toContain(`import type { LukkClient, RefreshOutcome } from 'lukk-core'`)
     expect(contents).toContain('$lukk: LukkClient')
-    expect(contents).toContain('$lukkRefresh: () => Promise<TokenPair | null>')
+    expect(contents).toContain('$lukkRefresh: () => Promise<RefreshOutcome>')
+    // Provided by the plugin all along, and missing from the types.
+    expect(contents).toContain('$lukkRestore: () => Promise<{ pair: RefreshOutcome, unavailable: boolean, superseded?: boolean }>')
+    // And in templates, where `$lukk` was untyped: Vue reads globals from ComponentCustomProperties.
+    expect(contents).toContain(`declare module 'vue'`)
+    expect(contents).toMatch(/interface ComponentCustomProperties \{[^}]*\$lukk: LukkClient/)
+    // All three provides, as on NuxtApp: `$lukkRestore` was typed there and missing here.
+    expect(contents).toMatch(/interface ComponentCustomProperties \{[^}]*\$lukkRestore: \(\) => Promise<\{ pair: RefreshOutcome, unavailable: boolean, superseded\?: boolean \}>/)
   })
 
-  it('registers the streaming-render marker alongside SSR hydration, and not without it', () => {
+  it('registers the streaming-render marker in bff mode — with SSR hydration or the renewal alike — and not in direct mode', () => {
     setup({ baseURL: 'https://api/auth', mode: 'bff' })
     expect(kit.addServerPlugin).toHaveBeenCalledWith('./runtime/server/plugins/streaming-render')
 
+    // The renewal re-seals before the render too, and a streamed page could not withhold that seal.
     kit.addServerPlugin.mockClear()
     setup({ baseURL: 'https://api/auth', mode: 'bff', ssrHydrate: false })
+    expect(kit.addServerPlugin).toHaveBeenCalledWith('./runtime/server/plugins/streaming-render')
+
+    kit.addServerPlugin.mockClear()
+    setup({ baseURL: 'https://api/auth', mode: 'direct' })
     expect(kit.addServerPlugin).not.toHaveBeenCalledWith('./runtime/server/plugins/streaming-render')
   })
 
@@ -175,17 +189,25 @@ describe('lukk-nuxt module', () => {
     expect(kit.addServerImportsDir).toHaveBeenCalledOnce() // getLukkAccessToken / useLukkSession
   })
 
-  it('registers the SSR-hydration server plugin in bff mode by default, and skips it with ssrHydrate: false', () => {
+  it('registers the SSR-hydration server plugin in bff mode by default, and only the renewal step with ssrHydrate: false', () => {
     setup({ baseURL: 'https://api/auth', mode: 'bff' })
-    expect(kit.addPlugin).toHaveBeenCalledTimes(3) // client + session.client + session.server
+    expect(kit.addPlugin).toHaveBeenCalledTimes(4) // client + session.client + the render marker + session.server
     expect(kit.addPlugin).toHaveBeenCalledWith(expect.objectContaining({ src: expect.stringContaining('session.server'), mode: 'server' }))
+    expect(kit.addPlugin).not.toHaveBeenCalledWith(expect.objectContaining({ src: expect.stringContaining('session-renew') }))
+    expect(kit.addPlugin).toHaveBeenCalledWith({ src: './runtime/plugins/render-marker.server', mode: 'server' })
     // The last check on a page whose request finished a logout — BFF, whatever ssrHydrate says.
     expect(kit.addServerPlugin).toHaveBeenCalledWith(expect.stringContaining('finish-logout-render'))
 
     vi.clearAllMocks()
     setup({ baseURL: 'https://api/auth', mode: 'bff', ssrHydrate: false })
-    expect(kit.addPlugin).toHaveBeenCalledTimes(2) // client + session.client only
-    expect(kit.addPlugin).not.toHaveBeenCalledWith(expect.objectContaining({ mode: 'server' }))
+    // The render marker stays: without hydration, a render's own app-API calls must still never rotate.
+    // And the renewal, so those calls carry a live token instead of rendering a 401 after every idle spell.
+    expect(kit.addPlugin.mock.calls.map(c => c[0])).toEqual([
+      './runtime/plugins/client',
+      { src: './runtime/plugins/session.client', mode: 'client' },
+      { src: './runtime/plugins/render-marker.server', mode: 'server' },
+      { src: './runtime/plugins/session-renew.server', mode: 'server' },
+    ])
     expect(kit.addServerPlugin).toHaveBeenCalledWith(expect.stringContaining('finish-logout-render'))
 
     vi.clearAllMocks()
@@ -348,6 +370,48 @@ describe('lukk-nuxt module', () => {
     expect(warned({ baseURL: 'https://api.example.com/auth', mode: 'bff' })).toBe(false)
     // A root-relative direct-mode base has no hostname to inspect — must not warn or throw.
     expect(warned({ baseURL: '/auth', mode: 'direct' })).toBe(false)
+    // Nor while generating types (`nuxi prepare`/`typecheck`), which is not a deploy: the warning there
+    // was noise on every developer's machine.
+    expect(warned({ baseURL: 'http://localhost:8000/auth', mode: 'bff' }, { _prepare: true })).toBe(false)
+  })
+
+  it('passes the sealed session\'s lifetime through, defaulting to lukk\'s 30-day refresh_ttl', () => {
+    const dflt = setup({ baseURL: 'https://api/auth', mode: 'bff' })
+    expect((dflt.options.runtimeConfig.lukk as { sessionMaxAge: number }).sessionMaxAge).toBe(2592000)
+    const set = setup({ baseURL: 'https://api/auth', mode: 'bff', session: { password: 'x'.repeat(32), maxAge: 86400 } })
+    expect((set.options.runtimeConfig.lukk as { sessionMaxAge: number }).sessionMaxAge).toBe(86400)
+  })
+
+  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 60, '86400'])('refuses a session.maxAge of %o — it must be a positive whole number of seconds', (maxAge) => {
+    // iron reads a ttl of 0 as "never expires", so `0` turned every seal into one that unseals forever;
+    // a negative or non-finite one wrote a cookie the browser drops or cannot parse. Fail at build.
+    expect(() => setup({ baseURL: 'https://api/auth', mode: 'bff', session: { password: 'x'.repeat(32), maxAge } })).toThrow(/session\.maxAge/)
+  })
+
+  it('refuses an invalid sessionMaxAge set through runtimeConfig too, and only logs it under `nuxt prepare`', () => {
+    // defu gives a consumer's own runtimeConfig precedence, so checking only the option would bless a value
+    // the app never uses.
+    const runtimeConfig = () => ({ public: {}, lukk: { sessionMaxAge: 0 } })
+    expect(() => setup({ baseURL: 'https://api/auth', mode: 'bff' }, { runtimeConfig: runtimeConfig() })).toThrow(/session\.maxAge/)
+
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    expect(() => setup({ baseURL: 'https://api/auth', mode: 'bff' }, { runtimeConfig: runtimeConfig(), _prepare: true })).not.toThrow()
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('session.maxAge'))
+  })
+
+  it('reserves `storage`: only the sealed cookie exists, so any other value fails the build', () => {
+    // It was copied into runtimeConfig and read by nothing, while its docblock promised a server-side token
+    // store — a mount name configured for one silently stored tokens in the cookie anyway.
+    expect(() => setup({ baseURL: 'https://api/auth', mode: 'bff', storage: 'redis' })).toThrow(/`storage`.*'cookie'/s)
+    const ok = setup({ baseURL: 'https://api/auth', mode: 'bff', storage: 'cookie' })
+    expect(ok.options.runtimeConfig.lukk).not.toHaveProperty('storage')
+  })
+
+  it('passes the auth proxy\'s body limit through, defaulting to 1 MiB', () => {
+    const dflt = setup({ baseURL: 'https://api/auth', mode: 'bff' })
+    expect((dflt.options.runtimeConfig.lukk as { bodyLimit: number }).bodyLimit).toBe(1024 * 1024)
+    const set = setup({ baseURL: 'https://api/auth', mode: 'bff', bodyLimit: 4096 })
+    expect((set.options.runtimeConfig.lukk as { bodyLimit: number }).bodyLimit).toBe(4096)
   })
 
   it('passes clientIpHeader through lower-cased, and defaults to off', () => {
@@ -487,6 +551,7 @@ describe('lukk-nuxt module — what it registers, and when it speaks up', () => 
     expect(kit.addPlugin.mock.calls.map(c => c[0])).toEqual([
       './runtime/plugins/client',
       { src: './runtime/plugins/session.client', mode: 'client' },
+      { src: './runtime/plugins/render-marker.server', mode: 'server' },
       { src: './runtime/plugins/session.server', mode: 'server' },
     ])
     expect(kit.addServerHandler.mock.calls.map(c => c[0])).toEqual([
@@ -501,19 +566,35 @@ describe('lukk-nuxt module — what it registers, and when it speaks up', () => 
     ])
   })
 
-  it('types $lukk and $lukkRefresh on the NuxtApp', () => {
+  it('types $lukk, $lukkRefresh and $lukkRestore on the NuxtApp', () => {
     setup({ baseURL: 'https://api/auth', mode: 'bff' })
     const template = kit.addTypeTemplate.mock.calls[0]![0] as { filename: string, getContents: () => string }
 
     expect(template.filename).toBe('types/lukk-nuxt.d.ts')
+    // `$lukkRefresh` was typed `Promise<TokenPair | null>` — untrue in BFF mode, where no token reaches the
+    // browser — and `$lukkRestore` was not typed at all. The exact text pinned both; it changed with them.
     expect(template.getContents()).toBe([
-      `import type { LukkClient, TokenPair } from 'lukk-core'`,
+      `import type { LukkClient, RefreshOutcome } from 'lukk-core'`,
       `declare module '#app' {`,
       `  interface NuxtApp {`,
       `    /** The lukk-core client, wired for the configured transport. */`,
       `    $lukk: LukkClient`,
-      `    /** The shared single-flight refresh; \`null\` when the session can't be refreshed. */`,
-      `    $lukkRefresh: () => Promise<TokenPair | null>`,
+      `    /**`,
+      `     * The shared single-flight refresh: the new pair in direct mode; \`REFRESHED_WITHOUT_TOKEN\` in bff`,
+      `     * mode, where the proxy re-sealed the session and the browser holds no token; \`null\` when the`,
+      `     * session can't be refreshed.`,
+      `     */`,
+      `    $lukkRefresh: () => Promise<RefreshOutcome>`,
+      `    /** The same refresh, reporting why it failed: \`unavailable\` for "couldn't tell", not "signed out". */`,
+      `    $lukkRestore: () => Promise<{ pair: RefreshOutcome, unavailable: boolean, superseded?: boolean }>`,
+      `  }`,
+      `}`,
+      `// Templates read globals from here, not from NuxtApp, so \`$lukk\` in a <template> was untyped.`,
+      `declare module 'vue' {`,
+      `  interface ComponentCustomProperties {`,
+      `    $lukk: LukkClient`,
+      `    $lukkRefresh: () => Promise<RefreshOutcome>`,
+      `    $lukkRestore: () => Promise<{ pair: RefreshOutcome, unavailable: boolean, superseded?: boolean }>`,
       `  }`,
       `}`,
       `export {}`,

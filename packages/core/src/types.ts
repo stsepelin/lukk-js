@@ -6,8 +6,12 @@
  * must not drift from the server. Endpoint paths assume the default `auth` prefix.
  */
 
-/** Authentication methods recorded in the access token's `amr` claim. */
-export type Amr = 'pwd' | 'otp' | 'webauthn'
+/**
+ * Authentication methods recorded in the access token's `amr` claim — only values registered under
+ * RFC 8176. A passkey is `pop` + `user` (possession + presence); `mfa` marks a multi-factor session
+ * (a password with a one-time code, or a user-verifying passkey). lukk < 0.7 sent `webauthn`.
+ */
+export type Amr = 'pwd' | 'otp' | 'pop' | 'user' | 'mfa'
 
 /** A successful login / refresh — the token pair. In cookie/BFF mode the
  *  refresh token is delivered out-of-band (cookie / sealed session), so it is
@@ -119,6 +123,16 @@ export interface RecoveryCodeCount {
   total: number
 }
 
+/**
+ * The acknowledgement lukk answers a fire-and-forget account call with: `forgot-password`
+ * (`password-reset-link-sent`), `reset-password` (`password-reset`), `password` (`password-changed`) and
+ * `email/verification-notification` (`verification-link-sent`, a `202`). Typed as a string so a lukk
+ * release adding a value is not a type error here.
+ */
+export interface LukkStatus {
+  status: string
+}
+
 /** `POST /auth/confirm-password|confirm-passkey` — a step-up token, sent back
  *  in the `X-Lukk-Confirmation` header on `lukk.confirm`-gated requests. */
 export interface ConfirmationToken {
@@ -169,6 +183,18 @@ export interface LukkError {
   message: string
   /** Laravel validation errors, when present (422). */
   errors?: Record<string, string[]>
+  /**
+   * lukk's machine-readable cause, where it names one — branch on this, not on `message`. A 423 with
+   * `confirmation_session_mismatch` means the step-up belongs to another session: discard it and
+   * confirm again.
+   */
+  reason?: string
+  /**
+   * The server's `Retry-After`, in seconds, where it gave one as a number. The lukk-nuxt BFF answers a
+   * refresh lukk is slow to rotate with `503` and `Retry-After`: retrying then joins the rotation still in
+   * flight, or adopts it once it has landed, rather than leaving the session for the user's next action.
+   */
+  retryAfter?: number
 }
 
 /**
@@ -189,18 +215,30 @@ export interface AccountExport {
     revoked_at: string | null
     expires_at: string | null
   }>
-  /** The FACT of each passkey — never the COSE public key. */
-  passkeys: Array<{ credential_id: string, name: string | null, last_used_at: number | null }>
+  /**
+   * Each passkey — every field erasure destroys that describes it, never the COSE public key or the sign
+   * counter. Times are ISO-8601 strings, like the rest of the export: lukk 0.6.0 and earlier sent
+   * `last_used_at` as unix seconds, and none of `created_at`, `aaguid` or `transports` (absent there).
+   * `aaguid` names the authenticator model; `transports` how it connects (`usb`, `internal`, …).
+   */
+  passkeys: Array<{
+    credential_id: string
+    name: string | null
+    created_at?: string | null
+    last_used_at: string | null
+    aaguid?: string | null
+    transports?: string[] | null
+  }>
   two_factor: { enabled: boolean, confirmed_at: string | null }
   /**
    * The account-lockout counters held against this account — the rows erasure also removes. Sent by
-   * lukk releases after 0.6.0 (absent before). Timestamps are unix seconds.
+   * lukk releases after 0.6.0 (absent before). Timestamps are ISO-8601 strings, like `generated_at`.
    */
   lockouts?: Array<{
     purpose: 'login' | 'two_factor' | 'confirm'
     attempts: number
-    locked_at: number | null
-    first_failed_at: number | null
-    last_failed_at: number | null
+    locked_at: string | null
+    first_failed_at: string | null
+    last_failed_at: string | null
   }>
 }

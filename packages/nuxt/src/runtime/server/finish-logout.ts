@@ -1,7 +1,7 @@
 import type { H3Event } from 'h3'
 import { appendResponseHeader, defineEventHandler, deleteCookie, getCookie, getRequestHeader, setCookie, setResponseHeader } from 'h3'
 import { useRuntimeConfig } from '#imports'
-import { LUKK_BFF_PREFIX, logoutCookieName, sessionCookieName, signedOutCookieName } from '../shared'
+import { LUKK_BFF_PREFIX, logoutCookieName, sessionCookieName, signedOutCookieName, underAppBase } from '../shared'
 import { sessionEnded, sessionKey, sessionReplaced } from './ended-sessions'
 import type { EndedHere } from './logout-note'
 import { readSealedSessionWithId } from './sealed-session'
@@ -36,9 +36,16 @@ const inFlight = new Map<string, Promise<Response | undefined>>()
 const failedUntil = new Map<string, number>()
 
 export default defineEventHandler(async (event) => {
-  const { cookieSecure, cookieNamespace, sessionPassword } = useRuntimeConfig(event).lukk as { cookieSecure?: boolean, cookieNamespace?: string, sessionPassword?: string }
+  const config = useRuntimeConfig(event)
+  const { cookieSecure, cookieNamespace, sessionPassword } = config.lukk as { cookieSecure?: boolean, cookieNamespace?: string, sessionPassword?: string }
   const secure = cookieSecure !== false
   const note = logoutCookieName(secure, cookieNamespace)
+  // Tell the browser the names THIS server reads. The module bakes them into public config at build, from
+  // the build's `cookieSecure`; the server derives them from the runtime one. Overridden at runtime, the two
+  // disagreed and the browser wrote a note nothing ever read. This is the per-request config copy Nuxt
+  // renders into the page's payload, and this middleware runs before any render, so the page always
+  // carries the names its own server will look for.
+  Object.assign(config.public.lukk as object, { logoutCookie: note, signedOutCookie: signedOutCookieName(secure, cookieNamespace) })
   if (!getCookie(event, note)) return
   // The proxy's own calls: the browser finishing the logout, or signing in — which replaces the session
   // and clears the note itself.
@@ -65,10 +72,10 @@ export default defineEventHandler(async (event) => {
     return
   }
 
-  // Already over, as far as this server knows: nothing to finish, and the note goes. No `useSession`
-  // call here passes `maxAge`, so an iron seal never expires cryptographically — a sealed value captured
-  // once stays unsealable-forever, and replaying it with a note bought one upstream `/logout` plus one
-  // `/refresh` per request, indefinitely, since the back-off below only arms after a FAILURE.
+  // Already over, as far as this server knows: nothing to finish, and the note goes. A seal outlives the
+  // session it holds by up to `session.maxAge` (see `sessionSeal`), so a sealed value captured once and
+  // replayed with a note would otherwise buy one upstream `/logout` plus one `/refresh` per request for
+  // that long, since the back-off below only arms after a FAILURE.
   if (await sessionEnded(key)) {
     deleteCookie(event, note, { path: '/', secure, sameSite: 'strict' })
     return
@@ -164,7 +171,7 @@ async function send(event: H3Event): Promise<Response | undefined> {
 
   let timer: ReturnType<typeof setTimeout> | undefined
   const timeout = new Promise<undefined>((resolve) => { timer = setTimeout(resolve, FINISH_LOGOUT_TIMEOUT_MS) })
-  const request = local(`${LUKK_BFF_PREFIX}/logout`, {
+  const request = local(underAppBase((useRuntimeConfig(event) as { app?: { baseURL?: string } }).app?.baseURL, `${LUKK_BFF_PREFIX}/logout`), {
     method: 'POST',
     headers: {
       'accept': 'application/json',

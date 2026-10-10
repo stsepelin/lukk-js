@@ -1,12 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { __test } from './mocks/imports'
-import type { TokenSession } from '../src/runtime/server/utils/refresh'
+import type { TokenSession } from '../src/runtime/server/refresh'
 
 // Upstream (app-API) Set-Cookie the proxy would receive; the mock appends it like h3 does.
 let upstreamSetCookie: string | string[] | undefined
 // The fetch Response h3 hands to onResponse; a test can make it a redirect to exercise the guard.
 let upstreamResponse: { status: number, type: string, headers: Headers }
 const proxyRequest = vi.fn(async (event: { node: { res: { statusCode: number, getHeader: (k: string) => unknown, setHeader: (k: string, v: unknown) => void, removeHeader: unknown } } }, target: string, opts?: { headers?: Record<string, string>, onResponse?: (e: unknown, r: unknown) => void }) => {
+  // Like h3's `sendProxy`: every upstream response header is copied onto the response, except
+  // content-encoding/-length and Set-Cookie (handled below).
+  for (const [key, value] of upstreamResponse.headers.entries()) {
+    if (!['content-encoding', 'content-length', 'set-cookie'].includes(key)) event.node.res.setHeader(key, value)
+  }
   // Simulate h3 appending the upstream Set-Cookie to whatever's already queued (the session).
   if (upstreamSetCookie !== undefined) {
     const arr = (v: unknown): unknown[] => (v === undefined ? [] : Array.isArray(v) ? v : [v])
@@ -59,7 +64,8 @@ vi.mock('h3', () => ({
 }))
 
 const refreshOnce = vi.fn<(s: unknown, b: string) => Promise<TokenSession | null>>()
-vi.mock('../src/runtime/server/utils/refresh', () => ({ refreshOnce: (...a: unknown[]) => refreshOnce(...(a as [unknown, string])) }))
+// `deliverPair` as the identity: these suites hand out pairs no journal knows newer versions of.
+vi.mock('../src/runtime/server/refresh', () => ({ refreshOnce: (...a: unknown[]) => refreshOnce(...(a as [unknown, string])), deliverPair: (_event: unknown, _id: unknown, pair: unknown) => pair }))
 const revokeDroppedSession = vi.fn()
 vi.mock('../src/runtime/server/revoke-dropped', () => ({ revokeDroppedSession: (...a: unknown[]) => revokeDroppedSession(...a) }))
 
@@ -78,7 +84,9 @@ function jwt(claims: Record<string, unknown>): string {
 const freshJwt = () => jwt({ exp: Math.floor(Date.now() / 1000) + 3600 })
 const expiredJwt = () => jwt({ exp: Math.floor(Date.now() / 1000) - 10 })
 
-function ev(o: { path: string, method?: string, headers?: Record<string, string> }) {
+// `path` is h3's `event.path`, which is percent-DECODED (all but `%2F` and `%25`); `url` is the raw
+// request target h3 leaves on `node.req.url`. They differ only when the request carried an escape.
+function ev(o: { path: string, url?: string, method?: string, headers?: Record<string, string> }) {
   const headers: Record<string, unknown> = {}
   return {
     path: o.path,
@@ -86,7 +94,7 @@ function ev(o: { path: string, method?: string, headers?: Record<string, string>
     headers: o.headers ?? {},
     status: 200,
     ip: '203.0.113.7' as string | undefined,
-    node: { req: { socket: { remoteAddress: '203.0.113.7' } }, res: {
+    node: { req: { url: o.url ?? o.path, socket: { remoteAddress: '203.0.113.7' } }, res: {
       statusCode: 200,
       getHeader: vi.fn((k: string) => headers[k]),
       setHeader: vi.fn((k: string, v: unknown) => { headers[k] = v }),
@@ -266,10 +274,25 @@ describe('app-API proxy', () => {
     }
   })
 
-  it('sends an empty Accept when forceJson is off and the browser sent none', async () => {
+  it('sets no Accept when forceJson is off and the browser sent none', async () => {
     __test.runtimeConfig.lukk = { ...__test.runtimeConfig.lukk, apiForceJson: false } as unknown as Record<string, unknown>
     await run(ev({ path: '/api/x' }))
-    expect(proxyRequest).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ headers: expect.objectContaining({ accept: '' }) }))
+    // Nothing to forward, so nothing set: an empty Accept is not what the browser sent.
+    expect(((proxyRequest.mock.calls[0] as unknown[])[2] as { headers: object }).headers).not.toHaveProperty('accept')
+  })
+
+  it('with forceJson off, forwards an Accept the browser sent EMPTY as it was sent', async () => {
+    // The proxy does not blank Accept — it only ever forwards the browser's, or sets its own — so an
+    // explicitly empty one is the browser's value, not a blank for the fetch wrapper to remove.
+    __test.runtimeConfig.lukk = { ...__test.runtimeConfig.lukk, apiForceJson: false } as unknown as Record<string, unknown>
+    await run(ev({ path: '/api/x', headers: { accept: '' } }))
+    const opts = proxyRequest.mock.calls.at(-1)![2] as { fetch: (input: string, init: RequestInit) => Promise<Response>, headers: Record<string, string> }
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 204 }))
+
+    await opts.fetch('https://laravel.test/x', { headers: new Headers(opts.headers) })
+
+    expect(new Headers(fetchSpy.mock.calls[0]![1]!.headers).get('accept')).toBe('')
+    fetchSpy.mockRestore()
   })
 
   it('streams uploads without clobbering the multipart Content-Type', async () => {
@@ -277,6 +300,115 @@ describe('app-API proxy', () => {
     const opts = (proxyRequest.mock.calls[0] as unknown[])[2] as { streamRequest?: boolean, headers?: Record<string, string> }
     expect(opts.streamRequest).toBe(true) // body streamed, not buffered
     expect(opts.headers).not.toHaveProperty('content-type') // forwarded by h3, not overridden
+  })
+
+  it('keeps the app origin\'s CORS policy its own: no upstream CORS headers, no client Origin upstream', async () => {
+    // The proxy serves the app's own origin. Passing the upstream's Access-Control-* through let the
+    // UPSTREAM's CORS policy decide who may read this origin: an upstream echoing `*.example.com` with
+    // credentials let a sibling subdomain read any authenticated GET, the bearer injected by this proxy.
+    upstreamResponse = { status: 200, type: 'basic', headers: new Headers({
+      'access-control-allow-origin': 'https://evil.example.com',
+      'access-control-allow-credentials': 'true',
+      'access-control-expose-headers': 'x-secret',
+      'content-type': 'application/json',
+    }) }
+    const e = ev({ path: '/api/me', headers: { origin: 'https://evil.example.com' } })
+    await run(e)
+
+    expect(e.node.res.getHeader('access-control-allow-origin')).toBeUndefined()
+    expect(e.node.res.getHeader('access-control-allow-credentials')).toBeUndefined()
+    expect(e.node.res.getHeader('access-control-expose-headers')).toBeUndefined()
+    expect(e.node.res.getHeader('content-type')).toBe('application/json')
+    expect(proxyRequest.mock.calls.at(-1)![2]!.headers).toMatchObject({ origin: '' })
+  })
+
+  it('removes the browser\'s Origin from the request it forwards, rather than sending it empty', async () => {
+    // A blank `Origin:` is still an Origin header: a CORS layer upstream sees one present, and judges it.
+    // Absent is what a same-origin server-side call carries. Every header this proxy blanks goes the same
+    // way — h3 merges our bag over the client's, so a blank is the only way to override, and the request
+    // it hands to fetch then drops it.
+    await run(ev({ path: '/api/me', headers: { origin: 'https://app.test', cookie: 'a=1' } }))
+    const opts = proxyRequest.mock.calls.at(-1)![2] as { fetch?: (input: string, init: RequestInit) => Promise<Response> }
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 204 }))
+
+    await opts.fetch!('https://laravel.test/me', { headers: new Headers({ 'origin': '', 'cookie': '', 'authorization': 'Bearer tok', 'accept': 'application/json', 'x-app-flag': '' }) })
+
+    const sent = new Headers(fetchSpy.mock.calls[0]![1]!.headers)
+    expect(sent.has('origin')).toBe(false)
+    expect(sent.has('cookie')).toBe(false)
+    expect(sent.get('authorization')).toBe('Bearer tok')
+    expect(sent.get('accept')).toBe('application/json')
+    // Only what the PROXY blanked: a header the browser itself sent empty is a legitimate value (RFC 9110
+    // §5.5 allows an empty field value) and goes through as sent.
+    expect(sent.get('x-app-flag')).toBe('')
+
+    // h3 always hands it an init; called without one it still forwards rather than throwing.
+    await opts.fetch!('https://laravel.test/me', undefined as never)
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
+    fetchSpy.mockRestore()
+  })
+
+  it('tells the browser never to sniff a proxied response\'s type', async () => {
+    // The response is served on the APP's origin. A body sniffed as HTML there runs with the app's
+    // cookies in scope — and with the BFF one request away.
+    upstreamResponse = { status: 200, type: 'basic', headers: new Headers({ 'content-type': 'application/json' }) }
+    const e = ev({ path: '/api/me' })
+    await run(e)
+    expect(e.node.res.getHeader('x-content-type-options')).toBe('nosniff')
+    expect(e.node.res.getHeader('content-security-policy')).toBeUndefined()
+  })
+
+  it.each(['text/html; charset=utf-8', 'image/svg+xml', 'application/xml', 'text/plain', undefined,
+    // Only the TYPE decides — a parameter naming JSON does not exempt a document,
+    'text/html; profile=application/json',
+    // and a type merely starting like JSON is not JSON (JSONP is script).
+    'application/jsonp'])('sandboxes a %s response, so a document from the API never runs as the app', async (type) => {
+    // An API answering with a document — an error page, a stored upload served inline — rendered on the
+    // app's origin, and its script could call the BFF as the visitor. `sandbox` gives it an opaque origin.
+    upstreamResponse = { status: 200, type: 'basic', headers: new Headers(type ? { 'content-type': type } : {}) }
+    const e = ev({ path: '/api/files/1' })
+    await run(e)
+    expect(e.node.res.getHeader('content-security-policy')).toEqual(['sandbox'])
+    expect(e.node.res.getHeader('x-content-type-options')).toBe('nosniff')
+  })
+
+  it('adds the sandbox to the upstream\'s own policy rather than replacing it', async () => {
+    // Every Content-Security-Policy header is enforced (CSP3 §4.1), so appending only ever narrows.
+    upstreamResponse = { status: 200, type: 'basic', headers: new Headers({ 'content-type': 'text/html', 'content-security-policy': 'default-src \'self\'' }) }
+    const e = ev({ path: '/api/page' })
+    await run(e)
+    expect(e.node.res.getHeader('content-security-policy')).toEqual(['default-src \'self\'', 'sandbox'])
+  })
+
+  it.each(['application/json', 'application/problem+json; charset=utf-8', 'application/pdf'])('leaves a %s response unsandboxed', async (type) => {
+    // JSON is not a document anything renders as the app; a PDF is shown by a viewer isolated from the
+    // page's origin, and Chromium refuses to show a sandboxed one at all.
+    upstreamResponse = { status: 200, type: 'basic', headers: new Headers({ 'content-type': type }) }
+    const e = ev({ path: '/api/invoice' })
+    await run(e)
+    expect(e.node.res.getHeader('content-security-policy')).toBeUndefined()
+  })
+
+  it('drops the upstream\'s hop-by-hop response headers (RFC 9110 §7.6.1)', async () => {
+    upstreamResponse = { status: 200, type: 'basic', headers: new Headers({
+      'connection': 'X-Hop,  x-two',
+      'x-hop': 'internal',
+      'x-two': 'internal',
+      'keep-alive': 'timeout=5',
+      'proxy-authenticate': 'Basic',
+      'proxy-connection': 'keep-alive',
+      'trailer': 'x-checksum',
+      'transfer-encoding': 'chunked',
+      'upgrade': 'h2c',
+      'x-kept': 'yes',
+    }) }
+    const e = ev({ path: '/api/me' })
+    await run(e)
+
+    for (const name of ['connection', 'x-hop', 'x-two', 'keep-alive', 'proxy-authenticate', 'proxy-connection', 'trailer', 'transfer-encoding', 'upgrade']) {
+      expect(e.node.res.getHeader(name), name).toBeUndefined()
+    }
+    expect(e.node.res.getHeader('x-kept')).toBe('yes')
   })
 
   it('strips upstream Set-Cookie and marks the response non-cacheable', async () => {
@@ -452,6 +584,19 @@ describe('app-API proxy', () => {
     expect(revokeDroppedSession).not.toHaveBeenCalled()
   })
 
+  it('never rotates for a page render\'s own in-process request — its cookie would never reach the browser', async () => {
+    // A render's useLukkFetch reaches this proxy in-process; the Set-Cookie of a rotation here goes back to
+    // that in-process caller, not to the page. The browser kept T0 and replayed it 30 s later: revoked. SSR
+    // hydration is the one place a render renews the session; here the token goes on as it is.
+    sessionData = { access: expiredJwt(), refresh: 'r' }
+    const e = ev({ path: '/api/me', headers: { 'x-lukk-ssr': '1' } })
+    await run(e)
+    expect(refreshOnce).not.toHaveBeenCalled()
+    const headers = (proxyRequest.mock.calls[0] as unknown[])[2] as { headers: Record<string, string> }
+    expect(headers.headers.authorization).toBe(`Bearer ${sessionData.access}`)
+    expect(headers.headers['x-lukk-ssr']).toBe('') // the marker is ours, and goes no further
+  })
+
   it('opens the read-write session under the hardened cookie options the re-seal writes back', async () => {
     // The rotate re-seals, which means h3 writes the cookie again from exactly these options — drop
     // one and the renewed session lands as a weaker cookie than the one it replaced. `sessionHeader:
@@ -461,12 +606,25 @@ describe('app-API proxy', () => {
     sessionData = { access: expiredJwt(), refresh: 'r' }
     refreshOnce.mockResolvedValue({ pair: { access: 'new-tok', refresh: 'r2' }, retryable: false })
     await run(ev({ path: '/api/me' }))
+    // `seal` added with the seal lifetime: this exact match pinned a re-seal with NO expiry, which is
+    // the defect ("gives the re-seal a lifetime" below) — the cookie options it guards are unchanged.
     expect(useSession).toHaveBeenCalledWith(expect.anything(), {
       password: 'x'.repeat(32),
       name: '__Host-lukk-session',
-      cookie: { sameSite: 'strict', secure: true, httpOnly: true, path: '/' },
+      // `maxAge` added: without it the cookie was a session cookie, dropped on browser restart.
+      cookie: { sameSite: 'strict', secure: true, httpOnly: true, path: '/', maxAge: 2592000 },
       sessionHeader: false,
+      seal: { ttl: 2592000 * 1000 },
     })
+  })
+
+  it('gives the re-seal a lifetime — 30 days unless configured', async () => {
+    // A seal with no expiry unseals forever, however long ago it was copied out of a browser.
+    ;(__test.runtimeConfig.lukk as Record<string, unknown>).sessionMaxAge = 600
+    sessionData = { access: expiredJwt(), refresh: 'r' }
+    refreshOnce.mockResolvedValue({ pair: { access: 'new-tok', refresh: 'r2' }, retryable: false })
+    await run(ev({ path: '/api/me' }))
+    expect(useSession).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ seal: { ttl: 600 * 1000 } }))
   })
 
   describe('a session a sign-in replaced or a logout ended while this request was out', () => {
@@ -527,6 +685,68 @@ describe('app-API proxy', () => {
 
       expect(e.node.res.getHeader('set-cookie')).toBeUndefined()
       expect(revokeDroppedSession).toHaveBeenCalledWith(e, { access: 'new-tok', refresh: 'r2' }, 'https://api/auth', '')
+    })
+
+    describe('when the upstream is unreachable — the error response carries the queued cookies too', () => {
+      const unreachable = (during: () => unknown) => proxyRequest.mockImplementationOnce(async () => {
+        await during()
+        throw Object.assign(new Error('fetch failed'), { statusCode: 502 })
+      })
+
+      it('withholds the re-sealed cookie, and revokes it, when the session ended meanwhile', async () => {
+        vi.spyOn(console, 'error').mockImplementation(() => {})
+        sessionData = { access: expiredJwt(), refresh: 'r', sid: 'session-A' }
+        refreshOnce.mockResolvedValue({ pair: { access: 'new-tok', refresh: 'r2' }, retryable: false })
+        unreachable(() => markSessionEnded('session-A')) // a sign-in in another tab lands mid-request
+        const e = ev({ path: '/api/me' })
+
+        await expect(run(e)).rejects.toThrow('fetch failed')
+
+        expect(e.node.res.getHeader('set-cookie') ?? []).toEqual([])
+        expect(revokeDroppedSession).toHaveBeenCalledWith(e, { access: 'new-tok', refresh: 'r2' }, 'https://api/auth', '')
+      })
+
+      it('withholds the signed-out cookie a logout this request finished, when a sign-in replaced that session meanwhile', async () => {
+        vi.spyOn(console, 'error').mockImplementation(() => {})
+        h3note.value = '1'
+        const e = { ...ev({ path: '/api/me' }), context: { lukkEndedSession: { key: 'session-Y', marker: '__Host-lukk-signed-out' } } }
+        e.node.res.setHeader('set-cookie', ['__Host-lukk-signed-out=1; Max-Age=10; Path=/', '__Host-lukk-session=RESEALED; Path=/; HttpOnly', 'theme=dark; Path=/'])
+        unreachable(() => endSession('session-Y', { replaced: true }))
+
+        await expect(run(e)).rejects.toThrow('fetch failed')
+
+        expect(e.node.res.getHeader('set-cookie')).toEqual(['theme=dark; Path=/'])
+      })
+
+      it('leaves the queued cookies as they are when nothing changed', async () => {
+        vi.spyOn(console, 'error').mockImplementation(() => {})
+        const e = ev({ path: '/api/me' })
+        e.node.res.setHeader('set-cookie', ['theme=dark; Path=/'])
+        unreachable(() => {})
+
+        await expect(run(e)).rejects.toThrow('fetch failed')
+
+        expect(e.node.res.getHeader('set-cookie')).toEqual(['theme=dark; Path=/'])
+      })
+
+      it('does not settle the cookies twice when the body fails after the headers went out', async () => {
+        vi.spyOn(console, 'error').mockImplementation(() => {})
+        sessionData = { access: expiredJwt(), refresh: 'r', sid: 'session-B' }
+        refreshOnce.mockResolvedValue({ pair: { access: 'new-tok', refresh: 'r2' }, retryable: false })
+        const e = ev({ path: '/api/me' })
+        const original = proxyRequest.getMockImplementation()!
+        proxyRequest.mockImplementationOnce(async (...args) => {
+          await original(...args)
+          // The headers are out; the body breaks off. Touching them now is ERR_HTTP_HEADERS_SENT.
+          markSessionEnded('session-B')
+          e.node.res.setHeader.mockImplementation(() => { throw Object.assign(new Error('Cannot set headers after they are sent'), { code: 'ERR_HTTP_HEADERS_SENT' }) })
+          e.node.res.removeHeader.mockImplementation(() => { throw Object.assign(new Error('Cannot remove headers after they are sent'), { code: 'ERR_HTTP_HEADERS_SENT' }) })
+          throw new Error('body broke off')
+        })
+
+        await expect(run(e)).rejects.toThrow('body broke off')
+        expect(revokeDroppedSession).not.toHaveBeenCalled()
+      })
     })
 
     it('is not re-sealed, nor its new token used, when it ended during the refresh', async () => {
@@ -607,6 +827,24 @@ describe('app-API proxy', () => {
     expect(proxyRequest).not.toHaveBeenCalled()
   })
 
+  it.each([
+    ['a same-site sibling\'s subresource', { 'sec-fetch-site': 'same-site', 'sec-fetch-mode': 'no-cors', 'sec-fetch-dest': 'image' }],
+    ['another site\'s fetch', { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'cors', 'sec-fetch-dest': 'empty' }],
+    ['another site\'s frame', { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'iframe' }],
+  ])('refuses a GET that is %s — the bearer it would carry is injected here', async (_, headers) => {
+    // The origin check skips GETs, so with nothing else a sibling's `<img src="/api/export">` — or another
+    // site's frame — was answered with the bearer this proxy injects from the sealed session.
+    const e = ev({ path: '/api/export', headers })
+    expect(await run(e)).toEqual({ message: 'Cross-origin request rejected.' })
+    expect(e.status).toBe(403)
+    expect(proxyRequest).not.toHaveBeenCalled()
+  })
+
+  it('still proxies a top-level navigation from another site — a link in an email', async () => {
+    await run(ev({ path: '/api/invoices/1.pdf', headers: { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document' } }))
+    expect(proxyRequest).toHaveBeenCalled()
+  })
+
   it('serves the dev-http shape when the session cookie is not Secure', async () => {
     // Two things hang off the one `secure` flag and must not diverge: the cookie name loses its
     // `__Host-` prefix (the browser rejects that prefix without Secure), and the Origin check stops
@@ -676,6 +914,149 @@ describe('app-API proxy', () => {
     expect(String(error.mock.calls[0]![0])).toContain('lukk `api.target`')
     expect(proxyRequest).not.toHaveBeenCalled()
     error.mockRestore()
+  })
+})
+
+describe('lukk\'s own routes, reached through the app-API proxy', () => {
+  // The documented canonical config: the app API and lukk are the same Laravel app, lukk under /auth.
+  // Proxying `/api/auth/login` there streamed lukk's token pair straight to the browser — the one thing
+  // BFF mode exists to prevent — and `/api/auth/confirm-password` the step-up token.
+  beforeEach(() => {
+    __test.runtimeConfig.lukk = { ...__test.runtimeConfig.lukk, apiTarget: 'https://api.example.com', baseURL: 'https://api.example.com/auth' } as unknown as Record<string, unknown>
+  })
+
+  it.each([
+    ['/api/auth/login', '/api/auth/login'],
+    ['/api/auth/confirm-password', '/api/auth/confirm-password'],
+    ['/api/auth', '/api/auth'], // the base itself
+    ['/api/auth/', '/api/auth/'], // Laravel trims the trailing slash before matching
+    ['/api/./auth/refresh', '/api/./auth/refresh'], // dot segments collapse in the upstream URL
+    ['/api/x/../auth/login', '/api/x/../auth/login'],
+    // h3 leaves `%2F` encoded in `event.path`; Laravel's UriValidator `rawurldecode`s before matching.
+    ['/api/auth%2Flogin', '/api/auth%2Flogin'],
+    ['/api/auth%2flogin', '/api/auth%2flogin'], // either case of the escape
+    ['/api/AUTH/login', '/api/AUTH/login'], // refused case-insensitively — failing closed costs nothing
+    // Double-encoded: forwarded as written, but a hop that decodes once more — a CDN, a rewrite rule, a
+    // second proxy — turns each into one of the routes above. h3 leaves `%25` encoded in `event.path`.
+    ['/api/x/%252e%252e/auth/login', '/api/x/%252e%252e/auth/login'],
+    ['/api/%2561uth/login', '/api/%2561uth/login'], // an encoded `/auth` prefix
+    ['/api/auth%252Flogin', '/api/auth%252Flogin'],
+    ['/api/x/%25252e%25252e/auth/login', '/api/x/%25252e%25252e/auth/login'], // and once more again
+  ])('refuses %s', async (path, url) => {
+    const e = ev({ path, url, method: 'POST', headers: sameOrigin })
+    const body = await run(e)
+    expect(e.status).toBe(404)
+    expect(body).toEqual({ message: 'Not found.' })
+    expect(proxyRequest).not.toHaveBeenCalled()
+  })
+
+  it('refuses them when lukk is configured under a different host for the same app', async () => {
+    // The same Laravel app is routinely reached under two names: a public one for `api.target` and an
+    // internal one for `baseURL`. An origin comparison would wave the token routes through exactly there.
+    __test.runtimeConfig.lukk = { ...__test.runtimeConfig.lukk, baseURL: 'http://laravel.internal:8000/auth' } as unknown as Record<string, unknown>
+    const e = ev({ path: '/api/auth/login', method: 'POST', headers: sameOrigin })
+    await run(e)
+    expect(e.status).toBe(404)
+    expect(proxyRequest).not.toHaveBeenCalled()
+  })
+
+  it('still proxies the app\'s own routes, including one that merely shares the prefix', async () => {
+    await run(ev({ path: '/api/authors' }))
+    await run(ev({ path: '/api/users/auth' }))
+    // A literal `%` in the app's own data decodes to nothing that reaches lukk, and is forwarded as sent.
+    await run(ev({ path: '/api/search/100%25', url: '/api/search/100%25' }))
+    // Nor does a name with a space in it, which the URL parser keeps re-encoding — it settles at once.
+    await run(ev({ path: '/api/files/Annual Report.pdf', url: '/api/files/Annual%20Report.pdf' }))
+    expect(proxyRequest.mock.calls.map(call => call[1])).toEqual(['https://api.example.com/authors', 'https://api.example.com/users/auth', 'https://api.example.com/search/100%25', 'https://api.example.com/files/Annual%20Report.pdf'])
+  })
+
+  it('refuses everything when lukk is mounted at the root of the same origin', async () => {
+    // There is no path that tells the app's routes from lukk's then, so no route is safe to proxy.
+    __test.runtimeConfig.lukk = { ...__test.runtimeConfig.lukk, baseURL: 'https://api.example.com' } as unknown as Record<string, unknown>
+    const e = ev({ path: '/api/users' })
+    await run(e)
+    expect(e.status).toBe(404)
+    expect(proxyRequest).not.toHaveBeenCalled()
+  })
+
+  it('proxies when lukk is mounted at the root of ANOTHER host — its routes are bound there', async () => {
+    __test.runtimeConfig.lukk = { ...__test.runtimeConfig.lukk, baseURL: 'https://auth.example.com/' } as unknown as Record<string, unknown>
+    await run(ev({ path: '/api/login' }))
+    expect(proxyRequest).toHaveBeenCalledWith(expect.anything(), 'https://api.example.com/login', expect.anything())
+  })
+
+  it('fails closed, as a config fault, when lukk\'s base cannot be resolved', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    __test.runtimeConfig.lukk = { ...__test.runtimeConfig.lukk, baseURL: `undefined/auth-${Math.random()}` } as unknown as Record<string, unknown>
+    const e = ev({ path: '/api/auth/login' })
+    await run(e)
+    expect(e.status).toBe(500)
+    expect(String(error.mock.calls[0]![0])).toContain('lukk `baseURL`')
+    expect(proxyRequest).not.toHaveBeenCalled()
+  })
+})
+
+describe('the request target, as the browser sent it', () => {
+  it('keeps an encoded `?` in a path segment as data, not as the start of the query', async () => {
+    // h3 decodes `event.path`, so `/a%3Fb` arrives as `/a?b` — and splitting THAT on `?` sent the
+    // upstream a different path with an invented query parameter.
+    await run(ev({ path: '/api/files/a?b', url: '/api/files/a%3Fb' }))
+    await run(ev({ path: '/api/files/a?b?x=1', url: '/api/files/a%3Fb?x=1' }))
+    await run(ev({ path: '/api/files/a#b?x=%23', url: '/api/files/a%23b?x=%23' }))
+    expect(proxyRequest.mock.calls.map(call => call[1])).toEqual([
+      'https://laravel.test/files/a%3Fb',
+      'https://laravel.test/files/a%3Fb?x=1',
+      'https://laravel.test/files/a%23b?x=%23',
+    ])
+  })
+
+  it('reads the query off event.path when the request carries no raw target', async () => {
+    const e = ev({ path: '/api/search?q=1' })
+    ;(e.node.req as { url?: string }).url = undefined
+    await run(e)
+    expect(proxyRequest).toHaveBeenCalledWith(expect.anything(), 'https://laravel.test/search?q=1', expect.anything())
+  })
+
+  it('forwards the query exactly as it was sent — never re-encoded', async () => {
+    await run(ev({ path: '/api/search?q=a%26b&tag=%2F', url: '/api/search?q=a%26b&tag=%2F' }))
+    expect(proxyRequest).toHaveBeenCalledWith(expect.anything(), 'https://laravel.test/search?q=a%26b&tag=%2F', expect.anything())
+  })
+})
+
+describe('response caching', () => {
+  it('declares the response varies by Cookie, keeping whatever the upstream already varies on', async () => {
+    // `private, no-store` keeps it out of a conforming cache; `Vary: Cookie` is what stops one that
+    // ignores `no-store` from serving one visitor's response to another. The BFF proxy sends both.
+    const e = ev({ path: '/api/me' })
+    e.node.res.setHeader('vary', 'Accept-Encoding')
+    await run(e)
+    expect(e.node.res.getHeader('vary')).toBe('Accept-Encoding, Cookie')
+
+    const bare = ev({ path: '/api/me' })
+    await run(bare)
+    expect(bare.node.res.getHeader('vary')).toBe('Cookie')
+
+    const already = ev({ path: '/api/me' })
+    already.node.res.setHeader('vary', 'Origin, cookie')
+    await run(already)
+    expect(already.node.res.getHeader('vary')).toBe('Origin, cookie')
+
+    // Optional whitespace around a list member is allowed (RFC 9110 §5.6.1).
+    const spaced = ev({ path: '/api/me' })
+    spaced.node.res.setHeader('vary', 'Cookie , Origin')
+    await run(spaced)
+    expect(spaced.node.res.getHeader('vary')).toBe('Cookie , Origin')
+
+    // A name that merely starts with it is a different header.
+    const longer = ev({ path: '/api/me' })
+    longer.node.res.setHeader('vary', 'Cookie2')
+    await run(longer)
+    expect(longer.node.res.getHeader('vary')).toBe('Cookie2, Cookie')
+
+    const star = ev({ path: '/api/me' })
+    star.node.res.setHeader('vary', '*')
+    await run(star)
+    expect(star.node.res.getHeader('vary')).toBe('*')
   })
 })
 

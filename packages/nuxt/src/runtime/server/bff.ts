@@ -2,15 +2,15 @@ import type { H3Event } from 'h3'
 import { isTokenPair } from 'lukk-core'
 import { defineEventHandler, deleteCookie, getCookie, getRequestHeader, readRawBody, setResponseHeader, setResponseStatus, useSession } from 'h3'
 import { useRuntimeConfig } from '#imports'
-import { LUKK_BFF_PREFIX, confirmationHeaderName, logoutCookieName, sessionCookieName, signedOutCookieName } from '../shared'
-import { isForeignOrigin, rejectUnresolvedTarget, reportProxyFailure, resolveTarget, viaHeader, visitorIp } from './proxy-utils'
+import { LUKK_BFF_PREFIX, LUKK_SSR_HEADER, confirmationHeaderName, logoutCookieName, sessionCookieName, signedOutCookieName } from '../shared'
+import { fetchUpstream, isForeignOrigin, isForeignSubresource, rejectUnresolvedTarget, reportProxyFailure, resolveTarget, routeWithin, viaHeader, visitorIp } from './proxy-utils'
 import { endSession, newSessionId, sessionEnded, sessionKey, sessionReplaced, withholdSessionCookie } from './ended-sessions'
 import { revokeDroppedSession } from './revoke-dropped'
-import { readSealedSession } from './sealed-session'
+import { readSealedSession, sessionCookie, sessionSeal } from './sealed-session'
 import { warnIfSessionTooLarge } from './session-size'
-import { refreshOnce, type TokenSession } from './utils/refresh'
+import { deliverPair, refreshOnce, type TokenSession } from './refresh'
 
-type SessionCookieOptions = { sameSite: 'strict', secure: boolean, httpOnly: true, path: '/' }
+type SessionCookieOptions = ReturnType<typeof sessionCookie>
 
 /**
  * Sign-in routes never refresh and retry. They don't authenticate with the session they would replace,
@@ -21,6 +21,13 @@ type SessionCookieOptions = { sameSite: 'strict', secure: boolean, httpOnly: tru
 const SIGN_IN_PATHS = new Set(['/login', '/register', '/two-factor-challenge', '/passkeys/login'])
 
 /**
+ * The largest request body this proxy reads, in bytes, unless `runtimeConfig.lukk.bodyLimit` says
+ * otherwise. Generous for anything lukk accepts — a passkey attestation is a few KiB — and a hard
+ * ceiling for what an anonymous caller can make this server hold in memory.
+ */
+export const DEFAULT_BODY_LIMIT = 1024 * 1024
+
+/**
  * The BFF proxy. The browser calls `/api/_lukk/*`; this handler attaches the
  * access token (and step-up confirmation token) from a sealed, server-side
  * session, proxies to the real lukk URL, refreshes server-side on a 401, and
@@ -28,15 +35,18 @@ const SIGN_IN_PATHS = new Set(['/login', '/register', '/two-factor-challenge', '
  * ever holds the opaque session cookie, never a token.
  */
 export default defineEventHandler(async (event) => {
-  const { baseURL, sessionPassword, cookieSecure, cookieNamespace, clientIpHeader } = useRuntimeConfig(event).lukk as { baseURL: string, sessionPassword: string, cookieSecure?: boolean, cookieNamespace?: string, clientIpHeader?: string }
+  const { baseURL, sessionPassword, cookieSecure, cookieNamespace, clientIpHeader, bodyLimit, sessionMaxAge } = useRuntimeConfig(event).lukk as { baseURL: string, sessionPassword: string, cookieSecure?: boolean, cookieNamespace?: string, clientIpHeader?: string, bodyLimit?: number, sessionMaxAge?: number }
   const method = event.method
+
+  // Every response from here is ours, on the APP's origin — never let a browser second-guess its type.
+  setResponseHeader(event, 'x-content-type-options', 'nosniff')
 
   // Secure/`__Host-` in prod + dev-https, relaxed for dev-http (see module cookieSecure). Default to
   // secure when unset so a misread config can never silently drop Secure. The name's `__Host-` prefix
   // and the Secure attribute both derive from this one `secure` — they can't diverge.
   const secure = cookieSecure !== false
   const sessionName = sessionCookieName(secure, cookieNamespace)
-  const cookieOptions: SessionCookieOptions = { sameSite: 'strict', secure, httpOnly: true, path: '/' }
+  const cookieOptions: SessionCookieOptions = sessionCookie(secure, sessionMaxAge)
   // The browser's logout note (see `logoutCookieName`): cleared once the logout is done, and by any new session.
   const clearLogoutNote = () => {
     const options = { path: '/', secure, sameSite: 'strict' as const }
@@ -45,8 +55,11 @@ export default defineEventHandler(async (event) => {
     deleteCookie(event, signedOutCookieName(secure, cookieNamespace), options)
   }
 
-  // CSRF: reject a state-changing request riding the session cookie from a foreign origin.
-  if (isForeignOrigin(event, secure)) {
+  // CSRF: reject a state-changing request riding the session cookie from a foreign origin — and a GET
+  // from another site or a same-site sibling unless it is a top-level navigation (a link in an email).
+  // A sibling's no-cors GET (an `<img>` at `account/export`) was answered with the sealed session and
+  // confirmation token; no page needs a cross-site subresource GET from the auth proxy.
+  if (isForeignOrigin(event, secure) || isForeignSubresource(event)) {
     setResponseStatus(event, 403)
     return { message: 'Cross-origin request rejected.' }
   }
@@ -59,7 +72,7 @@ export default defineEventHandler(async (event) => {
   const hasCookie = !!getCookie(event, sessionName)
   const sealed = await readSealedSession(event, sessionPassword, sessionName)
   let rwSession: ReturnType<typeof openSession> | null = null
-  const session = () => (rwSession ??= openSession(event, sessionPassword, sessionName, cookieOptions))
+  const session = () => (rwSession ??= openSession(event, sessionPassword, sessionName, cookieOptions, sessionMaxAge))
 
   // Resolve + contain the upstream URL to same-origin-under-base (defeats traversal / authority-smuggling).
   const path = event.path.slice(LUKK_BFF_PREFIX.length).split('?')[0]
@@ -67,6 +80,22 @@ export default defineEventHandler(async (event) => {
   const subpath = path || '/'
   const target = resolveTarget(baseURL, subpath)
   if (!target) return rejectUnresolvedTarget(event, baseURL, 'lukk `baseURL`', subpath)
+  // Every route rule below is decided on THIS — the route lukk's router will match for `target` — never
+  // on `subpath`. The upstream URL collapses dot segments and Laravel trims a trailing slash, so
+  // `/./refresh`, `/refresh/` and `/a/../refresh` all reach lukk's refresh route while comparing unequal
+  // to '/refresh' as strings: the never-proxy-refresh rule, the sign-in no-retry rule and the logout's
+  // cookie clear were each one dot away from being skipped. (`target` resolved, so the base is usable
+  // and `target` lies under it.)
+  const route = routeWithin(target, baseURL)!
+  // …and only on a path that reaches lukk AS WRITTEN. lukk routes nothing with an empty segment or an
+  // encoded slash or backslash, nor an encoded `%` that a second decoding hop could turn into one
+  // (trailing slashes are fine: Laravel trims them), but a slash-merging or decoding hop in front of it might turn one into a
+  // real route. Deciding policy on the cleaned path while forwarding the raw one injected the sealed
+  // refresh token into a request lukk never received; refusing them keeps the two the same URL.
+  if (/\/{2,}[^/]|%2f|%5c|%25/i.test(new URL(target).pathname)) {
+    setResponseStatus(event, 404)
+    return { message: 'Not found.' }
+  }
 
   // lukk stamps `Cache-Control: no-store` on every credential-bearing response; this handler
   // returns a body and a status and drops the upstream's headers, so that directive was being
@@ -81,15 +110,21 @@ export default defineEventHandler(async (event) => {
   // The option mirrors lukk's own `confirm.header`, so a rename has to reach lukk too — hardcoding
   // the default here would silently break step-up for anyone who changed it on both sides.
   const confirmationHeader = confirmationHeaderName((useRuntimeConfig(event).public.lukk as { confirmationHeader?: string }).confirmationHeader)
-  const rawBody = method === 'GET' || method === 'HEAD' ? undefined : await readRawBody(event)
+  const rawBody = method === 'GET' || method === 'HEAD' ? undefined : await readBoundedBody(event, bodyLimit ?? DEFAULT_BODY_LIMIT)
+  // Buffered before anything else happens, on routes an anonymous caller can reach: without a ceiling,
+  // one request could make this server hold whatever it cared to send.
+  if (typeof rawBody === 'number') {
+    setResponseStatus(event, rawBody)
+    return { message: rawBody === 413 ? 'Request body too large.' : 'Length required.' }
+  }
 
   // A logout also presents the session's refresh token. lukk releases that accept one end the session
   // with it even when the access token has expired and a refresh is throttled or failing — and without
   // spending a rotation first. Older releases ignore the field and use the bearer, as before.
-  const endsSession = subpath === '/logout'
+  const endsSession = route === '/logout'
   let logoutRefresh = sealed.refresh
 
-  function callLukk(access: string | undefined): Promise<Response> {
+  function callLukk(access: string | undefined): Promise<Upstream> {
     // This path builds its headers from scratch rather than forwarding the client's, so there is
     // nothing to strip — no hop-by-hop or spoofed forwarding header can reach the upstream. Via is
     // still owed: RFC 9110 §7.6.3 asks every forwarding intermediary to identify itself.
@@ -108,12 +143,21 @@ export default defineEventHandler(async (event) => {
     // X-Lukk-Confirmation header (undici keeps custom headers across redirects) and, on a
     // 307/308, the request body to the redirect host (CWE-918/200). Handled below.
     const body = endsSession ? JSON.stringify(logoutRefresh ? { refresh_token: logoutRefresh } : {}) : rawBody
-    // lukk unreachable, or the connection dropped: answer 502 like any other upstream failure, rather
-    // than letting the fetch error escape as a 500 with a stack trace in the log on every attempt.
-    return fetch(target!, { method, headers, body, redirect: 'manual' }).catch((error: unknown) => {
+    // The body is read inside the deadline, not after it: a lukk that answers with headers and then
+    // stalls would otherwise hold this request for as long as the runtime's socket timeout allows.
+    // lukk unreachable, the connection dropped, or the deadline passed: answer 502 like any other
+    // upstream failure, rather than letting the error escape as a 500 with a stack trace in the log.
+    // A redirect's body is never read — it is refused below — so it is cancelled rather than waited for,
+    // which also releases the connection.
+    return fetchUpstream<Upstream>(target!, { method, headers, body, redirect: 'manual' }, async (res) => {
+      if (!isRedirect(res)) return { res, text: await res.text() }
+      await res.body?.cancel()
+      // Stryker disable next-line StringLiteral: equivalent — the text of a redirect is never read: the 3xx check below returns before it.
+      return { res, text: '' }
+    }).catch((error: unknown) => {
       reportProxyFailure(target!, error)
       // No headers: only the status and body of this Response are read below.
-      return new Response(JSON.stringify({ message: 'lukk could not be reached.' }), { status: 502 })
+      return { res: new Response(null, { status: 502 }), text: JSON.stringify({ message: 'lukk could not be reached.' }) }
     })
   }
 
@@ -123,10 +167,25 @@ export default defineEventHandler(async (event) => {
   // one rotation burned per attempt, and still a 401. `restore()` on app load is exactly this call,
   // so in BFF mode it could never succeed, and two tabs reloading would replay a consumed token
   // past the grace window — the false family revoke this package exists to avoid.
-  if (subpath === '/refresh') {
+  // A page render's own request (`LUKK_SSR_HEADER` — Nuxt's SSR `useFetch` copies the page request's
+  // headers, the marker with them) never renews the session: the rotated cookie would go back to the
+  // render, never to the browser, which then replayed the consumed token into a revoke. Its 401 goes back as
+  // it came, as the app-API proxy's does. Not a logout's renewal: that one ends the session anyway, and is
+  // what lets lukk revoke it.
+  const inRender = getRequestHeader(event, LUKK_SSR_HEADER) === '1' && !endsSession
+
+  if (route === '/refresh') {
+    // POST only. A rotation changes state (RFC 9110 §9.2.1), so a GET to it is one a prefetcher, a
+    // crawler or a same-origin `<img>` could trigger — spending the token on a response nobody reads.
+    if (method !== 'POST') {
+      setResponseStatus(event, 405)
+      setResponseHeader(event, 'allow', 'POST')
+      return { message: 'Method not allowed.' }
+    }
+
     // Read-only until we know there is something to rotate: opening the session would mint a
     // cookie for an anonymous caller.
-    if (!sealed.refresh) {
+    if (!sealed.refresh || inRender) {
       setResponseStatus(event, 401)
       return { message: 'Unauthenticated.' }
     }
@@ -141,44 +200,51 @@ export default defineEventHandler(async (event) => {
     }
     if (await sessionEnded(sessionKey(s))) return replaced()
 
-    const { pair, expiresIn, retryable } = await refreshOnce(s, baseURL, clientIp)
+    const { pair, expiresIn, retryable, retryAfter } = await refreshOnce(s, baseURL, clientIp)
     if (await sessionEnded(sessionKey(s))) {
       revokeDroppedSession(event, { access: pair?.access, refresh: pair?.refresh }, baseURL, clientIp)
       return replaced()
     }
 
     if (!pair) {
-      if (!retryable) await s.clear()
+      if (!retryable) await clearSession(event, s, sessionName, cookieOptions)
+      // The rotation is still out: come back shortly, and the retry joins it (see `REFRESH_WAIT_MS`).
+      if (retryAfter) setResponseHeader(event, 'retry-after', String(retryAfter))
       setResponseStatus(event, retryable ? 503 : 401)
       return { message: 'Unauthenticated.' }
     }
 
-    await s.update(pair)
+    // The newest pair — the session may have rotated this one during the checks above (a shared store's
+    // answer is real I/O) — or, should it have moved past it altogether, none: the browser holds the newer.
+    const newest = deliverPair(event, sessionKey(s), pair)
+    if (!newest) return replaced()
+    await s.update(newest)
     warnIfSessionTooLarge(s)
     if (await sessionEnded(sessionKey(s))) {
       withholdSessionCookie(event.node.res, sessionName)
-      revokeDroppedSession(event, pair, baseURL, clientIp)
+      revokeDroppedSession(event, newest, baseURL, clientIp)
       return replaced()
     }
 
-    // The same shape the proxied token-pair capture returns — the browser never sees a token.
-    return { ok: true, expires_in: expiresIn }
+    // The same shape the proxied token-pair capture returns — the browser never sees a token. Its lifetime
+    // is known for the pair this request rotated; a newer one's is not, and is left out.
+    return { ok: true, expires_in: newest === pair ? expiresIn : undefined }
   }
 
-  let res = await callLukk(sealed.access)
+  let upstream = await callLukk(sealed.access)
   // Rotated tokens this request re-sealed, if any — revoked should the session turn out to be replaced.
   let resealedTokens: TokenSession | undefined
   // A refresh that failed without lukk rejecting the token (a throttle, an outage): the session is live.
   let stillRefreshable = false
 
-  if (res.status === 401 && sealed.refresh && !SIGN_IN_PATHS.has(subpath)) {
+  if (upstream.res.status === 401 && sealed.refresh && !inRender && !SIGN_IN_PATHS.has(route)) {
     const s = await session()
     // A session a sign-in replaced or a logout ended is neither rotated nor written — before the
     // refresh or after it — and the 401 goes back as it came. See the `/refresh` branch above.
     const ended = () => sessionEnded(sessionKey(s))
     // Except for a logout: it still renews an ended session's token — never writing it back — so that
     // lukk actually revokes it. Skipping it left a replaced session's family alive after the logout.
-    const endingIt = subpath === '/logout'
+    const endingIt = endsSession
 
     if (endingIt || !(await ended())) {
       const { pair, retryable } = await refreshOnce(s, baseURL, clientIp)
@@ -187,12 +253,20 @@ export default defineEventHandler(async (event) => {
         // Seal AFTER the retried call, so a sign-in or logout during it is still seen — the response
         // carries this cookie only once that call is done. In `finally`: the refresh token has been
         // rotated either way, and a throw that skipped the write would strand the session on a consumed one.
-        try { res = await callLukk(pair.access) }
+        try { upstream = await callLukk(pair.access) }
         finally {
           if (!(await ended())) {
-            await s.update(pair)
-            warnIfSessionTooLarge(s)
-            resealedTokens = pair
+            // The newest pair, not necessarily the one handed out before the call: the session may have
+            // rotated it meanwhile, and sealing a spent token over the newer cookie invites a revoke. None
+            // at all when the session has moved past it: the browser keeps the newer cookie it holds. (A
+            // backstop here: the call is bounded by the 15 s upstream deadline, and a link lasts at least
+            // 30 s once delivered — only a journal overflowing meanwhile gets that far.)
+            const newest = deliverPair(event, sessionKey(s), pair)
+            if (newest) {
+              await s.update(newest)
+              warnIfSessionTooLarge(s)
+              resealedTokens = newest
+            }
           }
           // The logout is about to revoke it itself.
           else if (!endingIt) {
@@ -206,7 +280,7 @@ export default defineEventHandler(async (event) => {
       // Clear ONLY on a definitive rejection. A throttled or failed refresh leaves the token valid, and
       // discarding the session there turns a transient 429 into an unrecoverable logout.
       else if (!pair && !retryable && !(await ended())) {
-        await s.clear()
+        await clearSession(event, s, sessionName, cookieOptions)
       }
       else if (!pair && retryable) {
         stillRefreshable = true
@@ -214,18 +288,21 @@ export default defineEventHandler(async (event) => {
     }
   }
 
+  const { res, text } = upstream
+
   // A trusted JSON upstream shouldn't 3xx; with redirect:'manual' one surfaces as an
   // opaque response (status 0) — reject it rather than leak an empty/odd status downstream.
-  if (res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400)) {
+  if (isRedirect(res)) {
     setResponseStatus(event, 502)
     return { message: 'Upstream redirect rejected.' }
   }
 
-  const text = await res.text()
-  const data: unknown = text ? safeParse(text) : undefined
+  const parsed = text ? safeParse(text) : undefined
+  const data = parsed?.json
 
-  // Reading the body can take as long as the upstream likes. A session re-sealed above that a sign-in or
-  // logout ended meanwhile must not leave with this response — the last point before it does.
+  // Sealing takes time too (iron is async crypto), so a sign-in or logout can still land after the check
+  // in the retry's `finally` above. A session re-sealed there that one ended meanwhile must not leave with
+  // this response — the last point before it does.
   if (rwSession && await sessionEnded(sessionKey(await rwSession))) {
     withholdSessionCookie(event.node.res, sessionName)
     revokeDroppedSession(event, resealedTokens ?? {}, baseURL, clientIp)
@@ -271,7 +348,18 @@ export default defineEventHandler(async (event) => {
       setResponseStatus(event, 409)
       return { message: 'The session was replaced.' }
     }
-    await s.update({ confirmation: data.confirmation_token })
+    // And the update re-seals the session's tokens as they arrived — which the session may have rotated
+    // while the step-up was out (a sibling request, another tab). Recorded onto the newest pair instead; and
+    // not at all over a pair the session has moved past, whose cookie would land over the newer one. Nothing
+    // retries a 409 on a step-up, so the user is asked to confirm again — and that confirmation is earned on
+    // the newer cookie. Only the status is read by the client; the message is for the user.
+    const arrived = { access: s.data.access, refresh: s.data.refresh }
+    const newest = arrived.refresh ? deliverPair(event, sessionKey(s), arrived) : arrived
+    if (!newest) {
+      setResponseStatus(event, 409)
+      return { message: 'Your session was renewed meanwhile. Please confirm again.' }
+    }
+    await s.update(newest === arrived ? { confirmation: data.confirmation_token } : { ...newest, confirmation: data.confirmation_token })
     warnIfSessionTooLarge(s)
     return { ok: true }
   }
@@ -283,7 +371,7 @@ export default defineEventHandler(async (event) => {
   const sessionOver = res.ok || ((res.status === 401 || res.status === 403) && !stillRefreshable)
 
   // Only clear an existing cookie — never mint one just to expire it.
-  if (subpath === '/logout' && hasCookie && sessionOver) {
+  if (endsSession && hasCookie && sessionOver) {
     const s = await session()
     const unsealed = Boolean(sealed.access || sealed.refresh)
     // Not for a session a sign-in has ALREADY replaced: the browser holds the newer cookie, and clearing
@@ -294,7 +382,7 @@ export default defineEventHandler(async (event) => {
       // Only a session that unsealed: a forged or expired cookie still gets an h3 id, and recording
       // those let anyone flood the record past its bound and evict the entries that matter.
       if (unsealed) await endSession(sessionKey(s))
-      await s.clear()
+      await clearSession(event, s, sessionName, cookieOptions)
       // Only with the session it was for: a note beside a newer session's cookie belongs to that one.
       clearLogoutNote()
     }
@@ -306,16 +394,70 @@ export default defineEventHandler(async (event) => {
   // needs a string `access_token`), so a body that ALMOST matches — `{"access_token": null,
   // "refresh_token": "..."}` — skipped the strip and shipped a rotating refresh token to the
   // browser, the one thing BFF mode exists to prevent. Capture on a match; redact regardless.
-  return redactCredentials(data) ?? text
+  //
+  // And say what it is. h3 sends a returned string as `text/html` (and a `null` as an empty 204), so a
+  // non-JSON body — a WAF or proxy error page, anything that echoes the request — rendered as HTML on
+  // the APP's origin, cookies in scope: a reflected-XSS vector. JSON goes out as JSON, serialized here
+  // when it is a bare scalar so it keeps its JSON form; anything else goes out as plain text.
+  if (!parsed) {
+    setResponseHeader(event, 'content-type', 'text/plain; charset=utf-8')
+    return text
+  }
+  setResponseHeader(event, 'content-type', 'application/json; charset=utf-8')
+  const body = redactCredentials(data)
+  return typeof body === 'object' && body !== null ? body : JSON.stringify(body)
 })
 
+/** A 3xx `redirect: 'manual'` left unfollowed, or the opaque redirect a browser-style runtime hands back instead. */
+function isRedirect(res: Response): boolean {
+  return res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400)
+}
+
+/** An upstream answer, its body already read — inside the deadline (see `fetchUpstream`). */
+interface Upstream {
+  res: Response
+  text: string
+}
+
+/**
+ * The request body as text (`undefined` when there is none), or the status refusing it: 413 over
+ * `limit` bytes, 411 for a body that declares no length at all.
+ *
+ * Bounded BEFORE anything is read, on the declared `Content-Length`. That is sound because Node's
+ * HTTP parser enforces it — it reads exactly that many bytes, and anything after belongs to the next
+ * request — so the one way to send an unbounded body is chunked transfer coding, which declares
+ * nothing; that is refused (RFC 9110 §15.5.12). No browser sends a chunked body for a string or a
+ * `FormData`, and h3 reads no body at all from a request that has neither. Measured again once read,
+ * for a runtime that hands h3 a body some other way (an edge preset buffers it before we get here).
+ */
+async function readBoundedBody(event: H3Event, limit: number): Promise<string | undefined | 411 | 413> {
+  const declared = getRequestHeader(event, 'content-length')
+  if (Number(declared) > limit) return 413
+  if (!declared && /\bchunked\b/i.test(String(getRequestHeader(event, 'transfer-encoding')))) return 411
+
+  const body = await readRawBody(event)
+  // `encode(undefined)` is empty: no body measures 0.
+  return new TextEncoder().encode(body).byteLength > limit ? 413 : body
+}
+
 /** Open the read-write sealed session (h3 mints the cookie if absent — call only when writing). */
-function openSession(event: H3Event, password: string, name: string, cookie: SessionCookieOptions) {
+/**
+ * End the sealed session and delete its cookie. h3's `clear()` rewrites the cookie empty with the
+ * session's own options, Max-Age included, which left an empty `__Host-` cookie standing for the whole
+ * lifetime instead of removing it.
+ */
+async function clearSession(event: H3Event, session: { clear: () => Promise<unknown> }, name: string, cookie: SessionCookieOptions): Promise<void> {
+  await session.clear()
+  deleteCookie(event, name, cookie)
+}
+
+function openSession(event: H3Event, password: string, name: string, cookie: SessionCookieOptions, maxAge: number | undefined) {
   // `sessionHeader: false`: h3 otherwise accepts a sealed session from the `x-<name>-session`
   // REQUEST HEADER in preference to the cookie — an auth channel outside `__Host-`, Secure,
   // HttpOnly and SameSite=Strict. Nothing here reads it, but a session primitive shouldn't leave
   // a second door open.
-  return useSession<TokenSession>(event, { password, name, cookie, sessionHeader: false })
+  // `seal`: every seal written gets a lifetime (see `sessionSeal`).
+  return useSession<TokenSession>(event, { password, name, cookie, sessionHeader: false, seal: sessionSeal(maxAge) })
 }
 
 function isConfirmation(value: unknown): value is { confirmation_token: string } {
@@ -323,10 +465,11 @@ function isConfirmation(value: unknown): value is { confirmation_token: string }
     && typeof (value as { confirmation_token?: unknown }).confirmation_token === 'string'
 }
 
-function safeParse(text: string): unknown {
-  try { return JSON.parse(text) }
-  // Stryker disable next-line BlockStatement: equivalent — an emptied catch yields undefined, which no capture matches and the handler's final `?? text` turns back into the text.
-  catch { return text }
+/** The parsed JSON, boxed so a body that IS `null` tells apart from one that isn't JSON (`undefined`). */
+function safeParse(text: string): { json: unknown } | undefined {
+  try { return { json: JSON.parse(text) } }
+  // Stryker disable next-line BlockStatement: equivalent — an emptied catch returns undefined, the same value.
+  catch { return undefined }
 }
 
 /**

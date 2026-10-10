@@ -1,8 +1,8 @@
-import { createLukkClient, type LukkClient, singleFlight, type TokenPair } from 'lukk-core'
-import { defineNuxtPlugin, useNuxtApp, useRuntimeConfig, useState } from '#imports'
+import { createLukkClient, type LukkClient, REFRESHED_WITHOUT_TOKEN, type RefreshOutcome, singleFlight, type TokenPair } from 'lukk-core'
+import { defineNuxtPlugin, useNuxtApp, useRuntimeConfig } from '#imports'
 import { useLukkAuth } from '../composables/useLukkAuth'
-import { ACCESS_KEY, CONFIRMATION_KEY } from '../keys'
-import { confirmationHeaderName, isAuthRejection, LUKK_BFF_PREFIX } from '../shared'
+import { useLukkSecret } from '../utils/secrets'
+import { confirmationHeaderName, isAuthRejection, LUKK_BFF_PREFIX, underAppBase } from '../shared'
 import { acrossTabs, restoreState, settle } from '../utils/restore-state'
 import { tokenSubject } from '../utils/token-subject'
 
@@ -13,7 +13,10 @@ import { tokenSubject } from '../utils/token-subject'
 class SupersededRefresh extends Error {}
 
 /** What a restore learned. `superseded`: a newer sign-in or logout decided the session instead. */
-export interface RestoreOutcome { pair: TokenPair | null, unavailable: boolean, superseded?: boolean }
+export interface RestoreOutcome { pair: RefreshOutcome, unavailable: boolean, superseded?: boolean }
+
+/** The longest `Retry-After` a refresh honours before its one retry — a request is not held longer. */
+export const MAX_REFRESH_RETRY_AFTER_S = 10
 
 /** How long a restore waits for another tab's sign-in cookie to land before retrying a 409. */
 export const REPLACED_SESSION_RETRY_DELAY_MS = 400
@@ -44,13 +47,13 @@ export default defineNuxtPlugin({
       scope?: string
     }
 
-    const baseURL = cfg.mode === 'direct' ? cfg.baseURL : LUKK_BFF_PREFIX
+    const baseURL = cfg.mode === 'direct' ? cfg.baseURL : underAppBase((useRuntimeConfig() as { app?: { baseURL?: string } }).app?.baseURL, LUKK_BFF_PREFIX)
 
-    // Access-token holder. Written ONLY on the client (guarded below) so it never
-    // lands in the serialized SSR payload — in BFF mode it stays null (the proxy
-    // holds the token); in direct mode it lives in client memory only.
-    const accessToken = useState<string | null>(ACCESS_KEY, () => null)
-    const confirmation = useState<string | null>(CONFIRMATION_KEY, () => null)
+    // Access-token holder: on the app, never in `useState` (see `lukkSecret`), and written ONLY on the
+    // client (guarded below) — in BFF mode it stays null (the proxy holds the token); in direct mode it
+    // lives in client memory only.
+    const accessToken = useLukkSecret('access')
+    const confirmation = useLukkSecret('confirmation')
 
     // ONE single-flight refresh, shared by `$lukk`'s own 401 path AND `useLukkFetch`'s
     // app-API retry — so a concurrent auth + app-API 401 can't replay the rotating
@@ -79,12 +82,42 @@ export default defineNuxtPlugin({
           if (epoch !== state.epoch) throw new SupersededRefresh('lukk: a sign-in replaced the session before this refresh was sent')
         }
 
-        const pair = await client.refreshTokens()
+        const pair = await client.refreshTokens().catch(async (error: unknown) => {
+          // The BFF's "lukk is slow to rotate — come back in N s". Once, after that: the retry joins the
+          // rotation still out, or adopts it if it has landed. Left to the user's next action instead, the
+          // session waited for nothing, reported "couldn't tell", and its token sat consumed meanwhile.
+          // Read defensively: a binding's refresh can reject with anything, `null` included.
+          const e = error as { status?: number, retryAfter?: number } | null
+          // Stryker disable next-line OptionalChaining: equivalent — for a `null` rejection the TypeError `e.status` throws is, like `null`, neither a 409, a superseded refresh nor an auth rejection, so every catcher answers the same.
+          const retryAfter = e?.status === 503 ? e.retryAfter : undefined
+          if (retryAfter === undefined) throw error
+          // Not while a logout is ending the session, nor once one starts: `logout()` waits for this refresh
+          // to settle BEFORE it moves the generation on, so the generation alone never shows it — and the
+          // retry renewed the session being logged out. A logout that starts wakes the wait (see `logout`).
+          if (!state.ending) {
+            await new Promise<void>((resolve) => {
+              const timer = setTimeout(resolve, Math.min(retryAfter, MAX_REFRESH_RETRY_AFTER_S) * 1000)
+              state.wakeRefreshRetry = () => {
+                clearTimeout(timer)
+                resolve()
+              }
+            })
+            state.wakeRefreshRetry = undefined
+          }
+          // Stryker disable next-line StringLiteral: never surfaced — see above.
+          if (state.ending || epoch !== state.epoch) throw new SupersededRefresh('lukk: the session changed while this refresh waited to retry')
+          return client.refreshTokens()
+        })
         if (epoch !== state.epoch) {
           if (import.meta.client && cfg.mode === 'direct') await endStaleRotation(pair.access_token)
           // Stryker disable next-line StringLiteral: never surfaced — see above.
           throw new SupersededRefresh('lukk: the session changed while this refresh was in flight')
         }
+        // BFF: the proxy rotated and re-sealed the session server-side, and answers the browser with no
+        // token (`{ ok, expires_in }`). Say exactly that. Returned as if it were a pair, core's shape gate
+        // refused it, so a 401 was never retried in BFF mode even right after a successful renewal — and
+        // nothing here may hold a token in this mode, whatever the answer looked like.
+        if (cfg.mode === 'bff') return REFRESHED_WITHOUT_TOKEN
         // Stryker disable next-line ConditionalExpression: the mutation run compiles the client, where this is `true` already; the server half is pinned in test/server-env/client-plugin.test.ts.
         if (import.meta.client) accessToken.value = pair.access_token
         return pair
@@ -114,7 +147,7 @@ export default defineNuxtPlugin({
       state.announce?.()
     }
     // Published so a sign-in or `logout()` can wait for it — see `settleRefresh`.
-    const refresh = (): Promise<TokenPair> => (state.refreshing = flight())
+    const refresh = (): Promise<TokenPair | typeof REFRESHED_WITHOUT_TOKEN> => (state.refreshing = flight())
     // Abilities are re-derived on EVERY mint server-side — that is what makes revoking one take
     // effect within `access_ttl` rather than lasting the life of the refresh token. The client only
     // learns a grant through the user resource, so without this a refreshed token silently carried a
@@ -133,11 +166,13 @@ export default defineNuxtPlugin({
     // previous one's name.
     let resyncing = false
 
-    async function resyncUser(pair: TokenPair): Promise<void> {
+    async function resyncUser(pair: TokenPair | typeof REFRESHED_WITHOUT_TOKEN): Promise<void> {
       const { user, fetchUser } = useLukkAuth()
       if (resyncing || user.value == null) return
 
-      const subject = tokenSubject(pair.access_token)
+      // No token in BFF mode (`REFRESHED_WITHOUT_TOKEN` has no `access_token`), so no subject to compare;
+      // the abilities resync below still applies.
+      const subject = tokenSubject((pair as Partial<TokenPair>).access_token)
       const switched = subject !== undefined && state.subject !== undefined && subject !== state.subject
 
       // `resyncing` breaks the cycle where `fetchUser`'s own 401 refreshes again and re-enters here.
@@ -226,13 +261,23 @@ export default defineNuxtPlugin({
         const channel = new window.BroadcastChannel(`lukk:session:${scope}`)
         state.announce = () => channel.postMessage('changed')
         channel.onmessage = () => { void followOtherTab().catch(() => {}) }
+        // Closed with the app (HMR, a micro-frontend): left open it kept answering other tabs for the life
+        // of the page, and announcing on it after `close()` would throw. `onUnmount` is Vue 3.5+.
+        const vueApp = (nuxtApp as { vueApp?: { onUnmount?: (fn: () => void) => void } }).vueApp
+        vueApp?.onUnmount?.(() => {
+          state.announce = undefined
+          channel.onmessage = null
+          channel.close()
+        })
       }
     }
 
     async function followOtherTab(): Promise<void> {
       const auth = useLukkAuth()
-      // Anything this tab still had in flight belongs to the session that just changed.
+      // Anything this tab still had in flight belongs to the session that just changed — a 2FA challenge
+      // pending here too: redeemed, it would replace the session the other tab began.
       state.epoch++
+      useLukkSecret('challenge').value = null
 
       if (cfg.mode === 'direct') {
         // The in-memory token is the old session's; the cookie is the new one's. Renew from the cookie,

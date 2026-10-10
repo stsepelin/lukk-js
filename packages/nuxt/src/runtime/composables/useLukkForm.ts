@@ -1,6 +1,7 @@
 import type { FetchOptions } from 'ofetch'
 import type { LukkError } from 'lukk-core'
 import { computed, reactive, ref, shallowRef, useState } from '#imports'
+import { FORM_KEY_PREFIX } from '../keys'
 import { useLukkFetch } from './useLukkFetch'
 
 type FormFields = Record<string, unknown>
@@ -147,7 +148,7 @@ export function useLukkForm<T extends FormFields>(initial: T, options: UseLukkFo
   // `rememberKey` backs `data` with Nuxt `useState` so it survives SPA navigation; otherwise
   // it's a plain per-instance reactive. Either way it's the live, editable field object.
   const data = options.rememberKey
-    ? useState<T>(options.rememberKey, () => cloneData(initial) as T).value
+    ? useState<T>(`${FORM_KEY_PREFIX}:${options.rememberKey}`, () => cloneData(initial) as T).value
     : reactive(cloneData(initial)) as T
   // A plain-object deep clone of the live data (File/Blob by reference).
   const snapshot = (): FormFields => cloneData(data) as FormFields
@@ -293,8 +294,13 @@ export function useLukkForm<T extends FormFields>(initial: T, options: UseLukkFo
     try {
       result = await api(url, { method, ...carrier, signal: controller.signal, ...fetchOptions }) as R
     }
-    catch (error) {
+    catch (caught) {
       processing.value = false
+      // An aborted submit — `cancel()`, or a signal of the caller's own — rejects with the AbortError itself, as
+      // documented: ofetch wraps it in its own FetchError (the abort only on `.cause`), and
+      // `error.name === 'AbortError'` never matched.
+      const cause = (caught as { cause?: unknown } | null)?.cause
+      const error = cause instanceof DOMException && cause.name === 'AbortError' ? cause : caught
       const bag = (error as LukkError | null)?.errors
       if (bag) {
         // Guard the shape: a non-conforming/empty bag must not mask the LukkError with a
@@ -307,8 +313,8 @@ export function useLukkForm<T extends FormFields>(initial: T, options: UseLukkFo
           if (Array.isArray(messages) && messages.length) errors.value[field as keyof T] = messages[0]
         }
       }
-      await onError?.(error as LukkError)
-      await onFinish?.() // finally-hook: fires on failure too
+      try { await onError?.(error as LukkError) }
+      finally { await onFinish?.() } // the finally-hook: fires on failure too, even when onError throws
       throw error
     }
 

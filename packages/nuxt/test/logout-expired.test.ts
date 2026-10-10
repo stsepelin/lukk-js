@@ -1,18 +1,18 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ACCESS_KEY } from '../src/runtime/keys'
+
 import { REFRESH_SETTLE_TIMEOUT, restoreState } from '../src/runtime/utils/restore-state'
-import { __test, useState } from './mocks/imports'
+import { __test } from './mocks/imports'
+
+import clientPlugin from '../src/runtime/plugins/client'
+
+import { useLukkAuth } from '../src/runtime/composables/useLukkAuth'
+import { useLukkSecret } from '../src/runtime/utils/secrets'
 
 // The REAL lukk-core client and the REAL plugin + composable, with only `fetch` stubbed. The bug this
 // pins lived in the handoff between core's own 401 retry and the plugin's refresh gate — a test that
 // mocked either side (as the session-generation suite mocks core) could not see it.
 const { api } = vi.hoisted(() => ({ api: vi.fn() }))
 vi.mock('../src/runtime/composables/useLukkFetch', () => ({ useLukkFetch: () => api }))
-
-// eslint-disable-next-line import/first
-import clientPlugin from '../src/runtime/plugins/client'
-// eslint-disable-next-line import/first
-import { useLukkAuth } from '../src/runtime/composables/useLukkAuth'
 
 const json = (body: unknown, status = 200) => new Response(body === undefined ? null : JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 
@@ -47,7 +47,7 @@ describe('logout() with an access token lukk rejects', () => {
       if (path === '/refresh') { renewed = true; return json({ access_token: 'fresh', expires_in: 900 }) }
       return renewed ? json(undefined, 204) : json({ message: 'Unauthenticated.' }, 401)
     })
-    useState<string | null>(ACCESS_KEY, () => null).value = 'expired'
+    useLukkSecret('access').value = 'expired'
     const auth = useLukkAuth()
 
     let done = false
@@ -61,7 +61,7 @@ describe('logout() with an access token lukk rejects', () => {
       { path: '/refresh', bearer: 'Bearer expired' },
       { path: '/logout', bearer: 'Bearer fresh' },
     ])
-    expect(useState<string | null>(ACCESS_KEY, () => null).value).toBeNull()
+    expect(useLukkSecret('access').value).toBeNull()
   })
 
   it('does not wait on itself under the cross-tab lock either — the renewal shares the logout\'s hold', async () => {
@@ -84,7 +84,7 @@ describe('logout() with an access token lukk rejects', () => {
       if (path === '/refresh') { renewed = true; return json({ access_token: 'fresh', expires_in: 900 }) }
       return renewed ? json(undefined, 204) : json({ message: 'Unauthenticated.' }, 401)
     })
-    useState<string | null>(ACCESS_KEY, () => null).value = 'expired'
+    useLukkSecret('access').value = 'expired'
 
     let done = false
     const loggingOut = useLukkAuth().logout().then(() => { done = true })
@@ -106,7 +106,7 @@ describe('logout() with an access token lukk rejects', () => {
     const lockHeldElsewhere = new Promise<void>(() => {})
     vi.stubGlobal('navigator', { locks: { request: () => lockHeldElsewhere } })
     const calls = boot('direct', () => json(undefined, 204))
-    useState<string | null>(ACCESS_KEY, () => null).value = 'A'
+    useLukkSecret('access').value = 'A'
 
     void useLukkAuth().logout()
     await new Promise(resolve => setTimeout(resolve, 0))
@@ -132,7 +132,7 @@ describe('logout() with an access token lukk rejects', () => {
     const granted = new Promise<void>((resolve) => { grant = resolve })
     vi.stubGlobal('navigator', { locks: { request: async (_n: string, _o: unknown, callback: () => Promise<void>) => { await granted; return callback() } } })
     const calls = boot('direct', () => json(undefined, 204))
-    useState<string | null>(ACCESS_KEY, () => null).value = 'A'
+    useLukkSecret('access').value = 'A'
     const auth = useLukkAuth()
     auth.user.value = { id: 1 }
 
@@ -162,7 +162,7 @@ describe('logout() with an access token lukk rejects', () => {
       if (++attempts <= 2) throw new TypeError('Failed to fetch') // the early send and its keepalive-less retry
       return json(undefined, 204)
     })
-    useState<string | null>(ACCESS_KEY, () => null).value = 'A'
+    useLukkSecret('access').value = 'A'
 
     const loggingOut = useLukkAuth().logout()
     await new Promise(resolve => setTimeout(resolve, 0))
@@ -238,7 +238,7 @@ describe('logout() with an access token lukk rejects', () => {
     })
     vi.stubGlobal('navigator', { locks: { request: () => new Promise(() => {}) } })
     const calls = boot('direct', () => json(undefined, 204))
-    useState<string | null>(ACCESS_KEY, () => null).value = 'A'
+    useLukkSecret('access').value = 'A'
 
     void useLukkAuth().logout()
     await new Promise(resolve => setTimeout(resolve, 0))
@@ -359,7 +359,7 @@ describe('logout() with an access token lukk rejects', () => {
     vi.stubGlobal('sessionStorage', { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => { store.set(k, v) }, removeItem: (k: string) => { store.delete(k) } })
     const seen: unknown[] = []
     boot('direct', () => { seen.push(JSON.parse(store.get('lukk:logging-out:/')!)); return json(undefined, 204) })
-    useState<string | null>(ACCESS_KEY, () => null).value = `h.${Buffer.from(JSON.stringify({ sub: 1, fid: 'fam-7' })).toString('base64url')}.s`
+    useLukkSecret('access').value = `h.${Buffer.from(JSON.stringify({ sub: 1, fid: 'fam-7' })).toString('base64url')}.s`
 
     await useLukkAuth().logout()
 
@@ -518,7 +518,7 @@ describe('logout() with an access token lukk rejects', () => {
       if (++logouts === 1) return firstAnswer.promise as unknown as Response
       return renewed ? json(undefined, 204) : json({ message: 'Unauthenticated.' }, 401)
     })
-    useState<string | null>(ACCESS_KEY, () => null).value = 'expired'
+    useLukkSecret('access').value = 'expired'
 
     let done = false
     const loggingOut = useLukkAuth().logout().then(() => { done = true })
@@ -543,7 +543,7 @@ describe('logout() with an access token lukk rejects', () => {
       if (path === '/login') return json({ access_token: 'B', refresh_token: 'rB', expires_in: 900 })
       return renewed ? json(undefined, 204) : json({ message: 'Unauthenticated.' }, 401)
     })
-    useState<string | null>(ACCESS_KEY, () => null).value = 'expired'
+    useLukkSecret('access').value = 'expired'
     const auth = useLukkAuth()
 
     const loggingOut = auth.logout()
@@ -557,7 +557,7 @@ describe('logout() with an access token lukk rejects', () => {
 
     await new Promise(resolve => setTimeout(resolve, 0))
     expect(calls.map(c => c.path)).toEqual(['/logout', '/refresh', '/logout', '/login', '/session/claim'])
-    expect(useState<string | null>(ACCESS_KEY, () => null).value).toBe('B')
+    expect(useLukkSecret('access').value).toBe('B')
   })
 
   it('does not let a user reload started by the renewal sign the user back in afterwards', async () => {
@@ -571,7 +571,7 @@ describe('logout() with an access token lukk rejects', () => {
       return renewed ? json(undefined, 204) : json({ message: 'Unauthenticated.' }, 401)
     })
     __test.runtimeConfig.public.lukk.userEndpoint = '/me'
-    useState<string | null>(ACCESS_KEY, () => null).value = 'expired'
+    useLukkSecret('access').value = 'expired'
     const auth = useLukkAuth()
     auth.user.value = { id: 1, abilities: ['orders.read'] }
 
@@ -593,7 +593,7 @@ describe('logout() with an access token lukk rejects', () => {
       if (++logouts > 1) return json(undefined, 204)
       return new Promise<Response>((resolve) => { answer = resolve }) as unknown as Response
     })
-    useState<string | null>(ACCESS_KEY, () => null).value = 'expired'
+    useLukkSecret('access').value = 'expired'
 
     const loggingOut = useLukkAuth().logout()
     await new Promise(resolve => setTimeout(resolve, 0))
@@ -621,5 +621,62 @@ describe('logout() with an access token lukk rejects', () => {
     await useLukkAuth().logout()
 
     expect(Date.now() - started).toBeLessThan(1_000)
+  })
+})
+
+describe('a refresh waiting to retry when logout() starts', () => {
+  it('stands down at once rather than renew the session the logout is ending', async () => {
+    // The BFF answered 503 + Retry-After (lukk slow to rotate), and the client waits to retry. A logout
+    // then waits for that refresh to settle before it ends the generation — so a check on the generation
+    // alone could never fire, and the retry renewed the very session being logged out.
+    vi.useFakeTimers()
+    let refreshes = 0
+    const calls = boot('bff', (path) => {
+      if (path === '/refresh') {
+        refreshes++
+        return new Response(JSON.stringify({ message: 'Unauthenticated.' }), { status: 503, headers: { 'content-type': 'application/json', 'retry-after': '5' } })
+      }
+      return json(undefined, 204)
+    })
+    const restoring = (__test.nuxtApp as { $lukkRestore: () => Promise<{ pair: unknown, unavailable: boolean, superseded?: boolean }> }).$lukkRestore()
+    await vi.advanceTimersByTimeAsync(1_000)
+
+    let done = false
+    const loggingOut = useLukkAuth().logout().then(() => { done = true })
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(done).toBe(true) // not held behind the remaining four seconds
+    await loggingOut
+    expect(await restoring).toMatchObject({ pair: null, superseded: true })
+    expect(refreshes).toBe(1)
+    expect(calls.map(call => call.path)).toEqual(['/refresh', '/logout'])
+    expect(vi.getTimerCount()).toBe(0) // the retry's own timer went with it
+  })
+
+  it('does not even start the wait when the logout began while the refresh was on the wire', async () => {
+    vi.useFakeTimers()
+    let answer!: (r: Response) => void
+    let refreshes = 0
+    const calls = boot('bff', (path) => {
+      if (path === '/refresh') {
+        refreshes++
+        return new Promise<Response>((resolve) => { answer = resolve }) as unknown as Response
+      }
+      return json(undefined, 204)
+    })
+    const restoring = (__test.nuxtApp as { $lukkRestore: () => Promise<{ pair: unknown, superseded?: boolean }> }).$lukkRestore()
+    await vi.advanceTimersByTimeAsync(0)
+
+    let done = false
+    const loggingOut = useLukkAuth().logout().then(() => { done = true })
+    await vi.advanceTimersByTimeAsync(0)
+    answer(new Response(JSON.stringify({ message: 'x' }), { status: 503, headers: { 'content-type': 'application/json', 'retry-after': '5' } }))
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(done).toBe(true)
+    await loggingOut
+    expect(await restoring).toMatchObject({ pair: null, superseded: true })
+    expect(refreshes).toBe(1)
+    expect(calls.map(call => call.path)).toEqual(['/refresh', '/logout'])
   })
 })

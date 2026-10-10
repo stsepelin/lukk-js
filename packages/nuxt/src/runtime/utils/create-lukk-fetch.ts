@@ -1,7 +1,8 @@
-import type { $Fetch, FetchContext, FetchOptions } from 'ofetch'
+import type { $Fetch, FetchContext, FetchOptions, FetchRequest, FetchResponse } from 'ofetch'
 // Reuse core's guard + error builder so the same-origin check and the LukkError shape
 // stay identical across the two transports (no drift on a security-critical path).
-import { carriesOrigin, isSameOrigin, lukkError } from 'lukk-core'
+import { carriesOrigin, isSameOrigin, lukkError, retryAfterSeconds } from 'lukk-core'
+import { LUKK_SSR_HEADER } from '../shared'
 
 export interface LukkFetchDeps {
   /** App-API base — the same-origin proxy mount (BFF) or the API URL (direct). */
@@ -10,13 +11,27 @@ export interface LukkFetchDeps {
   isServer: boolean
   /** Direct mode with an in-memory token: enables single-flight 401 refresh + retry. */
   canRefresh: boolean
-  /** SSR: the inbound request's `cookie` header (BFF session). Client: undefined. */
+  /**
+   * SSR: the inbound request's `cookie` header — every cookie the browser sent THIS app. Forwarded only to
+   * the app itself (a relative API base: the BFF proxy mount), never to an absolute API on another host.
+   */
   getCookieHeader: () => string | undefined
   /** Direct mode: the in-memory access token. BFF: null (the proxy injects it). */
   getBearer: () => string | null
+  /**
+   * Direct mode: the step-up token held in client memory, sent like the bearer — only to the API's own
+   * origin — so a `lukk.confirm`-gated route of the app's API can be reached. BFF: null (the proxy injects
+   * it from the sealed session).
+   */
+  getConfirmation: () => string | null
+  /** The header carrying it — lukk's `confirm.header`. */
+  confirmationHeader: string
   /** Single-flight token refresh (shared with `$lukk`); resolves truthy on success. */
   refresh: () => Promise<unknown>
-  /** This app's own origin, where it is known — for judging an absolute URL against a relative base. */
+  /**
+   * This app's own origin, where it is known — for judging an absolute URL against a relative base. Used in
+   * the browser only: on the server it comes from the request's `Host`, which is not ours to trust.
+   */
   origin?: string
   /** Surface an upstream redirect instead of silently following it. */
   onRedirect: (location: string) => void
@@ -62,7 +77,9 @@ export function lukkFetchOptions(deps: LukkFetchDeps): FetchOptions {
       // `createRequestFetch` and lukk-core's `request()` — already pin it after the caller's options.
       options.redirect = 'manual'
       const headers = new Headers(options.headers)
-      headers.set('accept', 'application/json')
+      // Only when the caller didn't ask for something else: forced, it clobbered their `Accept` and left
+      // `api.forceJson: false` (a non-JSON route through the app-API proxy) unusable from here.
+      if (!headers.has('accept')) headers.set('accept', 'application/json')
 
       // Never attach the sealed session cookie / bearer to a cross-origin target a
       // caller may have passed — and drop `credentials` there too.
@@ -70,12 +87,18 @@ export function lukkFetchOptions(deps: LukkFetchDeps): FetchOptions {
       const sameOrigin = targetIsOurs(deps, url, options.baseURL)
       options.credentials = sameOrigin ? 'include' : 'same-origin'
       if (sameOrigin) {
-        if (deps.isServer) {
+        // The visitor's cookies are the APP's — analytics, CSRF, a co-hosted app's session. They go only to
+        // the app itself: a relative API base, the BFF proxy mount. An absolute base is another host, and
+        // the API's own cookies (lukk's `__Host-` refresh cookie in direct mode) never reached this server
+        // to begin with, so forwarding sent that host everything the app's origin held and nothing it owns.
+        if (deps.isServer && !carriesOrigin(deps.baseURL)) {
           const cookie = deps.getCookieHeader()
           if (cookie) headers.set('cookie', cookie)
         }
         const bearer = deps.getBearer()
         if (bearer) headers.set('authorization', `Bearer ${bearer}`)
+        const confirmation = deps.getConfirmation()
+        if (confirmation) headers.set(deps.confirmationHeader, confirmation)
       }
       options.headers = headers
     },
@@ -91,7 +114,11 @@ export function lukkFetchOptions(deps: LukkFetchDeps): FetchOptions {
       if (retryable && await deps.refresh()) {
         return
       }
-      throw lukkError(ctx.response.status, ctx.response.statusText, ctx.response._data as { message?: string, errors?: Record<string, string[]> })
+      const error = lukkError(ctx.response.status, ctx.response.statusText, ctx.response._data as { message?: string, errors?: Record<string, string[]> })
+      // As lukk-core's own errors do: a throttle or maintenance answer says when to come back.
+      const retryAfter = retryAfterSeconds(ctx.response.headers.get('retry-after'))
+      if (retryAfter !== undefined) error.retryAfter = retryAfter
+      throw error
     },
   }
 }
@@ -101,11 +128,6 @@ export function createLukkFetch(deps: LukkFetchDeps): $Fetch {
   return deps.fetchImpl.create(lukkFetchOptions(deps))
 }
 
-/**
- * The server-BFF instance: routes each call through Nuxt's request-aware fetch (which
- * resolves the relative mount in-process and forwards the session cookie), carrying the
- * shared auth-aware options.
- */
 /**
  * Is this request staying on the API — the only place a lukk credential may go?
  *
@@ -130,18 +152,27 @@ function targetIsOurs(deps: LukkFetchDeps, url: string, baseURL: unknown): boole
   // differently to each was cleared as the API and sent elsewhere. A falsy base (`''`, `null`) is
   // ofetch's "none".
   if (baseURL && typeof baseURL !== 'string') return false
+  const apiIsRelative = !/^https?:\/\//i.test(deps.baseURL)
   const perCall = baseURL ? baseURL as string : undefined
   const known = (base: string | undefined, target: string) => {
     // Stryker disable next-line ConditionalExpression: equivalent — `isSameOrigin` refuses an absolute target against an undefined base (its `https?://` base test fails), and every relative target is already accepted by the API-base check this is OR-ed with. Its own line, so the comparison below stays under test. This also hides `→ true`, which "accepts an ABSOLUTE per-call baseURL (or URL) on this app's own origin" kills.
     if (base === undefined) return false
     return isSameOrigin(base, target)
   }
-  const apiIsRelative = !/^https?:\/\//i.test(deps.baseURL)
   // This app's own origin stands in for the API's ONLY where the API base is the relative proxy mount:
   // there `isSameOrigin` refuses every absolute URL, and same-origin is exactly what the mount means.
-  // With an ABSOLUTE API base the app's origin is a different host that the bearer was never scoped
-  // to — and on the server this origin comes from the `Host` header, so it is not ours to trust.
-  const appOrigin = apiIsRelative ? deps.origin : undefined
+  // With an ABSOLUTE API base the app's origin is a different host that the bearer was never scoped to.
+  // And only in the browser: on the server this origin is whatever the request's `Host` (or a forwarded
+  // host header) said, so an absolute URL on a host the request named was cleared as "this app" and
+  // handed the visitor's sealed session. There, an absolute URL is simply not ours.
+  const appOrigin = apiIsRelative && !deps.isServer ? deps.origin : undefined
+  // An explicitly empty base stops ofetch joining, so a RELATIVE path goes to the page's own origin — not
+  // the API's, when the API base is absolute. Ours only if the API is this app (a relative base), or the
+  // page is on the API's origin; and the page's origin is known only in the browser (on the server it is
+  // the request's `Host`). `loadUser` passes exactly this for a relative `user.endpoint` in direct mode.
+  if (!baseURL && !carriesOrigin(url)) {
+    return apiIsRelative || (!deps.isServer && known(deps.origin, deps.baseURL))
+  }
   const perCallOk = perCall === undefined
     ? true
     : carriesOrigin(perCall)
@@ -156,23 +187,57 @@ function targetIsOurs(deps: LukkFetchDeps, url: string, baseURL: unknown): boole
 }
 
 /** Minimal callable shape of Nuxt's request-aware fetch that we drive. */
-export type RequestFetch = (request: string, opts?: FetchOptions) => Promise<unknown>
+export type RequestFetch = (request: FetchRequest, opts?: FetchOptions) => Promise<unknown>
 
-export function createRequestFetch(requestFetch: RequestFetch, deps: LukkFetchDeps): $Fetch {
+/**
+ * The server-BFF instance: routes each call through Nuxt's request-aware fetch (which resolves the
+ * relative mount in-process and forwards the session cookie), carrying the shared auth-aware options.
+ *
+ * A real `$Fetch` — `.raw`, `.create` and `.native` included. It used to be a bare function cast to the
+ * type, so each of those was undefined and threw, during SSR only (the browser gets a real ofetch
+ * instance); a `Request` argument threw too, judged as if it were a string.
+ */
+export function createRequestFetch(requestFetch: RequestFetch, deps: LukkFetchDeps, defaults: FetchOptions = {}): $Fetch {
   const options = lukkFetchOptions(deps)
-  // `redirect` sits AFTER the caller's opts, mirroring `lukk-core`'s ordering: a caller passing
-  // `redirect: 'follow'` would otherwise re-enable chasing a 3xx, and this fetch attaches the
-  // sealed session cookie on the server.
-  return ((request: string, opts: FetchOptions = {}) => {
+
+  const prepare = (request: FetchRequest, opts: FetchOptions = {}): FetchOptions => {
+    const merged = { ...defaults, ...opts }
     // Nuxt's request-aware fetch is h3's `fetchWithEvent`, which merges `getProxyRequestHeaders(event)`
     // — the visitor's whole inbound `Cookie` among them — into EVERY request, absolute targets
     // included, and does it before ofetch runs our `onRequest`. So the hook's guard was computing the
     // right answer over a credential the transport had already attached: on SSR, handing
     // `useLukkFetch()` an absolute URL derived from request input sent the sealed BFF session to that
-    // host, with no CORS in the way. Blank it here, where it is still ours to blank.
-    const ours = targetIsOurs(deps, request, opts.baseURL ?? options.baseURL)
-    const headers = ours ? opts.headers : { ...(opts.headers as Record<string, string> | undefined), cookie: '' }
+    // host, with no CORS in the way. Blank it here, where it is still ours to blank — as a PLAIN object:
+    // `fetchWithEvent` spreads the caller's headers over its own, and a `Headers` spreads to nothing.
+    const url = typeof request === 'string' ? request : request.url
+    const ours = targetIsOurs(deps, url, merged.baseURL ?? options.baseURL) && !carriesOrigin(deps.baseURL)
+    // Always a plain object. To the app's own API it is marked as the render's (see `LUKK_SSR_HEADER`), so the
+    // app-API proxy never renews for it; to anything else, neither the cookie nor the marker (which the page
+    // request carries, and the transport copies) goes along.
+    const headers = { ...Object.fromEntries(new Headers(merged.headers)), ...(ours ? { [LUKK_SSR_HEADER]: '1' } : { cookie: '', [LUKK_SSR_HEADER]: '' }) }
+    // `redirect` sits AFTER the caller's opts, mirroring `lukk-core`'s ordering: a caller passing
+    // `redirect: 'follow'` would otherwise re-enable chasing a 3xx, and this fetch attaches the
+    // sealed session cookie on the server.
+    return { ...options, ...merged, headers, redirect: 'manual' }
+  }
 
-    return requestFetch(request, { ...options, ...opts, headers, redirect: 'manual' })
-  }) as $Fetch
+  const $fetch = ((request: FetchRequest, opts?: FetchOptions) => requestFetch(request, prepare(request, opts))) as $Fetch
+
+  // The response itself, captured from ofetch's `onResponse` alongside the shared redirect watcher — Nuxt's
+  // request-aware fetch has no `.raw` of its own to delegate to.
+  $fetch.raw = (async (request: FetchRequest, opts?: FetchOptions) => {
+    let response: FetchResponse<unknown> | undefined
+    const prepared = prepare(request, opts)
+    const hooks = ([] as unknown[]).concat(prepared.onResponse ?? []) as NonNullable<FetchOptions['onResponse']>[]
+    await requestFetch(request, {
+      ...prepared,
+      onResponse: [...hooks, (ctx: FetchContext) => { response = ctx.response }] as FetchOptions['onResponse'],
+    })
+    return response
+  }) as $Fetch['raw']
+  // Unwrapped, like ofetch's own `.native`: no option, hook or credential of ours applies to it.
+  $fetch.native = globalThis.fetch
+  $fetch.create = ((more: FetchOptions) => createRequestFetch(requestFetch, deps, { ...defaults, ...more })) as $Fetch['create']
+
+  return $fetch
 }

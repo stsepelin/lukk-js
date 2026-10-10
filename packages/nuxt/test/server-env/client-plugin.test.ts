@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ACCESS_KEY, USER_KEY } from '../../src/runtime/keys'
+import { USER_KEY } from '../../src/runtime/keys'
 import { __test, ssrPayload, useState } from '../mocks/imports'
+
+import clientPlugin from '../../src/runtime/plugins/client'
+import { useLukkSecret } from '../../src/runtime/utils/secrets'
 
 const wire = vi.hoisted(() => ({ hooks: undefined as { onTokens: (pair: unknown) => void } | undefined }))
 vi.mock('lukk-core', async importActual => ({
@@ -12,9 +15,6 @@ vi.mock('lukk-core', async importActual => ({
 }))
 const { api } = vi.hoisted(() => ({ api: vi.fn() }))
 vi.mock('../../src/runtime/composables/useLukkFetch', () => ({ useLukkFetch: () => api }))
-
-// eslint-disable-next-line import/first
-import clientPlugin from '../../src/runtime/plugins/client'
 
 afterEach(() => { __test.reset(); api.mockReset() })
 
@@ -29,7 +29,7 @@ describe('the client plugin during a server render', () => {
     wire.hooks!.onTokens({ access_token: 'minted-on-the-server', expires_in: 900 })
     await provide.lukkRefresh()
 
-    expect(useState<string | null>(ACCESS_KEY, () => null).value).toBeNull()
+    expect(useLukkSecret('access').value).toBeNull()
     expect(JSON.stringify(ssrPayload())).not.toContain('minted-on-the-server')
     // Nor does it reload the user from the server on a refresh — that is the browser's to do.
     expect(api).not.toHaveBeenCalled()

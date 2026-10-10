@@ -11,7 +11,7 @@ import {
 } from '@nuxt/kit'
 import { defu } from 'defu'
 import type { LukkMode } from 'lukk-core'
-import { LUKK_BFF_PREFIX, isResolvableBase, isUsableConfirmationHeader, logoutCookieName, redactCredentials, signedOutCookieName } from './runtime/shared'
+import { LUKK_BFF_PREFIX, isResolvableBase, isUsableConfirmationHeader, isUsableSessionMaxAge, logoutCookieName, redactCredentials, sessionMaxAgeError, signedOutCookieName } from './runtime/shared'
 
 export { LUKK_BFF_PREFIX, LUKK_SESSION_COOKIE } from './runtime/shared'
 
@@ -100,15 +100,19 @@ export interface ModuleOptions {
    * logged-in on the first paint (no logged-out→logged-in flash, no `<ClientOnly>`). The
    * server reads the sealed session and seeds the user resource into the SSR payload — the
    * token itself never leaves the server, and the render is marked `no-store`. Set `false`
-   * to keep the pre-0.4 client-only behavior. No effect in `direct` mode (no server session).
+   * to have the client resolve the user instead: the server still renews an aged-out session
+   * before the render — so the render's own app-API calls carry a live token — without loading
+   * the user, and still marks a render carrying a session `no-store`. No effect in `direct`
+   * mode (no server session).
    * @default true
    */
   ssrHydrate: boolean
   /** Header carrying the step-up token. @default 'X-Lukk-Confirmation' */
   confirmationHeader: string
   /**
-   * BFF token storage. `cookie` = stateless sealed session (default, no infra);
-   * or a Nitro `useStorage` mount name for a server-side store.
+   * Reserved. BFF tokens are kept in the sealed session cookie, the only store there is; any value but
+   * `'cookie'` fails the build rather than be silently ignored. (A server-side token store is not
+   * implemented — for the record of ended sessions shared across instances, see `session.sharedStore`.)
    * @default 'cookie'
    */
   storage: string
@@ -154,14 +158,28 @@ export interface ModuleOptions {
    * so behind a load balancer without sticky sessions — or on serverless and edge runtimes — a late
    * refresh served by another instance can still write a replaced session back. Use a strongly
    * consistent driver that expires keys (Redis, Upstash / Vercel KV) — not an eventually consistent one.
+   *
+   * `maxAge` (seconds, default 2592000 = 30 days, lukk's default `refresh_ttl`) is the lifetime of each
+   * seal written: a sealed cookie copied out of a browser stops unsealing that long after it was written.
+   * Every refresh re-seals, so an active session is bounded by lukk's refresh family instead. Keep it at
+   * least as long as lukk's `refresh_ttl`, or idle sessions end before their refresh token does. It must be a
+   * positive whole number of seconds; anything else fails the build (`0` would mean a seal that never expires).
    */
-  session: { password: string, cookieSecure?: boolean, name?: string, sharedStore?: string }
+  session: { password: string, cookieSecure?: boolean, name?: string, sharedStore?: string, maxAge?: number }
   /**
    * BFF only, optional: proxy your own app API so it's authenticated out of the
    * box. Requests to `${path}/**` are forwarded to the FIXED `target` (your
    * Laravel API) with the access token injected server-side — the browser never
    * holds a token. `target` is never derived from the request (SSRF-safe).
    * @example { path: '/api', target: 'https://api.example.com' }
+   *
+   * Requests that would reach lukk's own routes (token pairs, step-up tokens) are refused with a `404`,
+   * judged on the URL — including through a `.php` front controller written in it. The proxy cannot see
+   * how the backend maps URLs to its script (`SCRIPT_NAME`): where the front controller's directory is
+   * not part of the public URLs — shared hosting rewriting into `public/index.php`, so `/public/auth/login`
+   * routes as `/auth/login`, or Symfony trimming any URI that contains `index.php` — a path check cannot
+   * contain it. The robust layout is a `target` (host or prefix) that does not serve lukk's routes at all:
+   * lukk on its own host or under a prefix the app API is not reachable through.
    *
    * `forceJson` (default `true`) sets `Accept: application/json` on forwarded
    * requests, so a JSON API renders clean `401`/`422` JSON for unauthenticated /
@@ -193,6 +211,14 @@ export interface ModuleOptions {
    * @default '' (off)
    */
   clientIpHeader: string
+  /**
+   * BFF only: the largest request body, in bytes, the auth proxy (`/api/_lukk/**`) reads. Larger
+   * answers `413`, and a chunked body — which declares no length to check — answers `411`. Its routes
+   * are reachable unauthenticated and the body is buffered, so this bounds what one request can make
+   * the server hold. The app-API proxy streams and is unaffected.
+   * @default 1048576 (1 MiB)
+   */
+  bodyLimit?: number
 }
 
 export default defineNuxtModule<ModuleOptions>({
@@ -270,8 +296,8 @@ export default defineNuxtModule<ModuleOptions>({
     }
 
     // The logout note the browser writes and the server reads (BFF). Named from the same `cookieSecure` and
-    // namespace as the session cookie; set `runtimeConfig.public.lukk.logoutCookie` alongside any runtime
-    // override of `cookieSecure`.
+    // namespace as the session cookie. These are the build's names; `finish-logout` restates them per
+    // request from the RUNTIME `cookieSecure`, so a runtime override cannot leave the two sides apart.
     const publicCookies = nuxt.options.runtimeConfig.public.lukk as { logoutCookie?: string, signedOutCookie?: string }
     // What scopes this app's browser-side session bookkeeping: the cross-tab lock, the broadcast channel and
     // the direct-mode notes. The router base alone was not enough — two apps path-routed on one origin with
@@ -280,13 +306,12 @@ export default defineNuxtModule<ModuleOptions>({
     publicCookies.logoutCookie ??= options.mode === 'bff' ? logoutCookieName(cookieSecure, options.session.name) : ''
     publicCookies.signedOutCookie ??= options.mode === 'bff' ? signedOutCookieName(cookieSecure, options.session.name) : ''
 
-    // Server-only config (the real lukk URL + storage choice for the BFF proxy,
+    // Server-only config (the real lukk URL and the sealed-session settings for the BFF proxy,
     // plus the optional app-API proxy target — fixed here, never request-derived).
 
     nuxt.options.runtimeConfig.lukk = defu(nuxt.options.runtimeConfig.lukk,
       {
         baseURL: options.baseURL,
-        storage: options.storage,
         sessionPassword: options.session.password,
         cookieSecure,
         // Per-app namespace (data only). The full cookie NAME is derived at each runtime site from
@@ -294,6 +319,7 @@ export default defineNuxtModule<ModuleOptions>({
         // come from ONE source and can't diverge under an independent runtime-config override.
         cookieNamespace: options.session.name,
         sharedStore: options.session.sharedStore ?? '',
+        sessionMaxAge: options.session.maxAge ?? 2592000,
         apiPath,
         apiTarget: options.api.target,
         apiForceJson: options.api.forceJson,
@@ -301,6 +327,7 @@ export default defineNuxtModule<ModuleOptions>({
         // Canonicalised for readability in the resolved config; h3 lower-cases the lookup itself,
         // so matching does not depend on this.
         clientIpHeader: options.clientIpHeader.toLowerCase(),
+        bodyLimit: options.bodyLimit ?? 1024 * 1024,
       },
     )
 
@@ -308,7 +335,7 @@ export default defineNuxtModule<ModuleOptions>({
     // directly and defu gives that precedence, so checking only the module option would bless a
     // value the app never uses. (A runtime `NUXT_*` env override still lands after the build;
     // the proxies report that one honestly at request time.)
-    const serverLukk = nuxt.options.runtimeConfig.lukk as { baseURL: string, apiTarget: string }
+    const serverLukk = nuxt.options.runtimeConfig.lukk as { baseURL: string, apiTarget: string, sessionMaxAge: unknown }
     const publicLukk = nuxt.options.runtimeConfig.public.lukk as { baseURL: string, apiBaseURL: string }
     // Direct mode's base is browser-resolved (the public copy); BFF's is server-fetched.
     const isDirect = options.mode === 'direct'
@@ -327,6 +354,11 @@ export default defineNuxtModule<ModuleOptions>({
     // auth proxy, clobbers Accept/Content-Type). Both fail loudly here rather than at request time.
     if (!isUsableConfirmationHeader(options.confirmationHeader)) {
       fail(`[lukk-nuxt] confirmationHeader "${options.confirmationHeader}" must be a valid HTTP header name that neither the proxies nor the transport already own (not Authorization, Accept, Content-Type, Cookie, a forwarding header, a hop-by-hop or browser-forbidden header like Connection or Origin, or a Proxy-/Sec- name). Use a token such as X-Lukk-Confirmation.`)
+    }
+
+    // Read by nothing: refuse a value that would have meant something, rather than drop it silently.
+    if (options.storage !== 'cookie') {
+      fail(`[lukk-nuxt] \`storage\` is reserved: the only token store is the sealed session cookie, 'cookie' (got ${JSON.stringify(options.storage)}). For the record of ended sessions shared across instances, use \`session.sharedStore\`.`)
     }
 
     // BFF mode seals tokens with this secret; fail loudly at build, not per-request.
@@ -348,6 +380,12 @@ export default defineNuxtModule<ModuleOptions>({
       }
     }
 
+    // The EFFECTIVE lifetime, after the merge: a consumer's own `runtimeConfig.lukk.sessionMaxAge` wins over
+    // the option. A `0` here sealed every session with no expiry at all (see `isUsableSessionMaxAge`).
+    if (!isUsableSessionMaxAge(serverLukk.sessionMaxAge)) {
+      fail(sessionMaxAgeError(serverLukk.sessionMaxAge))
+    }
+
     if (!effectiveBase) {
       console.warn('[lukk-nuxt] `baseURL` is not set — point it at your lukk auth URL.')
     }
@@ -357,7 +395,7 @@ export default defineNuxtModule<ModuleOptions>({
       // Legitimate for local prod-mode testing, but also the shape of a dev `.env` reaching a real
       // deploy — where SSR then calls the server's own loopback. Only the operator can tell those
       // apart, so warn rather than throw.
-      if (!nuxt.options.dev && isLoopback(effectiveBase)) {
+      if (!nuxt.options.dev && !nuxt.options._prepare && isLoopback(effectiveBase)) {
         console.warn(`[lukk-nuxt] \`baseURL\` points at ${originOf(effectiveBase)} in a production build — a dev value may have leaked into this deploy.`)
       }
     }
@@ -406,13 +444,27 @@ export default defineNuxtModule<ModuleOptions>({
     addTypeTemplate({
       filename: 'types/lukk-nuxt.d.ts',
       getContents: () => [
-        `import type { LukkClient, TokenPair } from 'lukk-core'`,
+        `import type { LukkClient, RefreshOutcome } from 'lukk-core'`,
         `declare module '#app' {`,
         `  interface NuxtApp {`,
         `    /** The lukk-core client, wired for the configured transport. */`,
         `    $lukk: LukkClient`,
-        `    /** The shared single-flight refresh; \`null\` when the session can't be refreshed. */`,
-        `    $lukkRefresh: () => Promise<TokenPair | null>`,
+        `    /**`,
+        `     * The shared single-flight refresh: the new pair in direct mode; \`REFRESHED_WITHOUT_TOKEN\` in bff`,
+        `     * mode, where the proxy re-sealed the session and the browser holds no token; \`null\` when the`,
+        `     * session can't be refreshed.`,
+        `     */`,
+        `    $lukkRefresh: () => Promise<RefreshOutcome>`,
+        `    /** The same refresh, reporting why it failed: \`unavailable\` for "couldn't tell", not "signed out". */`,
+        `    $lukkRestore: () => Promise<{ pair: RefreshOutcome, unavailable: boolean, superseded?: boolean }>`,
+        `  }`,
+        `}`,
+        `// Templates read globals from here, not from NuxtApp, so \`$lukk\` in a <template> was untyped.`,
+        `declare module 'vue' {`,
+        `  interface ComponentCustomProperties {`,
+        `    $lukk: LukkClient`,
+        `    $lukkRefresh: () => Promise<RefreshOutcome>`,
+        `    $lukkRestore: () => Promise<{ pair: RefreshOutcome, unavailable: boolean, superseded?: boolean }>`,
         `  }`,
         `}`,
         `export {}`,
@@ -436,9 +488,16 @@ export default defineNuxtModule<ModuleOptions>({
     addPlugin({ src: resolver.resolve('./runtime/plugins/session.client'), mode: 'client' })
     // BFF SSR hydration: seed the user on the server so authed pages render logged-in on the
     // first paint. Default on; opt out with `ssrHydrate: false`. No-op in direct mode.
-    if (options.mode === 'bff' && options.ssrHydrate !== false) {
-      addPlugin({ src: resolver.resolve('./runtime/plugins/session.server'), mode: 'server' })
-      // Marks streamable renders, which don't refresh on the server (Nuxt 4 `experimental.ssrStreaming`).
+    // Marks a render's own requests, so the app-API proxy never renews the session for one — BFF, whatever
+    // `ssrHydrate` says (see `render-marker.server.ts`).
+    if (options.mode === 'bff') addPlugin({ src: resolver.resolve('./runtime/plugins/render-marker.server'), mode: 'server' })
+    if (options.mode === 'bff') {
+      // Hydration renews the session before the render; without it, the renewal alone does — a render's own
+      // app-API calls never renew it (see `session-renew.server.ts`).
+      if (options.ssrHydrate !== false) addPlugin({ src: resolver.resolve('./runtime/plugins/session.server'), mode: 'server' })
+      else addPlugin({ src: resolver.resolve('./runtime/plugins/session-renew.server'), mode: 'server' })
+      // Takes a render that must refresh the session off streaming (Nuxt 4 `experimental.ssrStreaming`), so its
+      // re-sealed cookie can still be set — see `streaming-render.ts`.
       addServerPlugin(resolver.resolve('./runtime/server/plugins/streaming-render'))
     }
 

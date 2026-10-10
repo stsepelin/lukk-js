@@ -7,9 +7,9 @@ import { visitorIp } from './proxy-utils'
 import { sessionEnded, sessionKey, withholdSessionCookie } from './ended-sessions'
 import { logoutNoted } from './logout-note'
 import { revokeDroppedSession } from './revoke-dropped'
-import { readSealedSessionWithId } from './sealed-session'
+import { readSealedSessionWithId, sessionCookie, sessionSeal } from './sealed-session'
 import { warnIfSessionTooLarge } from './session-size'
-import { refreshOnce, type TokenSession } from './utils/refresh'
+import { deliverPair, refreshOnce, type TokenSession } from './refresh'
 
 interface LukkServerConfig {
   sessionPassword?: string
@@ -17,6 +17,7 @@ interface LukkServerConfig {
   cookieNamespace?: string
   clientIpHeader?: string
   baseURL?: string
+  sessionMaxAge?: number
 }
 
 /**
@@ -35,7 +36,7 @@ interface LukkServerConfig {
  *    streams through the app-API proxy, forwarding the request cookie) unseals the ALREADY-rotated
  *    session, sees a non-expired access token, and injects it — instead of unsealing the stale
  *    cookie and rotating the just-consumed refresh token a second time. Note the SEQUENTIAL order
- *    matters: `refreshOnce`'s single-flight entry is already cleared (its `.finally`) by the time
+ *    matters: `refreshOnce`'s single-flight entry is already cleared (once the refresh settles) by the time
  *    `fetchUser` runs, so the single-flight does NOT backstop this — the mirror alone does. The
  *    single-flight only collapses genuinely CONCURRENT refreshes of one session (e.g. sibling
  *    component fetches) into one `/refresh`.
@@ -45,7 +46,7 @@ interface LukkServerConfig {
  * unrefreshable, or failed/revoked refresh; the caller then defers to the client-side restore.
  */
 export async function resolveHydrationAccess(event: H3Event): Promise<string | null> {
-  const { sessionPassword, cookieSecure, cookieNamespace, clientIpHeader, baseURL } = (useRuntimeConfig(event).lukk ?? {}) as LukkServerConfig
+  const { sessionPassword, cookieSecure, cookieNamespace, clientIpHeader, baseURL, sessionMaxAge } = (useRuntimeConfig(event).lukk ?? {}) as LukkServerConfig
   const secure = cookieSecure !== false
   const name = sessionCookieName(secure, cookieNamespace)
 
@@ -83,12 +84,15 @@ export async function resolveHydrationAccess(event: H3Event): Promise<string | n
     const session = await useSession<TokenSession>(event, {
       password: sessionPassword!,
       name,
-      cookie: { sameSite: 'strict', secure, httpOnly: true, path: '/' },
+      cookie: sessionCookie(secure, sessionMaxAge),
       // h3 otherwise accepts a sealed session from the `x-<name>-session` REQUEST HEADER in
       // preference to the cookie — an auth channel outside `__Host-`, Secure, HttpOnly and
       // SameSite=Strict. Nothing here reads it, but leaving a door open on a session primitive
       // isn't worth the two words it costs to close.
       sessionHeader: false,
+      // Every seal written to the browser gets a lifetime (see `sessionSeal`). Not the in-process mirror
+      // below: that one never leaves this request.
+      seal: sessionSeal(sessionMaxAge),
     })
     // A session a sign-in replaced or a logout ended while this render was out is not re-sealed — that
     // would put it back in the browser. The client decides instead.
@@ -104,7 +108,17 @@ export async function resolveHydrationAccess(event: H3Event): Promise<string | n
     await session.update(pair)
     warnIfSessionTooLarge(session) // parity with bff.ts — the SSR reseal can cross the budget first
     // The render takes a while, and the cookie only goes out with the page — see `withholdIfReplaced`.
-    remember(event, sessionKey(session), name, () => revokeDroppedSession(event, pair, baseURL, visitorIp(event, clientIpHeader)))
+    // `sealedPair` follows each re-seal: the check can run twice (app:error, then app:rendered), and the
+    // second compares — and revokes — what the first sealed.
+    let sealedPair = pair
+    remember(event, sessionKey(session), name, () => revokeDroppedSession(event, sealedPair, baseURL, visitorIp(event, clientIpHeader)), async () => {
+      const newest = deliverPair(event, sessionKey(session), sealedPair)
+      // Moved past it, and the links that led on have expired: not this cookie at all.
+      if (!newest) return withholdSessionCookie(event.node.res, name)
+      if (newest === sealedPair) return
+      await session.update(newest)
+      sealedPair = newest
+    })
     const fresh = await sealSession(event, { password: sessionPassword!, name })
     replaceRequestCookie(event, name, fresh)
     return pair.access
@@ -123,8 +137,13 @@ export async function resolveHydrationAccess(event: H3Event): Promise<string | n
  */
 export async function withholdIfReplaced(event: H3Event): Promise<void> {
   const hydrated = hydratedSession(event)
-  if (!hydrated || !(await sessionEnded(hydrated.key))) return
+  if (!hydrated) return
+  if (!(await sessionEnded(hydrated.key))) return resealNewest(event, hydrated)
+  dropEnded(event, hydrated)
+}
 
+/** The session this render re-sealed ended: revoke what it sealed, once, and withhold its cookie. */
+function dropEnded(event: H3Event, hydrated: HydratedSession): void {
   // The tokens this render re-sealed are being dropped: revoke them, once — this runs both right after
   // the user load and again from the render hooks.
   if (hydrated.revoke) {
@@ -145,11 +164,30 @@ export function hydratedSessionEnded(event: H3Event): Promise<boolean> {
   return sessionEnded(hydratedSession(event)?.key)
 }
 
-/** `revoke` only when this render re-sealed the session: those rotated tokens are the ones to end. */
-interface HydratedSession { key?: string, name: string, revoke?: () => void }
+/**
+ * Not replaced: but if this render re-sealed the session, the session may have rotated that pair since (a
+ * restore in another tab), and the page's cookie would land over the newer one with a token already spent.
+ * Re-sealed with the newest the journal knows, while the headers are still open.
+ */
+async function resealNewest(event: H3Event, hydrated: HydratedSession): Promise<void> {
+  if (!hydrated.reseal || event.node.res.headersSent) return
+  try {
+    await hydrated.reseal()
+    // Sealing takes a moment, after the last check: a logout or sign-in landing during it must not have the
+    // ended session's cookie leave with the page.
+    if (await sessionEnded(hydrated.key)) dropEnded(event, hydrated)
+  }
+  catch { /* the response started meanwhile; it keeps the seal it had */ }
+}
 
-function remember(event: H3Event, key: string | undefined, name: string, revoke?: () => void): void {
-  (event.context as { lukkHydrated?: HydratedSession }).lukkHydrated = { key, name, revoke }
+/**
+ * `revoke` only when this render re-sealed the session: those rotated tokens are the ones to end. `reseal`
+ * likewise: re-seal with the newest pair, should the session have rotated the one sealed here.
+ */
+interface HydratedSession { key?: string, name: string, revoke?: () => void, reseal?: () => Promise<void> }
+
+function remember(event: H3Event, key: string | undefined, name: string, revoke?: () => void, reseal?: () => Promise<void>): void {
+  (event.context as { lukkHydrated?: HydratedSession }).lukkHydrated = { key, name, revoke, reseal }
 }
 
 function hydratedSession(event: H3Event): HydratedSession | undefined {

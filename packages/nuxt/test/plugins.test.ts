@@ -1,7 +1,13 @@
+import { REFRESHED_WITHOUT_TOKEN } from 'lukk-core'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ACCESS_KEY, READY_KEY } from '../src/runtime/keys'
+import { READY_KEY } from '../src/runtime/keys'
 import { restoreState } from '../src/runtime/utils/restore-state'
-import { __test, useState } from './mocks/imports'
+import { __test, ssrPayload, useState } from './mocks/imports'
+
+import clientPlugin, { REPLACED_SESSION_RETRY_DELAY_MS } from '../src/runtime/plugins/client'
+
+import sessionPlugin from '../src/runtime/plugins/session.client'
+import { useLukkSecret } from '../src/runtime/utils/secrets'
 
 const captured: {
   hooks?: Record<string, (...a: unknown[]) => unknown>
@@ -24,11 +30,6 @@ const user: { value: { abilities?: string[] } | null } = { value: null }
 const restoreFailed = { value: false }
 vi.mock('../src/runtime/composables/useLukkAuth', () => ({ useLukkAuth: () => ({ initSession, loggedIn, fetchUser, user, logout, restoreFailed }) }))
 
-// eslint-disable-next-line import/first
-import clientPlugin, { REPLACED_SESSION_RETRY_DELAY_MS } from '../src/runtime/plugins/client'
-// eslint-disable-next-line import/first
-import sessionPlugin from '../src/runtime/plugins/session.client'
-
 afterEach(() => { __test.reset(); captured.hooks = undefined; loggedIn.value = false; restoreFailed.value = false; user.value = null; vi.clearAllMocks(); vi.useRealTimers() })
 
 describe('client plugin', () => {
@@ -41,6 +42,8 @@ describe('client plugin', () => {
     expect(h.baseURL).toBe('https://api/auth')
     expect(await h.getAccessToken()).toBeNull()
     expect(await h.getConfirmationToken()).toBeNull()
+    useLukkSecret('confirmation').value = 'held'
+    expect(await h.getConfirmationToken()).toBe('held') // the very token useLukkConfirmation records
     await h.onTokens({ access_token: 'a', expires_in: 900 })
     expect(await h.getAccessToken()).toBe('a')
     h.onUnauthenticated()
@@ -48,10 +51,37 @@ describe('client plugin', () => {
     expect(await h.refresh()).toEqual({ access_token: 'fresh', expires_in: 900 })
   })
 
+  it('holds the direct-mode access token off the payload a reload persists', async () => {
+    __test.runtimeConfig.public.lukk = { mode: 'direct', baseURL: 'https://api/auth', confirmationHeader: 'X-Lukk-Confirmation' }
+    ;(clientPlugin as unknown as () => unknown)()
+    await captured.hooks!.onTokens({ access_token: 'ACCESS-SECRET', expires_in: 900 })
+
+    expect(await captured.hooks!.getAccessToken()).toBe('ACCESS-SECRET')
+    expect(JSON.stringify(ssrPayload())).not.toContain('ACCESS-SECRET')
+  })
+
   it('targets the local proxy in bff mode', () => {
     __test.runtimeConfig.public.lukk = { mode: 'bff', baseURL: '', confirmationHeader: 'X-Lukk-Confirmation' }
     ;(clientPlugin as unknown as () => unknown)()
     expect(captured.hooks!.baseURL).toBe('/api/_lukk')
+  })
+
+  it('targets the local proxy under the app\'s own base path', () => {
+    // Nitro mounts every server route under `app.baseURL`, so with `/admin/` the proxy lives at
+    // `/admin/api/_lukk`. A root-relative `/api/_lukk` sent every sign-in, refresh and logout to the
+    // origin root — a 404, or another app's route.
+    __test.runtimeConfig.public.lukk = { mode: 'bff', baseURL: '', confirmationHeader: 'X-Lukk-Confirmation' }
+    ;(__test.runtimeConfig as { app?: unknown }).app = { baseURL: '/admin//' }
+    ;(clientPlugin as unknown as () => unknown)()
+    // Every trailing slash of the base goes, or the join doubles one.
+    expect(captured.hooks!.baseURL).toBe('/admin/api/_lukk')
+  })
+
+  it('leaves a protocol-relative or absolute target alone under any base', async () => {
+    const { underAppBase } = await import('../src/runtime/shared')
+    expect(underAppBase('/admin/', '//cdn.test/x')).toBe('//cdn.test/x')
+    expect(underAppBase('/admin/', 'https://api.test/auth')).toBe('https://api.test/auth')
+    expect(underAppBase(undefined, '/api/_lukk')).toBe('/api/_lukk')
   })
 
   it('provides $lukkRefresh as ONE single-flight shared with the client (concurrent → one refresh)', async () => {
@@ -64,6 +94,21 @@ describe('client plugin', () => {
     expect(captured.client!.refreshTokens).toHaveBeenCalledTimes(1)
     // the shared refresh also updated the in-memory access token
     expect(await captured.hooks!.getAccessToken()).toBe('fresh')
+  })
+
+  it('says "renewed, no token for you" in bff mode, and holds no token — whatever the proxy answered', async () => {
+    // The proxy answers `{ ok: true, expires_in }`. Typed and returned as a token pair, it failed core's
+    // shape gate, so lukk-core never retried a 401 in BFF mode even right after a successful renewal.
+    __test.runtimeConfig.public.lukk = { mode: 'bff', baseURL: '', confirmationHeader: 'X' }
+    const { provide } = (clientPlugin as unknown as () => { provide: { lukkRefresh: () => Promise<unknown> } })()
+    captured.client!.refreshTokens.mockResolvedValueOnce({ ok: true, expires_in: 900 })
+    expect(await provide.lukkRefresh()).toBe(REFRESHED_WITHOUT_TOKEN)
+    expect(captured.hooks!.refresh).toBe(provide.lukkRefresh)
+
+    // Even a pair: the browser never holds a token in BFF mode.
+    captured.client!.refreshTokens.mockResolvedValueOnce({ access_token: 'leaked', expires_in: 900 })
+    expect(await provide.lukkRefresh()).toBe(REFRESHED_WITHOUT_TOKEN)
+    expect(useLukkSecret('access').value).toBeNull()
   })
 
   it('reloads the user when the BFF refuses to renew a session another tab replaced', async () => {
@@ -90,6 +135,94 @@ describe('client plugin', () => {
   })
 })
 
+describe('client plugin — a refresh the server asks to retry', () => {
+  type Provide = { lukkRefresh: () => Promise<unknown>, lukkRestore: () => Promise<{ pair: unknown, unavailable: boolean }> }
+  const setup = () => {
+    __test.runtimeConfig.public.lukk = { mode: 'bff', baseURL: '', confirmationHeader: 'X' }
+    return (clientPlugin as unknown as () => { provide: Provide })().provide
+  }
+
+  it('retries ONCE after the Retry-After the BFF names — a rotation still out, or landed with nobody to take it', async () => {
+    // The BFF answers 503 + Retry-After when lukk is slow to rotate. Reported straight away as "couldn't
+    // tell", the session's next refresh waited for the user's next action; retried, it joins the rotation
+    // still out or adopts the one that landed, and the restore resolves as signed in.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const provide = setup()
+    captured.client!.refreshTokens.mockRejectedValueOnce({ status: 503, message: 'Unauthenticated.', retryAfter: 5 })
+    captured.client!.refreshTokens.mockResolvedValueOnce({ ok: true, expires_in: 900 })
+
+    const outcome = provide.lukkRestore()
+    await vi.advanceTimersByTimeAsync(4_999)
+    expect(captured.client!.refreshTokens).toHaveBeenCalledOnce()
+    await vi.advanceTimersByTimeAsync(1)
+
+    expect(await outcome).toEqual({ pair: REFRESHED_WITHOUT_TOKEN, unavailable: false })
+    expect(captured.client!.refreshTokens).toHaveBeenCalledTimes(2)
+  })
+
+  it('caps the wait at ten seconds, and retries only once', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const provide = setup()
+    captured.client!.refreshTokens
+      .mockRejectedValueOnce({ status: 503, message: 'x', retryAfter: 3600 })
+      .mockRejectedValueOnce({ status: 503, message: 'x', retryAfter: 1 })
+
+    const outcome = provide.lukkRestore()
+    await vi.advanceTimersByTimeAsync(10_000)
+
+    expect(await outcome).toEqual({ pair: null, unavailable: true })
+    expect(captured.client!.refreshTokens).toHaveBeenCalledTimes(2)
+  })
+
+  it('stands down when a logout wakes the wait — its half of what logout-expired.test.ts drives end to end', async () => {
+    // `logout()` sets `ending` and wakes the wait before the generation moves on, so `ending` is all there
+    // is to see here. (The ordering itself is pinned with the real composable in logout-expired.test.ts.)
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const provide = setup()
+    captured.client!.refreshTokens.mockRejectedValueOnce({ status: 503, message: 'x', retryAfter: 5 })
+
+    const outcome = provide.lukkRestore()
+    await vi.advanceTimersByTimeAsync(1_000)
+    const state = restoreState(__test.nuxtApp)
+    state.ending = new Promise(() => {})
+    state.wakeRefreshRetry!()
+
+    expect(await outcome).toMatchObject({ pair: null, superseded: true })
+    expect(captured.client!.refreshTokens).toHaveBeenCalledOnce()
+  })
+
+  it('stands down when a sign-in began a new session while it waited', async () => {
+    // A sign-in waits on a refresh in flight only so long (REFRESH_SETTLE_TIMEOUT); one that stopped
+    // waiting can land while the refresh is still answering, or sitting out its Retry-After. The retry
+    // would then renew the session that sign-in replaced.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const provide = setup()
+    let refuse!: (error: unknown) => void
+    captured.client!.refreshTokens.mockImplementationOnce(() => new Promise((_resolve, reject) => { refuse = reject }))
+
+    const outcome = provide.lukkRestore()
+    await vi.advanceTimersByTimeAsync(1_000)
+    const { signIn } = await import('../src/runtime/utils/restore-state')
+    const signingIn = signIn(__test.nuxtApp, async () => ({ access_token: 'new' }), () => true)
+    await vi.advanceTimersByTimeAsync(10_000) // it stops waiting on the refresh, and lands
+    await signingIn
+    refuse({ status: 503, message: 'x', retryAfter: 5 })
+    await vi.advanceTimersByTimeAsync(5_000)
+
+    expect(await outcome).toMatchObject({ pair: null, superseded: true })
+    expect(captured.client!.refreshTokens).toHaveBeenCalledOnce()
+  })
+
+  it('does not retry a 503 that names no Retry-After, nor another status that does', async () => {
+    const provide = setup()
+    captured.client!.refreshTokens.mockRejectedValueOnce({ status: 503, message: 'x' })
+    expect(await provide.lukkRestore()).toEqual({ pair: null, unavailable: true })
+    captured.client!.refreshTokens.mockRejectedValueOnce({ status: 429, message: 'x', retryAfter: 1 })
+    expect(await provide.lukkRestore()).toEqual({ pair: null, unavailable: true })
+    expect(captured.client!.refreshTokens).toHaveBeenCalledTimes(2)
+  })
+})
+
 describe('client plugin — $lukkRestore', () => {
   type Provide = { lukkRefresh: () => Promise<unknown>, lukkRestore: () => Promise<{ pair: unknown, unavailable: boolean }> }
   const setup = () => {
@@ -97,9 +230,12 @@ describe('client plugin — $lukkRestore', () => {
     return (clientPlugin as unknown as () => { provide: Provide })().provide
   }
 
-  it('hands back the pair on success', async () => {
+  it('hands back the renewal on success', async () => {
+    // This setup is BFF mode, whose proxy never answers with a token pair — the mock's pair stood in for
+    // `{ ok, expires_in }`. Expecting it back pinned the untruthful `TokenPair` this restore claimed to
+    // return; it now says what happened, which is all a BFF browser can know.
     const { lukkRestore } = setup()
-    await expect(lukkRestore()).resolves.toEqual({ pair: { access_token: 'fresh', expires_in: 900 }, unavailable: false })
+    await expect(lukkRestore()).resolves.toEqual({ pair: REFRESHED_WITHOUT_TOKEN, unavailable: false })
   })
 
   it.each([
@@ -136,7 +272,8 @@ describe('client plugin — $lukkRestore', () => {
     expect(captured.client!.refreshTokens).toHaveBeenCalledOnce()
     await vi.advanceTimersByTimeAsync(1)
 
-    await expect(restoring).resolves.toEqual({ pair: { access_token: 'fresh', expires_in: 900 }, unavailable: false })
+    // BFF mode: the renewal, never a pair (see "hands back the renewal on success").
+    await expect(restoring).resolves.toEqual({ pair: REFRESHED_WITHOUT_TOKEN, unavailable: false })
     expect(captured.client!.refreshTokens).toHaveBeenCalledTimes(2)
   })
 
@@ -252,7 +389,7 @@ describe('session.client plugin — a logout the previous page never finished', 
     const jwt = (claims: object) => `h.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.s`
     const restoresAs = (fid: string | undefined) => initSession.mockImplementationOnce(async () => {
       loggedIn.value = fid !== undefined
-      useState<string | null>(ACCESS_KEY, () => null).value = fid === undefined ? null : jwt({ sub: 1, fid })
+      useLukkSecret('access').value = fid === undefined ? null : jwt({ sub: 1, fid })
     })
     afterEach(() => { vi.unstubAllGlobals(); store.clear() })
 
@@ -290,7 +427,7 @@ describe('session.client plugin — a logout the previous page never finished', 
       // `loadUser` skips without an endpoint, so `loggedIn` stays false even though the restore rotated
       // and produced a token for exactly the session the note names.
       initSession.mockImplementationOnce(async () => {
-        useState<string | null>(ACCESS_KEY, () => null).value = `h.${Buffer.from(JSON.stringify({ sub: 1, fid: 'F1' })).toString('base64url')}.s`
+        useLukkSecret('access').value = `h.${Buffer.from(JSON.stringify({ sub: 1, fid: 'F1' })).toString('base64url')}.s`
       })
 
       await run()

@@ -12,10 +12,16 @@ import { isResolvableBase, redactCredentials } from '../shared'
  * Returns null for BOTH an unusable base and an escaping subpath — very different faults, so
  * callers report them via `rejectUnresolvedTarget` rather than collapsing them into one message.
  *
- * Containment is at the URL layer: `..` and its `%2e` spellings are normalized away, but forms the
- * spec does NOT treat as dot-segments (`..%2f`, `%252e%252e`) stay literal in the path and are
- * forwarded percent-encoded. That's correct and same-origin, but it means an upstream that decodes
- * a second time owns that decision — don't read this as full path normalization on lukk's behalf.
+ * `subpath` is a DECODED path — h3's `event.path` has already decoded every escape except `%2F` and
+ * `%25` by the time a handler sees it. So `..%2f` reaches here with the `%2f` intact and stays literal
+ * (the URL spec does not read it as a dot-segment), and `%252e%252e` reaches here as `%252e%252e` and
+ * is forwarded as such; but `%2e%2e` has become `..` and is normalized away like any other. Either
+ * way the result is same-origin and under the base. An upstream that decodes a second time owns that
+ * decision — don't read this as full path normalization on lukk's behalf.
+ *
+ * Because it is decoded, a `?` or `#` in it was data in a path segment (`%3F`, `%23` on the wire), and
+ * is re-encoded here: left bare, the URL parser made it the start of a query or fragment, so the
+ * upstream received a different path than the one the policy above it had looked at.
  */
 export function resolveTarget(base: string, subpath: string): string | null {
   // Reject a non-http(s) base up front. Its origin serializes to `"null"`, so the containment check
@@ -35,9 +41,163 @@ export function resolveTarget(base: string, subpath: string): string | null {
   b.search = ''
   b.hash = ''
   const prefix = `${b.origin}${b.pathname.replace(/\/$/, '')}/`
-  const target = new URL(`${b.href.replace(/\/$/, '')}/${subpath.replace(/^\//, '')}`)
+  const target = new URL(`${b.href.replace(/\/$/, '')}/${subpath.replace(/^\//, '').replace(/[?#]/g, encodeURIComponent)}`)
   if (!`${target.origin}${target.pathname}/`.startsWith(prefix)) return null
   return target.toString()
+}
+
+/**
+ * The path a Laravel router matches for `pathname`, the way `UriValidator` derives it: trailing
+ * slashes trimmed from the raw path, THEN percent-decoded once (`rawurldecode`). So `/auth/`,
+ * `/auth%2Flogin` and `/aut%68` are `/auth`, `/auth/login` and `/auth` to lukk, whatever they look
+ * like as URLs.
+ *
+ * Only ASCII escapes are decoded: every route literal compared against this is ASCII, and an escape
+ * of a non-ASCII byte can only ever produce a non-ASCII character, which no such literal contains.
+ * That keeps it total — `decodeURIComponent` throws on a malformed sequence, `rawurldecode` doesn't.
+ */
+function routedPath(pathname: string): string {
+  // Repeated slashes collapse too, last: Laravel alone never routes `//auth/login`, but a hop in front of
+  // it that merges slashes (nginx's default `merge_slashes on`) hands it `/auth/login`. Reading them as
+  // distinct let `/api//auth/login` past the app-API proxy and `/_lukk//refresh` past the refresh rule.
+  return decodeAscii(pathname.replace(/\/+$/, '')).replace(/\/{2,}/g, '/')
+}
+
+/** One round of percent-decoding, ASCII escapes only — see `routedPath` for why that is enough. */
+function decodeAscii(value: string): string {
+  return value.replace(/%([0-7][0-9a-f])/gi, (_, hex: string) => String.fromCharCode(Number.parseInt(hex, 16)))
+}
+
+/**
+ * Where `target` lands within `base` AS LUKK'S ROUTER SEES IT (`/refresh`, `/login`, ...), or null
+ * when it is not under `base` at all. Both must be absolute http(s) URLs.
+ *
+ * Route policy must be decided on THIS, never on the request path it came from: the upstream URL
+ * collapses dot segments and drops a fragment, and Laravel trims a trailing slash and decodes the
+ * rest, so `/./refresh`, `/refresh/` and `/refresh%2F` (among others) all reach lukk's refresh route
+ * while comparing unequal to `'/refresh'` as strings.
+ */
+export function routeWithin(target: string, base: string): string | null {
+  const root = routedPath(new URL(base).pathname)
+  const path = routedPath(new URL(target).pathname)
+  if (path !== root && !path.startsWith(`${root}/`)) return null
+  return path.slice(root.length) || '/'
+}
+
+/**
+ * Whether an upstream URL the app-API proxy built would reach one of lukk's own routes.
+ *
+ * Those routes answer with credentials — a token pair, a step-up token — and the app-API proxy
+ * streams bodies through untouched, so reaching one hands the browser exactly what BFF mode keeps
+ * from it. Under a non-root base the PATH decides, whatever the host: the same Laravel app is
+ * routinely reached under two names (a public one for `api.target`, an internal one for `baseURL`),
+ * and an origin comparison waves the token routes through exactly there. Case-insensitively — Laravel
+ * matches case-sensitively, so this costs nothing, and it doesn't depend on that staying true.
+ *
+ * A lukk mounted at the ROOT owns every path, so only the origin can tell its routes apart: on its
+ * own host everything is refused; on another host nothing is (lukk bound to a separate domain).
+ */
+export function reachesLukk(target: string, base: string): boolean {
+  if (reaches(target, base)) return true
+  // Read through any PHP front controller as well. Laravel served through one routes `/index.php/auth/login`
+  // exactly as `/auth/login` — Symfony strips the script name — so with `api.target` at the app's root that
+  // path streamed lukk's token pair out; under a sub-path the script sits further in (`/app/index.php/auth/…`),
+  // and without URL rewriting `baseURL` names it too (`https://h/index.php/auth`). So both are judged again
+  // with every segment naming a `.php` script dropped — AS WELL AS, never instead of, as written above:
+  // dropped whole, a segment takes what it hides with it (`/auth%2Flogin%3F.php`).
+  //
+  // On every round of decoding, as `reaches` judges the path itself: a hop that decodes once more turns
+  // `/index.php%2Fauth/login` into `/index.php/auth/login` and `/index%252ephp/…` into `/index%2ephp/…`,
+  // which Symfony reads as the script. So each round's string is split on `/` and `\` (as a decoding hop
+  // treats them alike) — without the tab, LF and CR a re-parsing hop strips from anywhere, which turn
+  // `index.php%09` and `index.ph%09p` into `index.php` (from that string only: the next round decodes what
+  // was actually there) — its scripts dropped, and the rest judged — a `?` or `#` it decoded kept encoded,
+  // so that `reaches` reads it both ways.
+  const lukk = withoutScripts(base)
+  const { origin, pathname } = new URL(target)
+  let path = pathname
+  // Stryker disable next-line EqualityOperator: equivalent — a script only a fifth decoding reveals sits in a path still decoding after four rounds, which `reaches` refuses above, as written. (`round--` never ends: that timeout is a synchronous loop, the detection.)
+  for (let round = 0; round < DECODING_ROUNDS; round++) {
+    const rest = path.replace(/[\t\n\r]/g, '').split(/[/\\]/).filter(segment => !/\.php$/i.test(segment)).join('/').replace(/[?#]/g, encodeURIComponent)
+    if (reaches(`${origin}${rest}`, lukk)) return true
+    path = decodeAscii(path)
+  }
+  return false
+}
+
+/** `url` with every path segment that names a `.php` script dropped. */
+function withoutScripts(url: string): string {
+  const { origin, pathname } = new URL(url)
+  return `${origin}${pathname.split('/').filter(segment => !/\.php$/i.test(decodeAscii(segment))).join('/')}`
+}
+
+/** `reachesLukk` for one reading of the path — the front controller aside. */
+function reaches(target: string, base: string): boolean {
+  const b = new URL(base.toLowerCase())
+  let t = new URL(target.toLowerCase())
+
+  // And not after a further decoding, either. The URL is forwarded as written, and lukk's router decodes
+  // it once — but a hop in between that decodes again (a CDN, a rewrite rule, a second proxy) turns
+  // `%252e%252e/auth/login` into `../auth/login` and `%2561uth/login` into `/auth/login`. So each round
+  // of decoding is checked as well, re-parsed so that a dot segment it produced collapses as it would
+  // there. Re-parsed under the TARGET's origin, so a leading `//` it produced stays a path.
+  //
+  // Settled is judged on the RE-PARSED path, never on the decoded string: the parser puts some escapes
+  // straight back (`%20`, `%22`, `%3C`, `%7B`, … — characters a path may not hold bare), so the string a
+  // round produced never equals the path it parses to. Compared that way, `my%20file.pdf` never settled
+  // and every download with a space in its name was refused. What the parser REMOVES or rewrites — a tab,
+  // a backslash that becomes `/` — still changes the path, and is still followed.
+  //
+  // A `?` or `#` a round decodes is read two ways, and both are checked: a hop that decodes and re-parses
+  // cuts the path there, and one that decodes and forwards the string keeps it as path data — where the
+  // dot segments after it still collapse. Reading only the first let `x%3F/%252e%252e/auth/login` through.
+  //
+  // And simulating hops has a limit: a CHAIN of them — merge slashes, then decode, then collapse — lands
+  // where no single reading here does (`/x//%252e%252e/auth/login`). So a `.` or `..` segment that only
+  // decoding reveals is refused outright, wherever it would land. The URL parser has already collapsed every
+  // one written plainly or as `%2e`; what remains was either encoded twice, or sits behind an ENCODED
+  // separator (`a%2F..%2Fb`, `a%5c..%5cb` — h3 leaves `%2F` encoded, so the parser saw one segment). Both
+  // are traversal-shaped, and no app path is written that way on purpose. Unless the path cannot matter — lukk at the ROOT owns every path or none: of its own host
+  // the loop below refuses everything anyway, and of another host nothing here reaches it.
+  if (routedPath(b.pathname) !== '' && revealsDotSegment(t.pathname)) return true
+  const lands = (url: URL) => routeWithin(url.href, b.href) !== null && (routedPath(b.pathname) !== '' || url.origin === b.origin)
+  for (let round = 0; round < DECODING_ROUNDS; round++) {
+    // lukk's own reading. Defence in depth since the dot-segment refusal above: whatever it catches, the cut
+    // reading below catches too — that one decodes once more, which never strips a decoded `/auth/` prefix,
+    // and the dot segments that could are refused above.
+    // Stryker disable next-line ConditionalExpression: equivalent, for the reason just given.
+    if (lands(t)) return true
+    const decoded = decodeAscii(t.pathname)
+    if (lands(new URL(`${t.origin}${decoded}`))) return true
+    const next = new URL(`${t.origin}${decoded.replace(/[?#]/g, encodeURIComponent)}`)
+    if (next.pathname === t.pathname) return false
+    t = next
+  }
+
+  // Still decoding to something new after that many rounds: no route of an app is encoded that deep on
+  // purpose, and there is no telling where the next round lands — refused.
+  return true
+}
+
+/** How many rounds of percent-decoding `reachesLukk` follows a path through. */
+const DECODING_ROUNDS = 4
+
+/**
+ * Whether some round of decoding `pathname` turns a whole segment into `.` or `..` — split on `/` and `\`,
+ * which every decoding hop worth worrying about treats alike. A dot inside a segment (`v1.2`, `.well-known`,
+ * `..y`) is a name, not a step.
+ */
+function revealsDotSegment(pathname: string): boolean {
+  let path = pathname
+  // Stryker disable next-line EqualityOperator: equivalent — a fifth round only reveals a dot in a segment still decoding after four, which keeps `reachesLukk`'s own loop changing too, and its cap refuses that path anyway. (`round--` never ends: that timeout is a synchronous loop, the detection.)
+  for (let round = 0; round < DECODING_ROUNDS; round++) {
+    path = decodeAscii(path)
+    // Without the tab, LF and CR the URL parser strips from anywhere in a URL before it collapses dots —
+    // `.%09.` is `..` to every hop that re-parses. (Stripped from what is SPLIT only, so the next round
+    // still decodes what was actually there.)
+    if (path.replace(/[\t\n\r]/g, '').split(/[/\\]/).some(segment => segment === '.' || segment === '..')) return true
+  }
+  return false
 }
 
 /** Bases already reported, so a broken deploy logs once per value instead of once per request. */
@@ -114,7 +274,8 @@ export function rejectUnresolvedTarget(event: H3Event, base: string, label: stri
     // treat a total auth outage as the server error it is, instead of filing it as client noise.
     setResponseStatus(event, 500)
     reportUnusableBase(label, base)
-    return { message: 'Proxy target could not be resolved — check the lukk baseURL configuration.' }
+    // Named by the setting at fault: the auth proxy's `baseURL`, or the app-API proxy's `api.target`.
+    return { message: `Proxy target could not be resolved — check the ${label} configuration.` }
   }
   setResponseStatus(event, 400)
   // Truncated + JSON-escaped (no forged lines) and capped: this is reachable unauthenticated on a
@@ -125,6 +286,23 @@ export function rejectUnresolvedTarget(event: H3Event, base: string, label: stri
     console.warn(`[lukk] Rejected a proxy path that escapes ${label}: ${JSON.stringify(subpath.slice(0, 200))}${suppressed}`)
   }
   return { message: 'Invalid path.' }
+}
+
+/**
+ * A GET or HEAD sent by another site, or a same-site sibling, that is not a top-level navigation — a
+ * subresource, fetch or framed document riding the session cookie. Only browsers send `Sec-Fetch-*`, so
+ * a non-browser caller (no cookie to ride) is never caught.
+ *
+ * The exemption keys on `Sec-Fetch-Dest: document`, not on `Sec-Fetch-Mode: navigate`: a NESTED
+ * navigation — an `<iframe>`, `<frame>`, `<embed>` or `<object>` another site points here — is a
+ * navigation too, and it is the other site's doing, not a link the visitor followed. Only a top-level
+ * document is (Fetch Metadata Request Headers §2.1).
+ */
+export function isForeignSubresource(event: H3Event): boolean {
+  const site = getRequestHeader(event, 'sec-fetch-site')
+  return (event.method === 'GET' || event.method === 'HEAD')
+    && (site === 'cross-site' || site === 'same-site')
+    && getRequestHeader(event, 'sec-fetch-dest') !== 'document'
 }
 
 /**
@@ -314,4 +492,30 @@ export function viaHeader(event: H3Event): string {
   const hop = `${event.node?.req?.httpVersion ?? '1.1'} lukk-nuxt`
 
   return received ? `${received}, ${hop}` : hop
+}
+
+/** How long a server-side call to lukk may take before it is treated as an outage. */
+export const UPSTREAM_TIMEOUT_MS = 15_000
+
+/**
+ * `fetch` and `read`, abandoned together after `UPSTREAM_TIMEOUT_MS`. With no limit a hung lukk held
+ * every request waiting on it until the runtime's own socket timeout. The abort surfaces as the network
+ * error it is; callers already treat that as an outage, not a verdict on the session.
+ *
+ * The deadline covers `read` — the body — and not only the headers: aborting the signal errors a body
+ * still being read (Fetch §"abort the fetch"), so one that sends its headers and then stalls fails at
+ * the deadline instead of hanging the caller. That is why the reader is an argument: a `Response` handed
+ * back from here would be read after the timer was gone.
+ *
+ * **Never for `/refresh`.** An abort cannot un-rotate a token lukk has already rotated — see `rawRefresh`.
+ */
+export async function fetchUpstream<T>(input: string, init: RequestInit, read: (response: Response) => Promise<T>): Promise<T> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(new Error(`lukk did not answer within ${UPSTREAM_TIMEOUT_MS} ms`)), UPSTREAM_TIMEOUT_MS)
+  try {
+    return await read(await fetch(input, { ...init, signal: controller.signal }))
+  }
+  finally {
+    clearTimeout(timer)
+  }
 }

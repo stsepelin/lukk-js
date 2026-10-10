@@ -1,6 +1,7 @@
-import type { H3Event } from 'h3'
+import type { H3Event, SessionConfig } from 'h3'
 import { getCookie, unsealSession } from 'h3'
-import type { TokenSession } from './utils/refresh'
+import type { TokenSession } from './refresh'
+import { isUsableSessionMaxAge, sessionMaxAgeError } from '../shared'
 
 /**
  * Read-only unseal of the sealed BFF token session (access + refresh + confirmation).
@@ -33,4 +34,46 @@ export async function readSealedSessionWithId(event: H3Event, password: string |
   catch {
     return { data: {} }
   }
+}
+
+/** lukk's own default `refresh_ttl`: past it the refresh token inside a seal is dead anyway. */
+export const DEFAULT_SESSION_MAX_AGE = 30 * 24 * 60 * 60
+
+/**
+ * The iron options every sealed session is WRITTEN with: a lifetime, in seconds.
+ *
+ * Without one iron seals with no expiry, so a seal copied out of a browser unsealed forever — long after
+ * the session it held was over. iron stamps the expiry into the seal itself and every unseal checks it
+ * (`unsealSession`, `useSession`), so the write is the whole of it; the readers need no option to honour
+ * it. Per seal, not per session: a refresh re-seals with a fresh lifetime, and lukk's own refresh family
+ * bounds the session. (A seal written before this existed carries no expiry and is honoured until it is
+ * next re-sealed — a refresh within one access-token lifetime of its next use.)
+ *
+ * Partial on purpose: h3 spreads this OVER iron's defaults, so only `ttl` changes.
+ */
+export function sessionSeal(maxAge: number | undefined): SessionConfig['seal'] {
+  return { ttl: lifetime(maxAge) * 1000 } as SessionConfig['seal']
+}
+
+/**
+ * The lifetime to write, in seconds — or a throw, never a guess. The module refuses an unusable
+ * `session.maxAge` at build, but a runtime override (`NUXT_LUKK_SESSION_MAX_AGE`) lands after that check,
+ * and the one value that matters most fails OPEN: iron reads a ttl of `0` as "never expires". Refusing to
+ * write is the same failure mode as a session secret iron rejects — loud, and nothing weaker is sealed.
+ */
+function lifetime(maxAge: number | undefined): number {
+  const value = maxAge ?? DEFAULT_SESSION_MAX_AGE
+  if (!isUsableSessionMaxAge(value)) throw new Error(sessionMaxAgeError(value))
+  return value
+}
+
+/**
+ * The cookie every sealed session is WRITTEN with: `__Host-`-safe, and persistent for the seal's own
+ * lifetime. With no Max-Age it was a session cookie, dropped when the browser closed, so a BFF user was
+ * signed out on every restart while a direct-mode one, holding lukk's persistent refresh cookie, was not.
+ * Max-Age rather than h3's `maxAge` option: that becomes an Expires counted from the session's FIRST
+ * creation, while Max-Age restarts on every write, as the seal does.
+ */
+export function sessionCookie(secure: boolean, maxAge: number | undefined): { sameSite: 'strict', secure: boolean, httpOnly: true, path: '/', maxAge: number } {
+  return { sameSite: 'strict', secure, httpOnly: true, path: '/', maxAge: lifetime(maxAge) }
 }

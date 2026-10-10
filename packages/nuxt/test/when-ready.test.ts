@@ -59,15 +59,31 @@ describe('whenReady cleanup', () => {
   it('stops watching once the session resolves', async () => {
     // Every early caller installs a watcher on an app-wide ref; left running, each one lives as long as
     // the app does.
+    // Counted on the ref itself: the watcher lives in a scope of its own (see the unmount case below),
+    // not the caller's, so the caller's `effects` say nothing about it.
     const ready = ref(false)
-    const scope = effectScope()
-    const p = scope.run(() => whenReady(ready, false))!
+    const subscribers = () => (ready as unknown as { dep: { sc: number } }).dep.sc
+    const p = whenReady(ready, false)
 
-    expect(scope.effects).toHaveLength(1)
+    expect(subscribers()).toBe(1)
     ready.value = true
     await p
 
-    expect(scope.effects).toHaveLength(0)
+    expect(subscribers()).toBe(0)
+  })
+})
+
+describe('whenReady from a component that unmounts first', () => {
+  it('still resolves when its caller\'s scope is gone', async () => {
+    // The watcher was created inside whatever effect scope was active — a component's — so unmounting
+    // before `ready` flipped stopped it, and the promise never settled.
+    const ready = ref(false)
+    const scope = effectScope()
+    const waiting = scope.run(() => whenReady(ready, false))!
     scope.stop()
+
+    ready.value = true
+
+    expect(await settledYet(waiting)).toBe(true)
   })
 })

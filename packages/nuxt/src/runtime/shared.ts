@@ -4,6 +4,45 @@
 export const LUKK_BFF_PREFIX = '/api/_lukk'
 
 /**
+ * Marks a page render's own in-process request to the app-API proxy (see `createRequestFetch`): the proxy
+ * never rotates the session for one, because the Set-Cookie of that rotation goes back to the render, not
+ * to the browser — which then replays the consumed token. SSR hydration is the one place a render renews
+ * the session. A browser sending it only keeps its own token from being renewed on that request.
+ */
+export const LUKK_SSR_HEADER = 'x-lukk-ssr'
+
+/**
+ * A root-relative path as this app serves it: under `app.baseURL`, where Nitro mounts every server
+ * route. With `/admin/` the BFF proxy lives at `/admin/api/_lukk`; a bare `/api/_lukk` reached the
+ * origin root — a 404, or another app co-hosted there. An absolute URL is left alone.
+ */
+export function underAppBase(appBase: unknown, path: string): string {
+  if (!path.startsWith('/') || path.startsWith('//')) return path
+  return (typeof appBase === 'string' ? appBase.replace(/\/+$/, '') : '') + path
+}
+
+/**
+ * Whether `value` is a usable `session.maxAge`: a positive whole number of seconds that stays exact once
+ * iron multiplies it into milliseconds. Shared by the module's build-time check and the runtime writers,
+ * so "accepted at build" and "written at request time" can't drift.
+ *
+ * Each refusal is a real fault, not tidiness: iron reads a ttl of `0` as NO expiry, so a seal written with
+ * it unsealed forever; a negative `Max-Age` deletes the cookie it sets; and a fraction, `NaN`, `Infinity`
+ * or a string (an env override that was never a number) writes a cookie attribute browsers ignore.
+ */
+export function isUsableSessionMaxAge(value: unknown): value is number {
+  if (!Number.isInteger(value) || (value as number) <= 0) return false
+  // On a line of its own, so the annotation covers this bound alone.
+  // Stryker disable next-line EqualityOperator: equivalent — `<=` and `<` differ only where `value * 1000` EQUALS 2^53 - 1, which ends in 1 and so is no multiple of 1000.
+  return (value as number) * 1000 <= Number.MAX_SAFE_INTEGER
+}
+
+/** The message both checks refuse an unusable `session.maxAge` with. */
+export function sessionMaxAgeError(value: unknown): string {
+  return `[lukk-nuxt] session.maxAge must be a positive whole number of seconds (got ${String(value)}) — it is the lifetime of every sealed session and its cookie.`
+}
+
+/**
  * Whether a proxy base (`baseURL`, `api.target`) is one the SERVER can actually resolve and
  * fetch: absolute, with an http(s) scheme. Shared by the module's build-time validation and
  * `resolveTarget`, so "accepted at build" and "resolvable at request time" can't drift.
@@ -168,7 +207,7 @@ export const SPOOFABLE_FORWARDING: Record<string, string> = {
  * proxy then blanked or overwrote the token on every request.
  */
 const RESERVED_HEADERS = new Set([
-  'accept', 'authorization', 'content-type', 'cookie', 'host', 'x-forwarded-for', 'via',
+  'accept', 'authorization', 'content-type', 'cookie', 'host', 'x-forwarded-for', 'via', LUKK_SSR_HEADER,
   ...Object.keys(SPOOFABLE_FORWARDING),
 ])
 
