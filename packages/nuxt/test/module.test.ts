@@ -186,15 +186,17 @@ describe('lukk-nuxt module', () => {
 
   it('registers the SSR-hydration server plugin in bff mode by default, and skips it with ssrHydrate: false', () => {
     setup({ baseURL: 'https://api/auth', mode: 'bff' })
-    expect(kit.addPlugin).toHaveBeenCalledTimes(3) // client + session.client + session.server
+    expect(kit.addPlugin).toHaveBeenCalledTimes(4) // client + session.client + the render marker + session.server
     expect(kit.addPlugin).toHaveBeenCalledWith(expect.objectContaining({ src: expect.stringContaining('session.server'), mode: 'server' }))
+    expect(kit.addPlugin).toHaveBeenCalledWith({ src: './runtime/plugins/render-marker.server', mode: 'server' })
     // The last check on a page whose request finished a logout — BFF, whatever ssrHydrate says.
     expect(kit.addServerPlugin).toHaveBeenCalledWith(expect.stringContaining('finish-logout-render'))
 
     vi.clearAllMocks()
     setup({ baseURL: 'https://api/auth', mode: 'bff', ssrHydrate: false })
-    expect(kit.addPlugin).toHaveBeenCalledTimes(2) // client + session.client only
-    expect(kit.addPlugin).not.toHaveBeenCalledWith(expect.objectContaining({ mode: 'server' }))
+    // The render marker stays: without hydration, a render's own app-API calls must still never rotate.
+    expect(kit.addPlugin).toHaveBeenCalledTimes(3) // client + session.client + the render marker
+    expect(kit.addPlugin).not.toHaveBeenCalledWith(expect.objectContaining({ src: expect.stringContaining('session.server') }))
     expect(kit.addServerPlugin).toHaveBeenCalledWith(expect.stringContaining('finish-logout-render'))
 
     vi.clearAllMocks()
@@ -538,6 +540,7 @@ describe('lukk-nuxt module — what it registers, and when it speaks up', () => 
     expect(kit.addPlugin.mock.calls.map(c => c[0])).toEqual([
       './runtime/plugins/client',
       { src: './runtime/plugins/session.client', mode: 'client' },
+      { src: './runtime/plugins/render-marker.server', mode: 'server' },
       { src: './runtime/plugins/session.server', mode: 'server' },
     ])
     expect(kit.addServerHandler.mock.calls.map(c => c[0])).toEqual([

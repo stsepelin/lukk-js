@@ -213,10 +213,16 @@ replacing its hook, and keep authenticated calls on the API's origin.
   request was out; a 2FA challenge left from an earlier attempt is dropped by any later sign-in (and when
   another tab changes the session).
 - **The app-API proxy refuses lukk's routes behind a PHP front controller** (`/api/index.php/auth/login`)
-  with `404`. It cannot see lukk's extra guard mounts (`lukk.guards.*.path`, e.g. `admin/auth`) on the same
+  with `404` — wherever the script sits, so a Laravel app under a sub-path (`api.target` at
+  `https://host/app`, lukk at `/app/auth`) is covered at `/app/index.php/auth/login` too. Any path segment
+  ending in `.php` is read as a front controller. It cannot see lukk's extra guard mounts (`lukk.guards.*.path`, e.g. `admin/auth`) on the same
   host: keep them off `api.target`'s host, or out of its reach.
-- **The app-API proxy no longer renews the session for a page render's own requests** (marked with
-  `x-lukk-ssr`): SSR hydration renews it, and only its cookie reaches the page.
+- **The app-API proxy no longer renews the session for a page render's own requests** — `useLukkFetch`,
+  and Nuxt's own `useFetch('/api/…')`, `useRequestFetch()` and `event.$fetch` alike: the page request is
+  marked (`x-lukk-ssr`, set by a BFF server plugin; removed before a request reaches your API). SSR
+  hydration renews it, and only its cookie reaches the page. With `ssrHydrate: false`, an SSR app-API call
+  on an expired access token now answers `401` during the render instead of renewing; the client renews
+  after hydration.
 - **A rotation's straggler window starts when its cookie leaves**, not when it landed — see the refresh entry.
 - **Packaging**: `refreshOnce` is no longer auto-imported into your server code; `h3` is a declared
   dependency; `LUKK_BFF_PREFIX` and `LUKK_SESSION_COOKIE` import as values again.

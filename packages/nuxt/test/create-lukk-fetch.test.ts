@@ -462,7 +462,7 @@ describe('createRequestFetch (server-BFF)', () => {
 
     await createRequestFetch(requestFetch, deps)('https://collector.example/x', { headers: new Headers({ 'x-trace': '1' }) })
 
-    expect((requestFetch.mock.calls[0] as [string, FetchOptions])[1].headers).toEqual({ 'x-trace': '1', 'cookie': '', 'x-lukk-ssr': '1' })
+    expect((requestFetch.mock.calls[0] as [string, FetchOptions])[1].headers).toEqual({ 'x-trace': '1', 'cookie': '', 'x-lukk-ssr': '' })
   })
 
   it('judges a relative path by the per-call base it will actually be sent to', async () => {
@@ -505,7 +505,7 @@ describe('createRequestFetch (server-BFF)', () => {
     const scoped = api.create({ headers: { 'x-app': 'a' } })
     await scoped('https://collector.example/x')
     const [, opts] = requestFetch.mock.calls.at(-1) as [string, FetchOptions]
-    expect(opts.headers).toEqual({ 'x-app': 'a', 'cookie': '', 'x-lukk-ssr': '1' })
+    expect(opts.headers).toEqual({ 'x-app': 'a', 'cookie': '', 'x-lukk-ssr': '' })
     expect(opts.redirect).toBe('manual')
 
     expect(api.native).toBe(globalThis.fetch)

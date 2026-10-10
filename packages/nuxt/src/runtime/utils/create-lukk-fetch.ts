@@ -211,9 +211,10 @@ export function createRequestFetch(requestFetch: RequestFetch, deps: LukkFetchDe
     // `fetchWithEvent` spreads the caller's headers over its own, and a `Headers` spreads to nothing.
     const url = typeof request === 'string' ? request : request.url
     const ours = targetIsOurs(deps, url, merged.baseURL ?? options.baseURL) && !carriesOrigin(deps.baseURL)
-    // Always a plain object, marked as the render's own (see `LUKK_SSR_HEADER`): the app-API proxy must not
-    // rotate for it.
-    const headers = { ...Object.fromEntries(new Headers(merged.headers)), [LUKK_SSR_HEADER]: '1', ...(ours ? {} : { cookie: '' }) }
+    // Always a plain object. To the app's own API it is marked as the render's (see `LUKK_SSR_HEADER`), so the
+    // app-API proxy never renews for it; to anything else, neither the cookie nor the marker (which the page
+    // request carries, and the transport copies) goes along.
+    const headers = { ...Object.fromEntries(new Headers(merged.headers)), ...(ours ? { [LUKK_SSR_HEADER]: '1' } : { cookie: '', [LUKK_SSR_HEADER]: '' }) }
     // `redirect` sits AFTER the caller's opts, mirroring `lukk-core`'s ordering: a caller passing
     // `redirect: 'follow'` would otherwise re-enable chasing a 3xx, and this fetch attaches the
     // sealed session cookie on the server.

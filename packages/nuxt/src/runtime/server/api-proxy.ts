@@ -137,6 +137,9 @@ export default defineEventHandler(async (event) => {
       rotatedRefresh = pair.refresh
       resealed = ended
       resealNewest = async (queued) => {
+        // The browser went away (a navigation, a closed tab): nothing reaches it, so the link stays held —
+        // taken here, the cookie it still holds replayed into a revoke 30 s on.
+        if (event.node.req.aborted || event.node.res.destroyed || event.node.req.socket?.destroyed) return queued
         const newest = currentPair(sessionKey(session), pair)
         if (newest === pair) return queued
         // Moved past it, and the links that led on have expired: not this cookie at all — the browser keeps
@@ -269,7 +272,9 @@ export default defineEventHandler(async (event) => {
       const dropLogoutCookies = await withholdSignedOut(event)
       // The newest pair, if the session rotated the one re-sealed above while the upstream was answering:
       // left as is, this cookie landed over the newer one with a token already spent.
-      const queued = replaced || !resealNewest ? toCookieArray(sessionCookie) : await resealNewest(toCookieArray(sessionCookie))
+      const deliver = resealNewest
+      resealNewest = null
+      const queued = replaced || !deliver ? toCookieArray(sessionCookie) : await deliver(toCookieArray(sessionCookie))
       const keep = replaced
         ? []
         : queued.filter(cookie => !dropLogoutCookies || !ours.includes(cookieName(cookie)))
@@ -312,11 +317,19 @@ export default defineEventHandler(async (event) => {
         ev.node.res.removeHeader('location')
       }
     },
-  }).catch((error: unknown) => {
+  }).catch(async (error: unknown) => {
     // Once per distinct target+cause — an outage fails every request identically, and this file's
     // sibling reporters already learned that lesson (see `reportUnusableBase`).
     reportProxyFailure(base, error)
 
+    // An unreachable upstream rejects before `onResponse`, and the error response still carries the
+    // re-sealed cookie h3 queued: it IS delivered, so it is checked and the link taken here as there.
+    // Left held, a cookie from before it adopted the live pair for ten minutes.
+    if (resealNewest) {
+      const queued = await resealNewest(toCookieArray(event.node.res.getHeader('set-cookie')))
+      if (queued.length) event.node.res.setHeader('set-cookie', queued)
+      else event.node.res.removeHeader('set-cookie')
+    }
     throw error
   })
 })

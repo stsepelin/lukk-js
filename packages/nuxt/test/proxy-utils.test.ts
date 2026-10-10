@@ -118,6 +118,16 @@ describe('reachesLukk', () => {
     expect(reachesLukk(`https://api.test${path}`, 'https://api.test/auth')).toBe(true)
   })
 
+  it.each([
+    ['https://h.test/app/index.php/auth/login', 'https://h.test/app/auth'],
+    ['https://h.test/api/index.php/auth/login', 'https://h.test/api/auth'],
+    ['https://h.test/app/x/index.php/auth/login', 'https://h.test/app/x/auth'],
+  ])('sees through a front controller under a sub-path too: %s', (target, base) => {
+    // Laravel under `/app` routes `/app/index.php/auth/login` as `/app/auth/login`: the script can be any
+    // segment, not only the first.
+    expect(reachesLukk(target, base)).toBe(true)
+  })
+
   it('lets an app\'s own routes behind a front controller, and .php names elsewhere, through', () => {
     expect(reachesLukk('https://api.test/index.php/users', 'https://api.test/auth')).toBe(false)
     expect(reachesLukk('https://api.test/files/report.php', 'https://api.test/auth')).toBe(false)

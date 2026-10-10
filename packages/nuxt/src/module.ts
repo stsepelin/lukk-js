@@ -477,6 +477,9 @@ export default defineNuxtModule<ModuleOptions>({
     addPlugin({ src: resolver.resolve('./runtime/plugins/session.client'), mode: 'client' })
     // BFF SSR hydration: seed the user on the server so authed pages render logged-in on the
     // first paint. Default on; opt out with `ssrHydrate: false`. No-op in direct mode.
+    // Marks a render's own requests, so the app-API proxy never renews the session for one — BFF, whatever
+    // `ssrHydrate` says (see `render-marker.server.ts`).
+    if (options.mode === 'bff') addPlugin({ src: resolver.resolve('./runtime/plugins/render-marker.server'), mode: 'server' })
     if (options.mode === 'bff' && options.ssrHydrate !== false) {
       addPlugin({ src: resolver.resolve('./runtime/plugins/session.server'), mode: 'server' })
       // Takes a render that must refresh the session off streaming (Nuxt 4 `experimental.ssrStreaming`), so its

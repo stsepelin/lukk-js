@@ -352,4 +352,75 @@ describe('a rotation nobody received, adopted by the next request', () => {
     fetchSpy.mockImplementation(async () => new Response('{}', { status: 401 }))
     await expect(refreshOnce({ id: 'h3', data: { refresh: 't0', sid } }, 'https://lukk.test/auth')).resolves.toEqual({ pair: null, retryable: false })
   })
+
+  it('takes the link when the upstream fails and the cookie leaves on the 502 — it was delivered', async () => {
+    // The re-seal's cookie is queued before the proxy fetch; an unreachable upstream rejects before
+    // `onResponse`, and the 502 carries that cookie anyway. Left held, an old T0 cookie adopted the live
+    // pair for ten minutes.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({ access_token: 'a1', refresh_token: 't1', expires_in: 900 }), { status: 200 }))
+    const sid = `unreachable-${Math.random()}`
+    sealed = { access: expired(), refresh: 't0', sid }
+    rw = { id: 'h3', data: { ...sealed }, update: vi.fn() }
+    proxyRequest.mockImplementationOnce(async () => { throw Object.assign(new Error('fetch failed'), { statusCode: 502 }) })
+    const r = event()
+    delete (r.node.req as { socket?: unknown }).socket // a runtime whose request shim has no socket
+    await expect((apiProxy as unknown as (e: H3Event) => Promise<unknown>)(r)).rejects.toThrow('fetch failed')
+
+    await vi.advanceTimersByTimeAsync(30_000)
+    fetchSpy.mockImplementation(async () => new Response('{}', { status: 401 }))
+    await expect(refreshOnce({ id: 'h3', data: { refresh: 't0', sid } }, 'https://lukk.test/auth')).resolves.toEqual({ pair: null, retryable: false })
+  })
+
+  it.each([
+    [[] as string[], undefined],
+    [['other=1'], ['other=1']],
+  ])('withholds the re-seal from a failed upstream\'s error response too, once the session moved past it (others: %j)', async (others, left) => {
+    // As on a response that arrives, but the cookie leaves on the 502: t0 R rotates tx → t1, its upstream
+    // hangs; another tab rotates t1 → t2 and that link expires; then the upstream fails. Sealing t1 over
+    // the browser's t2 replayed a spent token.
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(globalThis, 'fetch')
+      .mockImplementationOnce(async () => new Response(JSON.stringify({ access_token: 'a1', refresh_token: 't1', expires_in: 900 }), { status: 200 }))
+      .mockImplementationOnce(async () => new Response(JSON.stringify({ access_token: 'a2', refresh_token: 't2', expires_in: 900 }), { status: 200 }))
+    const sid = `failed-moved-${Math.random()}`
+    sealed = { access: expired(), refresh: 'tx', sid }
+    const r = event()
+    if (others.length) r.node.res.setHeader('set-cookie', others)
+    rw = { id: 'h3', data: { ...sealed }, update: vi.fn(async (pair: TokenSession) => {
+      r.node.res.setHeader('set-cookie', [...others, `__Host-lukk-session=${pair.refresh}`])
+    }) }
+    proxyRequest.mockImplementationOnce(async () => {
+      await vi.advanceTimersByTimeAsync(5_000)
+      currentPair(sid, (await refreshOnce({ id: 'h3', data: { refresh: 't1', sid } }, 'https://lukk.test/auth')).pair!)
+      await vi.advanceTimersByTimeAsync(85_000)
+      throw new Error('fetch failed')
+    })
+    await expect((apiProxy as unknown as (e: H3Event) => Promise<unknown>)(r)).rejects.toThrow('fetch failed')
+    expect(r.node.res.getHeader('set-cookie')).toEqual(left)
+  })
+
+  it.each([
+    ['the request aborted', (r: H3Event) => { (r.node.req as { aborted?: boolean }).aborted = true }],
+    ['the response destroyed', (r: H3Event) => { (r.node.res as { destroyed?: boolean }).destroyed = true }],
+    ['the socket destroyed', (r: H3Event) => { (r.node.req as { socket?: unknown }).socket = { destroyed: true } }],
+  ])('leaves the link held when the browser went away before the upstream answered (%s) — nothing was delivered', async (_, goAway) => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({ access_token: 'a1', refresh_token: 't1', expires_in: 900 }), { status: 200 }))
+    const sid = `aborted-${Math.random()}`
+    sealed = { access: expired(), refresh: 't0', sid }
+    const r = event()
+    rw = { id: 'h3', data: { ...sealed }, update: vi.fn() }
+    proxyRequest.mockImplementationOnce(async (ev: unknown, _target: string, opts: { onResponse?: (e: unknown, x: unknown) => Promise<void> }) => {
+      goAway(r) // a navigation, a closed tab
+      await opts.onResponse!(ev, { status: 200, type: 'basic', headers: new Headers() })
+      return {}
+    })
+    await (apiProxy as unknown as (e: H3Event) => Promise<unknown>)(r)
+
+    await vi.advanceTimersByTimeAsync(40_000)
+    await expect(refreshOnce({ id: 'h3', data: { refresh: 't0', sid } }, 'https://lukk.test/auth')).resolves.toMatchObject({ pair: { refresh: 't1' } })
+    expect(fetchSpy).toHaveBeenCalledOnce()
+  })
 })
