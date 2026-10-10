@@ -13,6 +13,11 @@ export interface LukkConfirmation {
   confirmed: ComputedRef<boolean>
   required: Readonly<Ref<boolean>>
   token: Readonly<Ref<string | null>>
+  /**
+   * Re-confirm with the account password. Rejects with a `422` on `password` for a wrong password — and
+   * (lukk 0.7) for an account with a second factor when this session is not a recent multi-factor one:
+   * confirm with a user-verifying passkey there, or sign in again with the second factor.
+   */
   confirmPassword: (password: string) => Promise<void>
   record: (result: { confirmation_token?: string }) => void
   clear: () => void
@@ -54,7 +59,11 @@ export function useLukkConfirmation(): LukkConfirmation {
   // whether one landed after the request it answers was sent.
   const stepUp = ((nuxtApp as { _lukkStepUp?: { unearnable?: unknown, earned?: object } })._lukkStepUp ??= {})
 
-  /** Re-confirm with the account password. */
+  /**
+   * Re-confirm with the account password. A `422` on `password` is a wrong password, or (lukk 0.7) an
+   * account whose second factor this session does not meet — the password cannot raise it; a user-verifying
+   * passkey (`useLukkPasskeys().confirm()`) or a fresh multi-factor sign-in can.
+   */
   async function confirmPassword(password: string): Promise<void> {
     try {
       record(await $lukk.confirmPassword(password))

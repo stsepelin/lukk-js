@@ -245,12 +245,13 @@ export function currentPair(id: string | undefined, pair: TokenSession): TokenSe
 /**
  * `currentPair` at a caller's point of delivery — unless the browser has gone: a navigation aborted the
  * request, the tab closed, the connection dropped. Nothing this response carries arrives then, so nothing is
- * taken: the links stay held, and `pair` comes back as it is (sealed for no one). Taken anyway, the 30 s
- * window began for a cookie the browser never got, and its next request — still on the consumed token —
- * reached lukk past it as a replay. Every delivery point goes through here, so none of them can drift.
+ * taken — the links stay held — and nothing is delivered: `null`, which every caller already reads as "seal
+ * nothing, withhold the cookie" (for a pair the session moved past). Taken anyway, the 30 s window began for
+ * a cookie the browser never got, and its next request — still on the consumed token — reached lukk past it
+ * as a replay. Every delivery point goes through here, so none of them can drift.
  */
 export function deliverPair(event: H3Event, id: string | undefined, pair: TokenSession): TokenSession | null {
-  return browserGone(event) ? pair : currentPair(id, pair)
+  return browserGone(event) ? null : currentPair(id, pair)
 }
 
 /** Has the browser gone, so that this response can no longer reach it? */

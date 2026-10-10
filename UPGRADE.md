@@ -71,6 +71,10 @@ now `'pwd' | 'otp' | 'pop' | 'user' | 'mfa'`; anything comparing against `'webau
   used to answer `204` and announce a new authenticator again. **`regenerateRecoveryCodes()`** rejects
   with a `409` (on `two_factor`) on an account whose two-factor is neither on nor being enrolled. Both
   are ordinary `LukkError`s — no retry, nothing signed out — for a form to show.
+- **`useLukkConfirmation().confirmPassword()`** can reject with a `422` on `password` even with the right
+  password, on the same terms: an account with a second factor, from a session that is not a recent
+  multi-factor sign-in. There the step-up is a user-verifying passkey (`useLukkPasskeys().confirm()`) or
+  a fresh sign-in with the second factor; a modal that only asks for the password should offer one.
 - **`useLukkChangePassword().changePassword()`** can reject with a `422` on `current_password` even with
   the right password: on an account with an enforced TOTP or a user-verifying passkey, lukk refuses a
   change from a session that is not a recent multi-factor sign-in (NIST SP 800-63B-4 §4.1.2.1), before

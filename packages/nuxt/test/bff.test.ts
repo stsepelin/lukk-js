@@ -1835,6 +1835,40 @@ describe('a response the browser will not receive leaves its rotation held', () 
     expect(await stillHeld(sid, 't0', 't1')).toBe(goAway !== null)
   })
 
+  it.each(cases)('/refresh whose pair went stale before it left — %s: seals nothing, takes nothing', async (_, goAway) => {
+    // Between the rotation and the delivery, a sibling rotated the pair this request produced (t0 → t1 → t2).
+    // Delivered, the newest is sealed and its link taken; on a dead response, neither: nothing — a stale
+    // pair least of all — is sealed for no one, and the link stays held for the browser's next request.
+    let n = 0
+    mockFetch().fetch = vi.fn(async () => { n++; return jsonRes({ access_token: `a${n}`, refresh_token: `t${n}`, expires_in: 900 }) })
+    const sid = `gone-stale-${Math.random()}`
+    let sibling = false
+    useSharedEndedSessions({
+      mark: async () => {},
+      has: async () => {
+        // After this request's rotation landed (t0 → t1 recorded), and only once: another tab renews t1.
+        if (!sibling && refreshJournals.get(sid)?.has('t0')) {
+          sibling = true
+          await refreshOnce({ id: 'h3', data: { refresh: 't1', sid } }, BASE)
+        }
+        return false
+      },
+    })
+    const session = makeSession({ access: 'a0', refresh: 't0', sid } as TokenSession)
+    const event = makeEvent({ path: '/api/_lukk/refresh', method: 'POST', body: '{}', headers: sameOrigin, session })
+    goAway?.(event as unknown as { node: Record<string, unknown> })
+
+    try { await run(event) }
+    finally { useSharedEndedSessions(undefined) }
+
+    expect(sibling).toBe(true)
+    if (goAway) expect(session.update).not.toHaveBeenCalled()
+    else expect(session.update).toHaveBeenCalledWith({ access: 'a2', refresh: 't2' })
+    // The sibling's own rotation landing already cut t0's link to 30 s (by design); t1's is the one this
+    // delivery takes — or, on a dead response, leaves held.
+    expect(await stillHeld(sid, 't1', 't2')).toBe(goAway !== null)
+  })
+
   it.each(cases)('the 401 retry — %s', async (_, goAway) => {
     mockFetch().fetch = vi.fn(async (url: string, init?: RequestInit) => {
       if (String(url).endsWith('/refresh')) return jsonRes({ access_token: 'a1', refresh_token: 't1', expires_in: 900 })

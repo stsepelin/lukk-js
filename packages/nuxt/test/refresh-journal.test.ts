@@ -402,10 +402,11 @@ describe('a rotation nobody received, adopted by the next request', () => {
   })
 
   it.each([
-    ['the request aborted', (r: H3Event) => { (r.node.req as { aborted?: boolean }).aborted = true }],
-    ['the response destroyed', (r: H3Event) => { (r.node.res as { destroyed?: boolean }).destroyed = true }],
-    ['the socket destroyed', (r: H3Event) => { (r.node.req as { socket?: unknown }).socket = { destroyed: true } }],
-  ])('leaves the link held when the browser went away before the upstream answered (%s) — nothing was delivered', async (_, goAway) => {
+    ['the request aborted', (r: H3Event) => { (r.node.req as { aborted?: boolean }).aborted = true }, true],
+    ['the response destroyed', (r: H3Event) => { (r.node.res as { destroyed?: boolean }).destroyed = true }, true],
+    ['the socket destroyed', (r: H3Event) => { (r.node.req as { socket?: unknown }).socket = { destroyed: true } }, true],
+    ['delivered (the control)', () => {}, false],
+  ])('leaves the link held only when the browser went away before the upstream answered (%s)', async (_, goAway, held) => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({ access_token: 'a1', refresh_token: 't1', expires_in: 900 }), { status: 200 }))
     const sid = `aborted-${Math.random()}`
@@ -420,8 +421,11 @@ describe('a rotation nobody received, adopted by the next request', () => {
     await (apiProxy as unknown as (e: H3Event) => Promise<unknown>)(r)
 
     await vi.advanceTimersByTimeAsync(40_000)
-    await expect(refreshOnce({ id: 'h3', data: { refresh: 't0', sid } }, 'https://lukk.test/auth')).resolves.toMatchObject({ pair: { refresh: 't1' } })
-    expect(fetchSpy).toHaveBeenCalledOnce()
+    // Held, the consumed token is still answered with its pair; taken, its window closed and it reaches lukk.
+    fetchSpy.mockImplementation(async () => new Response('{}', { status: 401 }))
+    const { pair } = await refreshOnce({ id: 'h3', data: { refresh: 't0', sid } }, 'https://lukk.test/auth')
+    expect(pair?.refresh === 't1').toBe(held)
+    expect(fetchSpy).toHaveBeenCalledTimes(held ? 1 : 2)
   })
 
   it.each([
