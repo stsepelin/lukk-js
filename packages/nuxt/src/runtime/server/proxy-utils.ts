@@ -109,14 +109,16 @@ export function reachesLukk(target: string, base: string): boolean {
   // On every round of decoding, as `reaches` judges the path itself: a hop that decodes once more turns
   // `/index.php%2Fauth/login` into `/index.php/auth/login` and `/index%252ephp/…` into `/index%2ephp/…`,
   // which Symfony reads as the script. So each round's string is split on `/` and `\` (as a decoding hop
-  // treats them alike), its scripts dropped, and the rest judged — a `?` or `#` it decoded kept encoded,
+  // treats them alike) — without the tab, LF and CR a re-parsing hop strips from anywhere, which turn
+  // `index.php%09` and `index.ph%09p` into `index.php` (from that string only: the next round decodes what
+  // was actually there) — its scripts dropped, and the rest judged — a `?` or `#` it decoded kept encoded,
   // so that `reaches` reads it both ways.
   const lukk = withoutScripts(base)
   const { origin, pathname } = new URL(target)
   let path = pathname
   // Stryker disable next-line EqualityOperator: equivalent — a script only a fifth decoding reveals sits in a path still decoding after four rounds, which `reaches` refuses above, as written. (`round--` never ends: that timeout is a synchronous loop, the detection.)
   for (let round = 0; round < DECODING_ROUNDS; round++) {
-    const rest = path.split(/[/\\]/).filter(segment => !/\.php$/i.test(segment)).join('/').replace(/[?#]/g, encodeURIComponent)
+    const rest = path.replace(/[\t\n\r]/g, '').split(/[/\\]/).filter(segment => !/\.php$/i.test(segment)).join('/').replace(/[?#]/g, encodeURIComponent)
     if (reaches(`${origin}${rest}`, lukk)) return true
     path = decodeAscii(path)
   }

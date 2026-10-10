@@ -8,13 +8,16 @@ import { useNuxtApp } from '#imports'
 export interface LukkTwoFactor {
   /** Begin enrolment → `{ otpauth_uri, recovery_codes }` (shown once). */
   enable: () => Promise<TwoFactorEnrollment>
-  /** Activate 2FA by confirming the first TOTP code. */
+  /** Activate 2FA by confirming the first TOTP code. Rejects `409` (on `code`) when two-factor is already on. */
   confirm: (code: string) => Promise<void>
   /** Turn 2FA off. */
   disable: () => Promise<void>
   /** How many recovery codes remain — a safe count, never the codes. */
   recoveryCodeCount: () => Promise<RecoveryCodeCount>
-  /** Replace the recovery codes, returning the new set once. */
+  /**
+   * Replace the recovery codes, returning the new set once. Rejects `409` (on `two_factor`) on an account
+   * whose two-factor is neither on nor being enrolled.
+   */
   regenerateRecoveryCodes: () => Promise<{ recovery_codes: string[] }>
 }
 
@@ -30,13 +33,13 @@ export function useLukkTwoFactor(): LukkTwoFactor {
   return {
     /** Begin enrolment → `{ otpauth_uri, recovery_codes }` (shown once). */
     enable: () => $lukk.enableTwoFactor(),
-    /** Activate 2FA by confirming the first TOTP code. */
+    /** Activate 2FA by confirming the first TOTP code. Rejects `409` (on `code`) when two-factor is already on. */
     confirm: (code: string) => $lukk.confirmTwoFactor(code),
     /** Turn 2FA off. */
     disable: () => $lukk.disableTwoFactor(),
     /** How many recovery codes remain — a safe count, never the codes. */
     recoveryCodeCount: () => $lukk.recoveryCodeCount(),
-    /** Replace the recovery codes, returning the new set once. */
+    /** Replace the recovery codes, returning the new set once (`409` without two-factor — see above). */
     regenerateRecoveryCodes: () => $lukk.regenerateRecoveryCodes(),
   }
 }

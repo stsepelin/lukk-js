@@ -25,6 +25,12 @@ export interface LukkChangePassword {
  * and no token to swap: the composables' state is already correct afterwards. A wrong current
  * password is a `422` on `current_password`; the endpoint shares the step-up throttle, so a burst
  * of wrong guesses is a `429` and, where the account lockout is on, eventually a `423`.
+ *
+ * So is a session below the account's step-up level: on an account with an enforced TOTP or a
+ * user-verifying passkey, lukk refuses a change from a session that is not a recent multi-factor
+ * sign-in with a `422` on `current_password`, before the password is checked (no lockout attempt is
+ * spent). The new password replaces an authenticator, so the current one is not proof enough there:
+ * have the user sign in again with their second factor.
  */
 export function useLukkChangePassword(): LukkChangePassword {
   const { $lukk } = useNuxtApp()

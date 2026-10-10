@@ -154,6 +154,17 @@ describe('reachesLukk', () => {
     expect(reachesLukk(`https://api.test${path}`, 'https://api.test/auth')).toBe(true)
   })
 
+  it.each([
+    ['https://h.test/index.php%250D/auth/login', 'https://h.test/auth'],
+    ['https://h.test/index.php%2509/auth/refresh', 'https://h.test/auth'],
+    ['https://h.test/index.ph%2509p/auth/passkeys/login', 'https://h.test/auth'],
+    ['https://h.test/app/index.php%250A/auth/confirm-password', 'https://h.test/app/auth'],
+  ])('sees a script whose name a control-character-stripping hop completes: %s', (target, base) => {
+    // A hop that decodes and re-parses (WHATWG) strips tab, LF and CR from anywhere in the URL: decoded once,
+    // `index.php%09` and `index.ph%09p` become `index.php`, which Symfony then reads as the script.
+    expect(reachesLukk(target, base)).toBe(true)
+  })
+
   it('lets an app\'s own routes behind a front controller, and .php names elsewhere, through', () => {
     expect(reachesLukk('https://api.test/index.php/users', 'https://api.test/auth')).toBe(false)
     expect(reachesLukk('https://api.test/files/report.php', 'https://api.test/auth')).toBe(false)

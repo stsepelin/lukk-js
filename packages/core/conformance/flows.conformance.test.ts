@@ -270,8 +270,11 @@ describe(`lukk conformance (algo=${ALGORITHM}, cookie_mode=${COOKIE_MODE}, feat=
     })
 
     /** A session whose grant the TOKEN owns. Omit `abilities` for an ordinary derived one. */
-    async function pinnedToken(abilities?: string): Promise<string> {
-      const query = abilities === undefined ? '' : `?abilities=${encodeURIComponent(abilities)}`
+    async function pinnedToken(abilities?: string, user?: number): Promise<string> {
+      const params = new URLSearchParams()
+      if (abilities !== undefined) params.set('abilities', abilities)
+      if (user !== undefined) params.set('user', String(user))
+      const query = params.size ? `?${params}` : ''
       const pair = await (await fetch(`${ROOT}/conformance/pinned-token${query}`)).json() as { access_token: string }
 
       return pair.access_token
@@ -362,14 +365,35 @@ describe(`lukk conformance (algo=${ALGORITHM}, cookie_mode=${COOKIE_MODE}, feat=
       // Asserted as an exhaustive key set, not with `toHaveProperty`: a field the server ADDS should
       // fail here too, and a field it stops emitting is how `AccountExport.sessions[].guard` came to
       // declare something no endpoint ever returned.
-      const token = await pinnedToken('lukk.account,lukk.account.delete')
-      const confirmation = await (await fetch(`${ROOT}/auth/confirm-password`, {
-        method: 'POST',
-        headers: { ...authed(token).headers, 'content-type': 'application/json' },
-        body: JSON.stringify({ password: PASSWORD }),
-      })).json() as { confirmation_token: string }
+      //
+      // On an account of its own, so the export carries a passkey whose shape is checked rather than an
+      // empty list — and that passkey sets how it steps up. A user-verifying passkey makes the account
+      // multi-factor, and lukk then refuses a PASSWORD step-up from a password-only session (as it refused
+      // the seeded user here once the registration flow above had given it one): the step-up is the passkey.
+      const who = await (await fetch(`${ROOT}/conformance/ephemeral-user`)).json() as { id: number, email: string, password: string }
+      const authenticator = createAuthenticator(RP_ID, ORIGIN)
+      if (FEAT_PASSKEYS) {
+        const { lukk, state } = client()
+        await lukk.login({ email: who.email, password: who.password })
+        state.confirmation = (await lukk.confirmPassword(who.password)).confirmation_token
+        await lukk.registerPasskey(credentialToJSON(authenticator.create(await lukk.passkeyRegistrationOptions())), 'Export Key')
+      }
 
-      const stepped = { headers: { ...authed(token).headers, 'X-Lukk-Confirmation': confirmation.confirmation_token } }
+      const token = await pinnedToken('lukk.account,lukk.account.delete', who.id)
+      const { lukk: pinned, state: pinnedState } = client()
+      pinnedState.access = token
+      let confirmationToken: string
+      if (FEAT_PASSKEYS) {
+        // The step-up options where lukk has them (0.7), the login options before — as `useLukkPasskeys().confirm()` does.
+        const options = await pinned.passkeyConfirmationOptions()
+          .catch((error: { status?: number }) => error.status === 404 ? pinned.passkeyLoginOptions() : Promise.reject(error))
+        confirmationToken = (await pinned.confirmPasskey(options.ceremony_id, credentialToJSON(authenticator.get(options.options)))).confirmation_token
+      }
+      else {
+        confirmationToken = (await pinned.confirmPassword(who.password)).confirmation_token
+      }
+
+      const stepped = { headers: { ...authed(token).headers, 'X-Lukk-Confirmation': confirmationToken } }
       const exported = await (await fetch(`${ROOT}/auth/account/export`, stepped)).json() as AccountExport
 
       // `lockouts` arrives with lukk > 0.6.0 — the client type marks it optional for older servers,
@@ -378,6 +402,22 @@ describe(`lukk conformance (algo=${ALGORITHM}, cookie_mode=${COOKIE_MODE}, feat=
       expect(Object.keys(exported.sessions[0]!).sort())
         .toEqual(['created_at', 'expires_at', 'last_rotated_at', 'revoked_at', 'session'])
       expect(Object.keys(exported.two_factor).sort()).toEqual(['confirmed_at', 'enabled'])
+      // Each passkey entry's shape. lukk 0.7 states every field erasure destroys, its times ISO strings like
+      // the rest of the file; lukk 0.6.0 sent three fields, `last_used_at` as unix seconds (the client type
+      // marks the new ones optional for it). Told apart by `created_at`, which 0.7 always sends.
+      expect(exported.passkeys).toHaveLength(FEAT_PASSKEYS ? 1 : 0)
+      for (const passkey of exported.passkeys) {
+        if ('created_at' in passkey) {
+          expect(Object.keys(passkey).sort()).toEqual(['aaguid', 'created_at', 'credential_id', 'last_used_at', 'name', 'transports'])
+          expect(typeof passkey.created_at).toBe('string')
+          expect(passkey.last_used_at === null || typeof passkey.last_used_at === 'string').toBe(true)
+          expect(passkey.transports === null || Array.isArray(passkey.transports)).toBe(true)
+        }
+        else {
+          expect(Object.keys(passkey).sort()).toEqual(['credential_id', 'last_used_at', 'name'])
+        }
+        expect(passkey.name).toBe('Export Key')
+      }
       // Each lockout entry's shape, timestamps as ISO strings: typed as numbers, they were wrong.
       for (const lockout of exported.lockouts ?? []) {
         expect(Object.keys(lockout).sort()).toEqual(['attempts', 'first_failed_at', 'last_failed_at', 'locked_at', 'purpose'])

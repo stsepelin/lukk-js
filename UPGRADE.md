@@ -30,6 +30,8 @@ Everything before this release was additive. This one is not. No runtime API was
 but behaviour changed in ways an app can notice even without typechecking:
 
 - passkey sign-in can return a two-factor challenge, and the `amr` values changed (lukk 0.7);
+- the account export's `passkeys[].last_used_at` is an ISO-8601 string, no longer unix seconds, and
+  lukk 0.7 answers a few requests it used to accept with a `409` or a `422`;
 - the proxies refuse more — lukk's own routes through the app-API proxy, oversized and unsized bodies,
   cross-site subresource requests to either proxy, any `/refresh` but a POST — and sealed sessions
   expire;
@@ -52,6 +54,31 @@ same code form as after a password sign-in. `confirm()` asks the new
 now `'pwd' | 'otp' | 'pop' | 'user' | 'mfa'`; anything comparing against `'webauthn'` must move to
 `'pop'`, or to `'mfa'` for "was this multi-factor". See lukk's
 [upgrade notes](https://github.com/stsepelin/lukk/blob/main/UPGRADE.md#upgrading-to-070-from-06x).
+
+### lukk 0.7: the export's passkey times are strings, and new refusals
+
+**Low impact — if you read the account export's passkeys, or manage two-factor or passwords.**
+
+- **`AccountExport.passkeys[]`** (`GET /auth/account/export`, `useLukkAccount().exportAccount()`)
+  states every passkey field erasure destroys: `created_at`, `aaguid` (the authenticator model) and
+  `transports` (`string[]`) join `credential_id` and `name`, and **`last_used_at` is an ISO-8601 string**
+  like every other time in the export — it was unix seconds. Code that did
+  `new Date(entry.last_used_at * 1000)` now fails to typecheck, and at runtime gets `NaN`: parse the
+  string instead. The three new fields are optional in the type, as lukk 0.6.0 does not send them (and
+  sends `last_used_at` as a number). `PasskeySummary` from `GET /auth/passkeys` is unchanged — still
+  `{ id, name, last_used_at }` with unix seconds.
+- **`useLukkTwoFactor().confirm()`** rejects with a `409` (on `code`) when two-factor is already on: it
+  used to answer `204` and announce a new authenticator again. **`regenerateRecoveryCodes()`** rejects
+  with a `409` (on `two_factor`) on an account whose two-factor is neither on nor being enrolled. Both
+  are ordinary `LukkError`s — no retry, nothing signed out — for a form to show.
+- **`useLukkChangePassword().changePassword()`** can reject with a `422` on `current_password` even with
+  the right password: on an account with an enforced TOTP or a user-verifying passkey, lukk refuses a
+  change from a session that is not a recent multi-factor sign-in (NIST SP 800-63B-4 §4.1.2.1), before
+  the password is checked, so no lockout attempt is spent. `useLukkForm` maps it onto the field like any
+  other; the remedy is signing in again with the second factor.
+- A two-factor challenge issued before the password changed (or by a lukk without the fingerprint) is
+  refused with the same `422` on `challenge_token` as an expired one, before the code is checked. Nothing
+  changes client-side: the user signs in again.
 
 ### The proxies refuse more, and seals expire
 
@@ -215,11 +242,17 @@ replacing its hook, and keep authenticated calls on the API's origin.
 - **The app-API proxy refuses lukk's routes behind a PHP front controller** (`/api/index.php/auth/login`)
   with `404` — wherever the script sits, so a Laravel app under a sub-path (`api.target` at
   `https://host/app`, lukk at `/app/auth`) is covered at `/app/index.php/auth/login` too. Any path segment
-  ending in `.php` is read as a front controller, in the path and in `baseURL` alike (Laravel without URL
+  ending in `.php` is read as a front controller (also after a decoding hop, and with the tab, LF and CR
+  such a hop strips), in the path and in `baseURL` alike (Laravel without URL
   rewriting, `baseURL` at `https://host/index.php/auth`); the path is also judged as written, so such a
   segment never hides an encoded `/`, `?`, `#` or `..`. It cannot see lukk's extra guard mounts
   (`lukk.guards.*.path`, e.g. `admin/auth`) on the same host: keep them off `api.target`'s host, or out of
-  its reach.
+  its reach. Nor can it see how your server maps URLs to the PHP script (`SCRIPT_NAME`): where the front
+  controller's directory is not part of the public URLs — shared hosting whose `.htaccess` rewrites into
+  `public/index.php`, so `/public/auth/login` routes as `/auth/login`, or Symfony trimming any URI that
+  contains `index.php` — no path check contains it. The only robust layout is an `api.target` (host or
+  prefix) that does not serve lukk's routes at all: lukk on its own host, or under a prefix the app API is
+  not reachable through.
 - **The app-API proxy no longer renews the session for a page render's own requests** — `useLukkFetch`,
   and Nuxt's own `useFetch('/api/…')`, `useRequestFetch()` and `event.$fetch` alike: the page request is
   marked (`x-lukk-ssr`, set by a BFF server plugin; removed before a request reaches your API). The BFF

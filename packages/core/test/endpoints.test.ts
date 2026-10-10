@@ -188,3 +188,26 @@ describe('guards', () => {
     expect(isRegistrationPending({ access_token: 'a', expires_in: 1 })).toBe(false)
   })
 })
+
+describe('refusals that change nothing surface as a LukkError, sent once', () => {
+  // lukk's 2FA management answers 409 where there is nothing to bind — confirming two-factor already on
+  // (`code`), regenerating recovery codes on an account without it (`two_factor`) — and a password change
+  // from a session below the account's step-up level is a 422 on `current_password`. None is a 401: no
+  // refresh, no retry, no sign-out — the caller gets the error with its field, for `useLukkForm` to map.
+  it.each([
+    ['confirmTwoFactor (already enabled)', (c: LukkClient) => c.confirmTwoFactor('123456'), 409, { code: ['Two-factor authentication is already enabled.'] }],
+    ['regenerateRecoveryCodes (no two-factor)', (c: LukkClient) => c.regenerateRecoveryCodes(), 409, { two_factor: ['Two-factor authentication is not enabled.'] }],
+    ['changePassword (below the account\'s step-up level)', (c: LukkClient) => c.changePassword({ current_password: 'p', password: 'n', password_confirmation: 'n' }), 422, { current_password: ['Confirm with your second factor first.'] }],
+  ])('%s', async (_name, call, status, errors) => {
+    const fetch = vi.fn(async () => json({ message: 'Refused.', errors }, status))
+    const refresh = vi.fn()
+    const onUnauthenticated = vi.fn()
+
+    const failure = call(createLukkClient({ baseURL: 'https://x/auth', fetch, refresh, onUnauthenticated }))
+
+    await expect(failure).rejects.toMatchObject({ status, message: 'Refused.', errors })
+    expect(fetch).toHaveBeenCalledOnce()
+    expect(refresh).not.toHaveBeenCalled()
+    expect(onUnauthenticated).not.toHaveBeenCalled()
+  })
+})

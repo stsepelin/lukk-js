@@ -215,13 +215,24 @@ export interface AccountExport {
     revoked_at: string | null
     expires_at: string | null
   }>
-  /** The FACT of each passkey — never the COSE public key. */
-  passkeys: Array<{ credential_id: string, name: string | null, last_used_at: number | null }>
+  /**
+   * Each passkey — every field erasure destroys that describes it, never the COSE public key or the sign
+   * counter. Times are ISO-8601 strings, like the rest of the export: lukk 0.6.0 and earlier sent
+   * `last_used_at` as unix seconds, and none of `created_at`, `aaguid` or `transports` (absent there).
+   * `aaguid` names the authenticator model; `transports` how it connects (`usb`, `internal`, …).
+   */
+  passkeys: Array<{
+    credential_id: string
+    name: string | null
+    created_at?: string | null
+    last_used_at: string | null
+    aaguid?: string | null
+    transports?: string[] | null
+  }>
   two_factor: { enabled: boolean, confirmed_at: string | null }
   /**
    * The account-lockout counters held against this account — the rows erasure also removes. Sent by
-   * lukk releases after 0.6.0 (absent before). Timestamps are ISO-8601 strings, like `generated_at` —
-   * unlike `passkeys[].last_used_at`, which lukk sends as unix seconds.
+   * lukk releases after 0.6.0 (absent before). Timestamps are ISO-8601 strings, like `generated_at`.
    */
   lockouts?: Array<{
     purpose: 'login' | 'two_factor' | 'confirm'

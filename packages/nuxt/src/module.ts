@@ -173,6 +173,14 @@ export interface ModuleOptions {
    * holds a token. `target` is never derived from the request (SSRF-safe).
    * @example { path: '/api', target: 'https://api.example.com' }
    *
+   * Requests that would reach lukk's own routes (token pairs, step-up tokens) are refused with a `404`,
+   * judged on the URL — including through a `.php` front controller written in it. The proxy cannot see
+   * how the backend maps URLs to its script (`SCRIPT_NAME`): where the front controller's directory is
+   * not part of the public URLs — shared hosting rewriting into `public/index.php`, so `/public/auth/login`
+   * routes as `/auth/login`, or Symfony trimming any URI that contains `index.php` — a path check cannot
+   * contain it. The robust layout is a `target` (host or prefix) that does not serve lukk's routes at all:
+   * lukk on its own host or under a prefix the app API is not reachable through.
+   *
    * `forceJson` (default `true`) sets `Accept: application/json` on forwarded
    * requests, so a JSON API renders clean `401`/`422` JSON for unauthenticated /
    * validation errors instead of Laravel's default guest-redirect (which 500s
