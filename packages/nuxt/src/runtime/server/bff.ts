@@ -8,7 +8,7 @@ import { endSession, newSessionId, sessionEnded, sessionKey, sessionReplaced, wi
 import { revokeDroppedSession } from './revoke-dropped'
 import { readSealedSession, sessionCookie, sessionSeal } from './sealed-session'
 import { warnIfSessionTooLarge } from './session-size'
-import { currentPair, refreshOnce, type TokenSession } from './refresh'
+import { deliverPair, refreshOnce, type TokenSession } from './refresh'
 
 type SessionCookieOptions = ReturnType<typeof sessionCookie>
 
@@ -216,7 +216,7 @@ export default defineEventHandler(async (event) => {
 
     // The newest pair — the session may have rotated this one during the checks above (a shared store's
     // answer is real I/O) — or, should it have moved past it altogether, none: the browser holds the newer.
-    const newest = currentPair(sessionKey(s), pair)
+    const newest = deliverPair(event, sessionKey(s), pair)
     if (!newest) return replaced()
     await s.update(newest)
     warnIfSessionTooLarge(s)
@@ -261,7 +261,7 @@ export default defineEventHandler(async (event) => {
             // at all when the session has moved past it: the browser keeps the newer cookie it holds. (A
             // backstop here: the call is bounded by the 15 s upstream deadline, and a link lasts at least
             // 30 s once delivered — only a journal overflowing meanwhile gets that far.)
-            const newest = currentPair(sessionKey(s), pair)
+            const newest = deliverPair(event, sessionKey(s), pair)
             if (newest) {
               await s.update(newest)
               warnIfSessionTooLarge(s)
@@ -354,7 +354,7 @@ export default defineEventHandler(async (event) => {
     // retries a 409 on a step-up, so the user is asked to confirm again — and that confirmation is earned on
     // the newer cookie. Only the status is read by the client; the message is for the user.
     const arrived = { access: s.data.access, refresh: s.data.refresh }
-    const newest = arrived.refresh ? currentPair(sessionKey(s), arrived) : arrived
+    const newest = arrived.refresh ? deliverPair(event, sessionKey(s), arrived) : arrived
     if (!newest) {
       setResponseStatus(event, 409)
       return { message: 'Your session was renewed meanwhile. Please confirm again.' }

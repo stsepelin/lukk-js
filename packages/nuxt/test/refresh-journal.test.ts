@@ -423,4 +423,29 @@ describe('a rotation nobody received, adopted by the next request', () => {
     await expect(refreshOnce({ id: 'h3', data: { refresh: 't0', sid } }, 'https://lukk.test/auth')).resolves.toMatchObject({ pair: { refresh: 't1' } })
     expect(fetchSpy).toHaveBeenCalledOnce()
   })
+
+  it.each([
+    ['the request aborted', (r: H3Event) => { (r.node.req as { aborted?: boolean }).aborted = true }, true],
+    ['the response destroyed', (r: H3Event) => { (r.node.res as { destroyed?: boolean }).destroyed = true }, true],
+    ['the socket destroyed', (r: H3Event) => { (r.node.req as { socket?: unknown }).socket = { destroyed: true } }, true],
+    ['delivered (the control)', () => {}, false],
+  ])('leaves a render\'s rotation held when the page never reaches the browser (%s)', async (_, goAway, held) => {
+    // A navigation away while the page renders: its cookie never arrives, so its link must not start the
+    // 30 s window that a delivered one does.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({ access_token: 'a1', refresh_token: 't1', expires_in: 900 }), { status: 200 }))
+    const sid = `ssr-gone-${Math.random()}`
+    sealed = { access: expired(), refresh: 't0', sid }
+    rw = { id: 'h3', data: { ...sealed }, update: vi.fn() }
+    const page = event('/dashboard')
+    expect(await resolveHydrationAccess(page)).toBe('a1')
+
+    goAway(page)
+    await withholdIfReplaced(page)
+
+    await vi.advanceTimersByTimeAsync(40_000)
+    fetchSpy.mockImplementation(async () => new Response('{}', { status: 401 }))
+    const { pair } = await refreshOnce({ id: 'h3', data: { refresh: 't0', sid } }, 'https://lukk.test/auth')
+    expect(pair?.refresh === 't1').toBe(held)
+  })
 })

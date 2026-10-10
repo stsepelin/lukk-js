@@ -1800,3 +1800,66 @@ describe('a page render\'s own request (`x-lukk-ssr`) never renews the session',
     expect(calls).toEqual(['/logout', '/refresh', '/logout'])
   })
 })
+
+describe('a response the browser will not receive leaves its rotation held', () => {
+  // A navigation aborts the in-flight /refresh, a closed tab drops the 401 retry: the cookie this response
+  // carries never arrives. Taking the link there started its 30 s window anyway, and the browser's next
+  // request — still on the consumed token, past that window — reached lukk as a replay and was revoked.
+  const BASE = 'https://lukk/auth'
+  const gone = {
+    'the request aborted': (e: { node: Record<string, unknown> }) => { e.node.req = { aborted: true } },
+    'the response destroyed': (e: { node: Record<string, unknown> }) => { (e.node.res as { destroyed?: boolean }).destroyed = true },
+    'the socket destroyed': (e: { node: Record<string, unknown> }) => { e.node.req = { socket: { destroyed: true } } },
+  }
+  const cases = [...Object.entries(gone), ['delivered (the control)', null] as const] as Array<[string, ((e: { node: Record<string, unknown> }) => void) | null]>
+
+  beforeEach(() => { vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] }) })
+  afterEach(() => { vi.useRealTimers() })
+
+  /** At +40 s — past a taken link's window, inside a held one's: is `consumed` still answered with `produced`? */
+  async function stillHeld(sid: string, consumed: string, produced: string): Promise<boolean> {
+    await vi.advanceTimersByTimeAsync(40_000)
+    mockFetch().fetch = vi.fn(async () => jsonRes({ message: 'Unauthenticated.' }, 401))
+    const { pair } = await refreshOnce({ id: 'h3', data: { refresh: consumed, sid } }, BASE)
+    return pair?.refresh === produced
+  }
+
+  it.each(cases)('/refresh — %s', async (_, goAway) => {
+    mockFetch().fetch = vi.fn(async () => jsonRes({ access_token: 'a1', refresh_token: 't1', expires_in: 900 }))
+    const sid = `gone-refresh-${Math.random()}`
+    const event = makeEvent({ path: '/api/_lukk/refresh', method: 'POST', body: '{}', headers: sameOrigin, session: makeSession({ access: 'a0', refresh: 't0', sid } as TokenSession) })
+    goAway?.(event as unknown as { node: Record<string, unknown> })
+
+    await run(event)
+
+    expect(await stillHeld(sid, 't0', 't1')).toBe(goAway !== null)
+  })
+
+  it.each(cases)('the 401 retry — %s', async (_, goAway) => {
+    mockFetch().fetch = vi.fn(async (url: string, init?: RequestInit) => {
+      if (String(url).endsWith('/refresh')) return jsonRes({ access_token: 'a1', refresh_token: 't1', expires_in: 900 })
+      return new Headers(init?.headers).get('authorization') === 'Bearer a1' ? jsonRes({ id: 1 }) : jsonRes({ message: 'Unauthenticated.' }, 401)
+    })
+    const sid = `gone-retry-${Math.random()}`
+    const event = makeEvent({ path: '/api/_lukk/user', headers: sameOrigin, session: makeSession({ access: 'a0', refresh: 't0', sid } as TokenSession) })
+    goAway?.(event as unknown as { node: Record<string, unknown> })
+
+    await run(event)
+
+    expect(await stillHeld(sid, 't0', 't1')).toBe(goAway !== null)
+  })
+
+  it.each(cases)('the step-up capture — %s', async (_, goAway) => {
+    // The session rotated t0 → t1 in a response nobody received (held); this step-up carries t1 home.
+    mockFetch().fetch = vi.fn(async () => jsonRes({ access_token: 'a1', refresh_token: 't1', expires_in: 900 }))
+    const sid = `gone-confirm-${Math.random()}`
+    await refreshOnce({ id: 'h3', data: { refresh: 't0', sid } }, BASE)
+    mockFetch().fetch = vi.fn(async () => jsonRes({ confirmation_token: 'c1' }))
+    const event = makeEvent({ path: '/api/_lukk/confirm-password', method: 'POST', body: '{"password":"p"}', headers: { ...sameOrigin, 'content-type': 'application/json' }, session: makeSession({ access: 'a1', refresh: 't1', sid } as TokenSession) })
+    goAway?.(event as unknown as { node: Record<string, unknown> })
+
+    await run(event)
+
+    expect(await stillHeld(sid, 't0', 't1')).toBe(goAway !== null)
+  })
+})

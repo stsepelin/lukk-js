@@ -1,3 +1,4 @@
+import type { H3Event } from 'h3'
 import { isSessionEnded, sessionEnded, sessionKey } from './ended-sessions'
 import { forgetRefreshJournal, type Link, refreshHeads, refreshJournals } from './refresh-journal'
 import { reportUnusableBase, resolveTarget, UPSTREAM_TIMEOUT_MS } from './proxy-utils'
@@ -109,7 +110,8 @@ export const REFRESH_INFLIGHT_MAX_MS = 5 * 60_000
  * another instance replays the consumed token, and only lukk's grace window stands between it and a revoke.
  *
  * An accepted limit: a link's window can close before the browser has the pair — the response that carried
- * it was lost after leaving (a navigation aborts it). Its replay then revokes the family, the same exposure an ordinary
+ * it was lost after leaving, which this side cannot see (a response the browser had gone from BEFORE it left
+ * takes nothing — see `deliverPair`). Its replay then revokes the family, the same exposure an ordinary
  * rotation has when its response is lost. A longer window would widen the time in which an old cookie
  * somewhere else is answered with a live pair.
  */
@@ -238,6 +240,23 @@ export function currentPair(id: string | undefined, pair: TokenSession): TokenSe
     : (!head || head.token === pair.refresh ? pair : null)
   if (newest && journal) takeChain(id!, chainInto(journal, newest.refresh!))
   return newest
+}
+
+/**
+ * `currentPair` at a caller's point of delivery — unless the browser has gone: a navigation aborted the
+ * request, the tab closed, the connection dropped. Nothing this response carries arrives then, so nothing is
+ * taken: the links stay held, and `pair` comes back as it is (sealed for no one). Taken anyway, the 30 s
+ * window began for a cookie the browser never got, and its next request — still on the consumed token —
+ * reached lukk past it as a replay. Every delivery point goes through here, so none of them can drift.
+ */
+export function deliverPair(event: H3Event, id: string | undefined, pair: TokenSession): TokenSession | null {
+  return browserGone(event) ? pair : currentPair(id, pair)
+}
+
+/** Has the browser gone, so that this response can no longer reach it? */
+function browserGone(event: H3Event): boolean {
+  const { req, res } = event.node
+  return Boolean(req?.aborted || res.destroyed || req?.socket?.destroyed)
 }
 
 /** A link's pair, with what is LEFT of its access token's lifetime. */

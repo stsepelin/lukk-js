@@ -7,7 +7,7 @@ import { sessionEnded, sessionKey } from './ended-sessions'
 import { logoutNoted, withholdSignedOut } from './logout-note'
 import { revokeDroppedSession } from './revoke-dropped'
 import { readSealedSession, sessionCookie as sessionCookieOptions, sessionSeal } from './sealed-session'
-import { currentPair, refreshOnce, type TokenSession } from './refresh'
+import { deliverPair, refreshOnce, type TokenSession } from './refresh'
 
 /**
  * Optional BFF app-API proxy. Forwards same-origin `${apiPath}/**` to the fixed
@@ -137,10 +137,8 @@ export default defineEventHandler(async (event) => {
       rotatedRefresh = pair.refresh
       resealed = ended
       resealNewest = async (queued) => {
-        // The browser went away (a navigation, a closed tab): nothing reaches it, so the link stays held —
-        // taken here, the cookie it still holds replayed into a revoke 30 s on.
-        if (event.node.req.aborted || event.node.res.destroyed || event.node.req.socket?.destroyed) return queued
-        const newest = currentPair(sessionKey(session), pair)
+        // At the last moment before the cookie leaves — and not at all for a browser that has gone.
+        const newest = deliverPair(event, sessionKey(session), pair)
         if (newest === pair) return queued
         // Moved past it, and the links that led on have expired: not this cookie at all — the browser keeps
         // the newer one it holds.

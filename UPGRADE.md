@@ -213,10 +213,12 @@ replacing its hook, and keep authenticated calls on the API's origin.
   deviations (the second from RFC 9700 §4.14.2's "replay means theft" signal), bounded to these windows,
   traded against the false logout of a slow refresh's stragglers. The journal is
   dropped when the session presents a token outside it, when lukk refuses one of its tokens outright, and
-  when the session is logged out or replaced; a throttle or an outage keeps it. One limit is accepted: if
-  the response carrying a pair is lost (a navigation aborts it) and the link's window closes first, the
-  browser's replay of the consumed token revokes the session — the same exposure as any rotation whose
-  response is lost. **The journal is per process**: behind a multi-instance BFF without sticky sessions,
+  when the session is logged out or replaced; a throttle or an outage keeps it. A response the browser has
+  already gone from when it is about to leave (a navigation aborted the request, the tab closed) takes
+  nothing, at every delivery point — the auth proxy's `/refresh`, its 401 retry and step-up capture, the
+  app-API proxy and the end of an SSR render — so the link stays held. One limit is accepted: if the
+  response is lost AFTER it left and the link's window closes first, the browser's replay of the consumed
+  token revokes the session — the same exposure as any rotation whose response is lost. **The journal is per process**: behind a multi-instance BFF without sticky sessions,
   a next request that reaches another instance replays the old token, and only lukk's grace window
   (`LUKK_GRACE`, 30 s by default) keeps that from revoking the session. Use sticky sessions there, or
   raise the grace window if your lukk can be slow to rotate.

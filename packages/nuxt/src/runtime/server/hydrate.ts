@@ -9,7 +9,7 @@ import { logoutNoted } from './logout-note'
 import { revokeDroppedSession } from './revoke-dropped'
 import { readSealedSessionWithId, sessionCookie, sessionSeal } from './sealed-session'
 import { warnIfSessionTooLarge } from './session-size'
-import { currentPair, refreshOnce, type TokenSession } from './refresh'
+import { deliverPair, refreshOnce, type TokenSession } from './refresh'
 
 interface LukkServerConfig {
   sessionPassword?: string
@@ -112,7 +112,7 @@ export async function resolveHydrationAccess(event: H3Event): Promise<string | n
     // second compares — and revokes — what the first sealed.
     let sealedPair = pair
     remember(event, sessionKey(session), name, () => revokeDroppedSession(event, sealedPair, baseURL, visitorIp(event, clientIpHeader)), async () => {
-      const newest = currentPair(sessionKey(session), sealedPair)
+      const newest = deliverPair(event, sessionKey(session), sealedPair)
       // Moved past it, and the links that led on have expired: not this cookie at all.
       if (!newest) return withholdSessionCookie(event.node.res, name)
       if (newest === sealedPair) return
