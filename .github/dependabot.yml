@@ -38,6 +38,25 @@ updates:
       # when all three can run on 7 — watch microsoft/TypeScript#63703 for the 7.1 API.
       - dependency-name: typescript
         update-types: ['version-update:semver-major']
+      # h3 2 is not ours to take: Nuxt 3 and 4 both run Nitro on h3 v1, and the module's server
+      # handlers are typed against h3 1 (`event.node`, `getRequestHeader`, ...). The h3 the module
+      # declares must be the one the host app's Nitro hands it, so a bump here alone only breaks
+      # typecheck (#70: `event.node` is possibly undefined under h3 2's types). Drop this entry when
+      # the supported Nuxt range moves to an h3 2 Nitro, and port the handlers in that same change.
+      - dependency-name: h3
+        update-types: ['version-update:semver-major']
+      # @nuxt/module-builder 1.x changes what we PUBLISH, so it is held until the build is ported:
+      #   - types.d.mts now re-exports LUKK_BFF_PREFIX / LUKK_SESSION_COOKIE from
+      #     '../dist/runtime/shared.js', which scripts/fix-type-exports.mjs does not match — the
+      #     `type` modifiers survive and a consumer's value import fails with TS1362 again;
+      #   - the CJS stub (module.cjs) and the .d.ts twins (module.d.ts, types.d.ts) are gone;
+      #   - locally it cannot build at all from a path containing a space (it resolves runtime
+      #     imports through a percent-encoded file: URL and fails ERR_MODULE_NOT_FOUND).
+      # The runtime/ files and module.d.mts came out byte-identical, so the port is small: teach
+      # fix-type-exports the new specifier (with a test), decide on the dropped stubs, and diff
+      # `pnpm build` output before and after. Drop this entry in that change.
+      - dependency-name: '@nuxt/module-builder'
+        update-types: ['version-update:semver-major']
 
   - package-ecosystem: github-actions
     directory: /
