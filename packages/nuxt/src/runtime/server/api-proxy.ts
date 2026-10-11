@@ -17,6 +17,9 @@ import { deliverPair, holdHead, refreshOnce, type TokenSession } from './refresh
  * Security (SSRF/CSRF containment, header stripping) is documented in
  * docs/transport-modes.md.
  */
+/** The longest request path (as sent, query aside) this proxy judges and forwards — see the check below. */
+const MAX_PATH_LENGTH = 8 * 1024
+
 /** RFC 9110 §7.6.1 connection-specific response fields, which end at this hop. */
 const HOP_BY_HOP_RESPONSE = new Set(['connection', 'keep-alive', 'proxy-authenticate', 'proxy-connection', 'trailer', 'transfer-encoding', 'upgrade'])
 
@@ -61,6 +64,15 @@ export default defineEventHandler(async (event) => {
   const queryAt = raw.indexOf('?')
   const query = queryAt === -1 ? '' : raw.slice(queryAt)
   const path = event.path.slice(0, event.path.length - query.length)
+
+  // Bounded before anything reads it: `reachesLukk` judges the path on several rounds of decoding, in time linear
+  // in its length — linear, but tens of milliseconds at Node's 16 KiB header limit, for a request no session gates.
+  // Measured as SENT, escapes and all, since that is what the judging works through. 8 KiB is the request line nginx
+  // (`large_client_header_buffers`) and Apache (`LimitRequestLine`) accept by default: no app route lies past it.
+  if (raw.length - query.length > MAX_PATH_LENGTH) {
+    setResponseStatus(event, 414)
+    return { message: 'URI too long.' }
+  }
 
   // The lukk BFF routes belong to the other proxy.
   if (path === LUKK_BFF_PREFIX || path.startsWith(`${LUKK_BFF_PREFIX}/`)) {

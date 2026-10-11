@@ -60,7 +60,11 @@ function routedPath(pathname: string): string {
   // Repeated slashes collapse too, last: Laravel alone never routes `//auth/login`, but a hop in front of
   // it that merges slashes (nginx's default `merge_slashes on`) hands it `/auth/login`. Reading them as
   // distinct let `/api//auth/login` past the app-API proxy and `/_lukk//refresh` past the refresh rule.
-  return decodeAscii(pathname.replace(/\/+$/, '')).replace(/\/{2,}/g, '/')
+  //
+  // The trailing run is trimmed from where it STARTS (the lookbehind): `/\/+$/` alone tried a match from every slash
+  // of every run and rescanned the rest of the run each time — quadratic, seconds of CPU for one request holding a
+  // few thousand slashes before its last segment.
+  return decodeAscii(pathname.replace(/(?<!\/)\/+$/, '')).replace(/\/{2,}/g, '/')
 }
 
 /** One round of percent-decoding, ASCII escapes only — see `routedPath` for why that is enough. */
@@ -78,8 +82,11 @@ function decodeAscii(value: string): string {
  * while comparing unequal to `'/refresh'` as strings.
  */
 export function routeWithin(target: string, base: string): string | null {
-  const root = routedPath(new URL(base).pathname)
-  const path = routedPath(new URL(target).pathname)
+  return routeUnder(routedPath(new URL(target).pathname), routedPath(new URL(base).pathname))
+}
+
+/** `routeWithin` on a target and a base already read as `routedPath` reads them (`path`, `root`). */
+function routeUnder(path: string, root: string): string | null {
   if (path !== root && !path.startsWith(`${root}/`)) return null
   return path.slice(root.length) || '/'
 }
@@ -121,20 +128,38 @@ export function reachesLukk(target: string, base: string): boolean {
   // lukk's wherever the app is mounted once it starts with the segment the base ends in (`cutsToLukk`).
   const { origin: baseOrigin, pathname: basePath } = new URL(base)
   const baseReadings = [...scriptReadings(basePath), ...scriptPrefixes(basePath)]
-  const bases = baseReadings.map(path => `${baseOrigin}${path}`)
+  // Parsed once, lowercased as `reaches` compares, and handed over together: what a reading decodes to does not
+  // depend on the base, so it is worked out once per reading rather than once per reading of the base.
+  const bases = baseReadings.map(path => new URL(`${baseOrigin}${path}`.toLowerCase()))
   const names = lastSegments(baseReadings)
   const { origin, pathname } = new URL(target)
   let path = pathname
   // Stryker disable next-line EqualityOperator: equivalent — a script only a fifth decoding reveals sits in a path still decoding after four rounds, which `reaches` refuses on the first round's reading of the path itself. (`round--` never ends: that timeout is a synchronous loop, the detection.)
   for (let round = 0; round < DECODING_ROUNDS; round++) {
+    // Each `.php` is a reading, and each reading is judged in full — so the readings must stay few, or the cost is
+    // quadratic in the path: an unauthenticated `GET /api/` + `a.php%3F` repeated to 16 KB took seconds of CPU
+    // here, before any session was read. A path naming more scripts than any deploy has is refused instead.
+    if (scriptCount(path) > MAX_SCRIPTS) return true
     for (const reading of scriptReadings(path)) {
-      if (bases.some(lukk => reaches(`${origin}${reading}`, lukk))) return true
+      if (reaches(`${origin}${reading}`, bases)) return true
     }
     if (cutsToLukk(path, names)) return true
     path = decodeAscii(path)
   }
   return false
 }
+
+/**
+ * How many `.php` one round's string names, as `scriptReadings` finds them — one reading each. Past
+ * `MAX_SCRIPTS`, `reachesLukk` refuses the path rather than judge that many readings: no app path names more
+ * front controllers than it, and so no legitimate request is turned away by it.
+ */
+function scriptCount(path: string): number {
+  return path.replace(/[\t\n\r]/g, '').split(/\.php/i).length - 1
+}
+
+/** The most `.php` a path may name in any round of decoding before `reachesLukk` refuses it unjudged. */
+const MAX_SCRIPTS = 4
 
 /**
  * The ways a PHP front controller could read `path` (one round's string): split on `/` and `\` (a decoding
@@ -183,10 +208,11 @@ function scriptPrefixes(path: string): string[] {
  * Taken from the string as it stands (control characters aside, as in `scriptReadings`), because the cut counts
  * the characters Symfony was HANDED, escapes and all.
  *
- * Read on the string, rather than by judging every suffix the way `reaches` judges a path: that is quadratic in
- * the path — seconds of CPU for one request a few kilobytes long — and decides nothing more. What only DECODES
- * to the segment, or to what ends it, is literal in a later round's string (`reachesLukk` asks on each), and
- * what is encoded past the last round leaves the path still decoding there, which `reaches` refuses on the
+ * Read on the string, in one pass, rather than by judging every suffix the way `reaches` judges a path: that would
+ * be quadratic in the path — seconds of CPU for one request a few kilobytes long — and decide nothing more. (The
+ * readings `scriptReadings` makes ARE each judged in full; it is `MAX_SCRIPTS` that keeps those few.)
+ * What only DECODES to the segment, or to what ends it, is literal in a later round's string (`reachesLukk` asks
+ * on each), and what is encoded past the last round leaves the path still decoding there, which `reaches` refuses on the
  * path itself; a dot segment collapsing in front of the segment leaves the suffix that starts with it. And a
  * suffix starting anywhere else is not lukk's: Symfony hands what it cut straight to the router, which matches
  * it as written — `/index.php/a..%2Fx` cut to `/..%2Fx` is no traversal there.
@@ -209,9 +235,8 @@ function lastSegments(readings: string[]): string[] {
   return [...new Set(names.flatMap(name => [name, decodeAscii(name)]))]
 }
 
-/** `reachesLukk` for one reading of the path — the front controller aside. */
-function reaches(target: string, base: string): boolean {
-  const b = new URL(base.toLowerCase())
+/** `reachesLukk` for one reading of the path — the front controller aside — against every reading of the base. */
+function reaches(target: string, bases: URL[]): boolean {
   let t = new URL(target.toLowerCase())
 
   // And not after a further decoding, either. The URL is forwarded as written, and lukk's router decodes
@@ -237,8 +262,14 @@ function reaches(target: string, base: string): boolean {
   // separator (`a%2F..%2Fb`, `a%5c..%5cb` — h3 leaves `%2F` encoded, so the parser saw one segment). Both
   // are traversal-shaped, and no app path is written that way on purpose. Unless the path cannot matter — lukk at the ROOT owns every path or none: of its own host
   // the loop below refuses everything anyway, and of another host nothing here reaches it.
-  if (routedPath(b.pathname) !== '' && revealsDotSegment(t.pathname)) return true
-  const lands = (url: URL) => routeWithin(url.href, b.href) !== null && (routedPath(b.pathname) !== '' || url.origin === b.origin)
+  const roots = bases.map(b => ({ origin: b.origin, root: routedPath(b.pathname) }))
+  if (roots.some(({ root }) => root !== '') && revealsDotSegment(t.pathname)) return true
+  // On the parsed URLs as they stand, never re-parsed from their `href`s: the path can be kilobytes long, and this
+  // runs for every reading of it on every round.
+  const lands = (url: URL) => {
+    const path = routedPath(url.pathname)
+    return roots.some(({ origin, root }) => routeUnder(path, root) !== null && (root !== '' || url.origin === origin))
+  }
   for (let round = 0; round < DECODING_ROUNDS; round++) {
     // lukk's own reading. Defence in depth since the dot-segment refusal above: whatever it catches, the cut
     // reading below catches too — that one decodes once more, which never strips a decoded `/auth/` prefix,
@@ -273,7 +304,10 @@ function revealsDotSegment(pathname: string): boolean {
     // Without the tab, LF and CR the URL parser strips from anywhere in a URL before it collapses dots —
     // `.%09.` is `..` to every hop that re-parses. (Stripped from what is SPLIT only, so the next round
     // still decodes what was actually there.)
-    if (path.replace(/[\t\n\r]/g, '').split(/[/\\]/).some(segment => segment === '.' || segment === '..')) return true
+    // (Matched in place rather than split into segments: this runs for every reading on every round, and a path can
+    // hold thousands of empty ones. A pathname starts with `/`, and decoding never touches it, so every segment
+    // follows a separator.)
+    if (/[/\\]\.\.?(?:[/\\]|$)/.test(path.replace(/[\t\n\r]/g, ''))) return true
   }
   return false
 }

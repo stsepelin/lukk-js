@@ -290,8 +290,11 @@ replacing its hook, and keep authenticated calls on the API's origin.
   and, where the path names a script without starting with its path, as Symfony's last resort cuts it: by
   the script path's LENGTH, whatever those characters are (`/xx/index.php/abc/auth/login` is `/auth/login`
   to an app whose script is `/public/index.php`). This side cannot know that length, so **a path that names
-  a `.php` anywhere and holds lukk's last base segment (`auth`, followed by `/`, `?`, `#` or the end)
-  anywhere is refused** — `/api/oauth/callback.php` included. Paths without `.php` are judged as before.
+  a `.php` anywhere and holds lukk's last base segment (`auth`, followed by `/`, `\`, `?`, `#` or the end)
+  anywhere is refused** — `/api/oauth/callback.php` included. So is **a path naming more than four `.php`**
+  (in any decoding round), whatever it holds: each is a reading judged in full, so their number is bounded
+  rather than the cost being quadratic in the path. Paths without `.php` are judged as before. A request
+  path longer than **8 KiB** as sent (query aside) is answered `414` — nginx's and Apache's default request-line limit.
   A `baseURL` that names its script in a subdirectory (`https://host/public/index.php/auth`) is read as the
   app routes it, so `/api/auth/login` is refused there too. It cannot see lukk's extra guard mounts
   (`lukk.guards.*.path`, e.g. `admin/auth`) on the same host: keep them off `api.target`'s host, or out of

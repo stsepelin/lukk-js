@@ -482,8 +482,10 @@ export function useLukkAuth(): LukkAuth {
       // was not sent again as that one: a 401, but no answer about this visitor. Read as one, it signed the
       // tab out — and forgot the subject, so should the resync the same refresh started fail too, nothing
       // ever noticed the switch again. Asked again, now as the account the session holds; once only — a
-      // session still switching under it is "couldn't tell", and the next refresh's resync sees it.
-      if ((e as LukkError | null)?.reason === SESSION_CHANGED) return askedAgain || loadUser(isCurrent, true)
+      // session still switching under it is "couldn't tell", and the next refresh's resync sees it. And not
+      // at all for a load a sign-in or logout superseded meanwhile: its answer would never be read, so
+      // nothing is sent.
+      if ((e as LukkError | null)?.reason === SESSION_CHANGED) return askedAgain || (isCurrent() && loadUser(isCurrent, true))
       // Only an auth failure means "logged out". A transient 5xx/network error
       // must not flip `loggedIn` and bounce a logged-in user to /login.
       if (!isAuthRejection(e)) return true

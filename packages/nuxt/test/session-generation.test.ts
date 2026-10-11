@@ -1521,6 +1521,22 @@ describe('a user load the session switched accounts under', () => {
     expect(api).toHaveBeenCalledTimes(3) // A's request, the resync's, one more ask
   })
 
+  it('does not ask again for a load a sign-in or logout superseded meanwhile — nothing more is sent', async () => {
+    switchedUnder([() => ({ id: 'B' })])
+    api.mockReset()
+    api.mockImplementationOnce(async () => {
+      restoreState(__test.nuxtApp).epoch++ // a sign-in, here or in another tab, landed while A's request was out
+      throw sessionChanged
+    })
+    api.mockImplementation(async () => ({ id: 'B' }))
+    const auth = useLukkAuth()
+
+    await auth.fetchUser()
+
+    expect(api).toHaveBeenCalledOnce()
+    expect(auth.user.value).toEqual({ id: 'A' }) // the newer load owns the answer
+  })
+
   it('reads a load rejected with nothing at all as "couldn\'t tell", as before', async () => {
     boot()
     useState(USER_KEY, () => null).value = { id: 'A' }

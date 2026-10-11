@@ -87,6 +87,13 @@ describe('routeWithin', () => {
     expect(routeWithin(target, 'https://l.test/auth')).toBe(route)
   })
 
+  it('trims a run of trailing slashes, and judges a long run that does not end the path fast', () => {
+    expect(routeWithin('https://h.test/auth/login///', 'https://h.test/auth//')).toBe('/login')
+    const started = performance.now()
+    expect(routeWithin(`https://h.test/auth/${'/'.repeat(16 * 1024)}x`, 'https://h.test/auth')).toBe('/x')
+    expect(performance.now() - started).toBeLessThan(50)
+  })
+
   it('trims the base the same way', () => {
     expect(routeWithin('https://l.test/auth/login', 'https://l.test/auth/')).toBe('/login')
     expect(routeWithin('https://l.test/auth/login', 'https://l.test/aut%68')).toBe('/login')
@@ -313,6 +320,8 @@ describe('reachesLukk', () => {
     '/x/%252e/../%252e%252e%255cauth/login', // a backslash a decoding round reveals
     '/x/%252E%252E/y', // whatever it would reach — the case of the escape does not matter
     '/x/%252e/y', // a lone `.` too
+    '/x/%252e%252e', // ending the path
+    '/x/%252e', // a lone one ending it
     // A tab, LF or CR a round reveals: the URL parser strips them anywhere before it collapses dots.
     '/x//%252e%252e%2509/auth/login',
     '/x//%252e%252e%250a/auth/login',
@@ -335,6 +344,9 @@ describe('reachesLukk', () => {
 
   it('refuses a revealed dot segment for a non-root lukk on another host too — the path decides there', () => {
     expect(reachesLukk('https://api.test/x/%252e%252e/y', 'http://internal:8000/auth')).toBe(true)
+    // A base whose script reading sits at the root still has one that does not (`/index.php` itself): the path
+    // decides for that one.
+    expect(reachesLukk('https://api.test/x/%252e%252e/y', 'http://internal:8000/index.php')).toBe(true)
   })
 
   it.each(['/search%3Fq', '/files/my%20file.pdf', '/x%2520', '/a;b', '/q/%23tag', '/authors', '//x', '/a%253Fb', '/v1.2/x', '/file.tar.gz', '/.well-known/x', '/x/..y', '/x/.../y', '/x/%252e%252ey'])('lets %s through: no decoding round reveals a whole `.` or `..` segment', (path) => {
@@ -353,6 +365,55 @@ describe('reachesLukk', () => {
     expect(reachesLukk('https://api.test/x%252541', base)).toBe(false)
     // One level deeper is still changing when the rounds run out: no telling where the next lands.
     expect(reachesLukk('https://api.test/x%25252541', base)).toBe(true)
+  })
+
+  describe('a long path, or one naming many scripts', () => {
+    const repeat = (shape: string, length: number) => `/${shape.repeat(Math.ceil(length / shape.length)).slice(0, length)}`
+    const shapes = ['a.php%3F', '.php/', '.php', '.php%2F', '.php%5C', '.php%252F', '.php%25252F', '.php%09/', '.ph%09p/']
+    const bases = ['https://api.test/auth', 'https://api.test/public/index.php/api/v1/auth']
+
+    it.each(bases.flatMap(base => shapes.map(shape => [shape, base])))('refuses 16 KB of %s against %s, and fast', (shape, base) => {
+      // One reading per `.php`, each judged in full on every decoding round, made the cost quadratic in the path:
+      // an unauthenticated `GET /api/` + `a.php%3F` repeated to 16 KB cost seconds of CPU before any session was read.
+      const target = `https://api.test${repeat(shape, 16 * 1024)}`
+      const started = performance.now()
+      expect(reachesLukk(target, base)).toBe(true)
+      expect(performance.now() - started).toBeLessThan(50)
+    })
+
+    it.each([
+      ['/a.php/b.php/c.php/d.php/x', false],
+      ['/a.php/b.php/c.php/d.php/e.php/x', true],
+      ['/a.php.php.php.php.php', true],
+      ['/a.PHP/b.php/c.php/d.php/e.ph%09p', true],
+      // Only a further decoding round names the fifth.
+      ['/a.php/b.php/c.php/d.php/e%252ephp', true],
+    ])('reads %s as reaching lukk: %s — only past four scripts in one round', (path, refused) => {
+      // Four is past any front controller a real path names, and keeps the readings few, whatever the length.
+      expect(reachesLukk(`https://api.test${path}`, 'https://api.test/auth')).toBe(refused)
+    })
+
+    it.each(['/legacy/report.php', '/api/index.php/users', '/download.php?x=1', '/files/my%20file.pdf'])('leaves %s as it was', (path) => {
+      expect(reachesLukk(`https://api.test${path}`, 'https://api.test/auth')).toBe(false)
+    })
+
+    it.each(['', '.php%25252F'.repeat(4), 'a.php%3F'.repeat(4)])('judges a long run of slashes that does not end the path fast, after %s', (head) => {
+      // Trimming trailing slashes with `/\/+$/` rescanned the run from each slash in it: quadratic, 3.4 s for
+      // `GET /api/` + 16 K slashes + `x`, with or without a script named in front.
+      // Linear now, and judged here at the 8 KiB the app-API proxy lets through.
+      for (const run of ['/'.repeat(8 * 1024), '%2F'.repeat(8 * 1024 / 3)]) {
+        const started = performance.now()
+        expect(reachesLukk(`https://api.test/${head}${run}x`, 'https://api.test/auth')).toBe(false)
+        // Was 0.85 s (`/` run, no script) to seconds; tens of ms now, so the budget only has to tell the two apart.
+        expect(performance.now() - started).toBeLessThan(150)
+      }
+    })
+
+    it('leaves a long path naming no script as it was, and judges it fast', () => {
+      const started = performance.now()
+      expect(reachesLukk(`https://api.test/users/${'a/'.repeat(8 * 1024)}x.php`, 'https://api.test/auth')).toBe(false)
+      expect(performance.now() - started).toBeLessThan(50)
+    })
   })
 })
 

@@ -217,6 +217,9 @@ export interface AccountExport {
     last_rotated_at: string | null
     revoked_at: string | null
     expires_at: string | null
+    /** How the session signed in (`pwd`, `otp`, `mfa`, …), and when. Sent by lukk releases after 0.6.0. */
+    amr?: string[] | null
+    authenticated_at?: string | null
   }>
   /**
    * Each passkey — every field erasure destroys that describes it, never the COSE public key or the sign
@@ -232,7 +235,16 @@ export interface AccountExport {
     aaguid?: string | null
     transports?: string[] | null
   }>
-  two_factor: { enabled: boolean, confirmed_at: string | null }
+  two_factor: {
+    enabled: boolean
+    confirmed_at: string | null
+    /** Set up but never confirmed. Sent by lukk releases after 0.6.0. */
+    pending?: boolean
+    /** Recovery codes still unspent, or `null` when the user model cannot count them. After 0.6.0. */
+    recovery_codes_remaining?: number | null
+  }
+  /** A password reset requested and not yet used — when, never the token. Sent after 0.6.0. */
+  password_reset?: { requested_at: string | null } | null
   /**
    * The account-lockout counters held against this account — the rows erasure also removes. Sent by
    * lukk releases after 0.6.0 (absent before). Timestamps are ISO-8601 strings, like `generated_at`.
