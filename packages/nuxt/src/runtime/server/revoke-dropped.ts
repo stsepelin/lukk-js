@@ -1,5 +1,5 @@
 import type { H3Event } from 'h3'
-import { resolveTarget } from './proxy-utils'
+import { fetchUpstream, resolveTarget } from './proxy-utils'
 
 /**
  * End a session whose rotated tokens this server is about to throw away.
@@ -28,6 +28,10 @@ export function revokeDroppedSession(event: H3Event, tokens: { access?: string, 
   if (clientIp) headers['X-Forwarded-For'] = clientIp
   const body = JSON.stringify(tokens.refresh ? { refresh_token: tokens.refresh } : {})
 
-  const revocation = fetch(target, { method: 'POST', headers, body, redirect: 'manual' }).then(() => {}, () => {})
+  // Under the upstream deadline: `waitUntil` keeps the invocation alive for as long as this runs, so a
+  // lukk that never answers must not hold it open. Nothing is rotated here, so giving up loses nothing
+  // a retry could not do. The body is not wanted — cancelled, so the connection is released.
+  // Stryker disable next-line OptionalChaining: equivalent — a null body (a 204) makes the mutant throw inside the reader, and the rejection is swallowed below exactly as the resolution is.
+  const revocation = fetchUpstream(target, { method: 'POST', headers, body, redirect: 'manual' }, async res => res.body?.cancel()).then(() => {}, () => {})
   ;(event as { waitUntil?: (promise: Promise<unknown>) => void }).waitUntil?.(revocation)
 }

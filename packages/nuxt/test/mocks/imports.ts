@@ -1,6 +1,6 @@
 /** A lightweight stand-in for Nuxt's `#imports`, so runtime code can be unit-
  *  tested without booting Nuxt. Configure per-test via the `__test` handle. */
-import { computed, reactive, ref, shallowRef, toRaw, watch, type Ref } from 'vue'
+import { computed, effectScope, reactive, ref, shallowRef, toRaw, watch, type Ref } from 'vue'
 
 const states = new Map<string, Ref<unknown>>()
 
@@ -67,4 +67,4 @@ export const useStorage = (mount = '') => {
     getMount: (key: string) => ({ base: __test.storageMounts.has(key.replace(/:$/, '')) ? key : '' }),
   }
 }
-export { computed, reactive, ref, shallowRef, toRaw, watch }
+export { computed, effectScope, reactive, ref, shallowRef, toRaw, watch }

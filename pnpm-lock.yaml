@@ -83,6 +83,9 @@ importers:
       defu:
         specifier: ^6.1.4
         version: 6.1.7
+      h3:
+        specifier: ^1.15.0
+        version: 1.15.11
       lukk-core:
         specifier: workspace:*
         version: link:../core
@@ -108,9 +111,6 @@ importers:
       '@vitest/coverage-v8':
         specifier: ^3.2.7
         version: 3.2.7(vitest@3.2.7(@types/debug@4.1.13)(@types/node@22.20.4)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.50.0)(yaml@2.9.0))
-      h3:
-        specifier: ^1.15.11
-        version: 1.15.11
       nuxt:
         specifier: ^4.5.2
         version: 4.5.2(@babel/plugin-proposal-decorators@8.0.2(@babel/core@8.0.5))(@babel/plugin-syntax-jsx@8.0.1(@babel/core@8.0.5))(@babel/plugin-syntax-typescript@8.0.3(@babel/core@8.0.5))(@oxc-project/types@0.146.0)(@parcel/watcher@2.5.6)(@types/node@22.20.4)(@vue/compiler-sfc@3.5.41)(cac@6.7.14)(commander@14.0.3)(db0@0.3.4)(esbuild@0.28.2)(eslint@10.11.0(jiti@2.7.0))(ioredis@5.11.1)(lightningcss@1.33.0)(magicast@0.5.4)(optionator@0.9.4)(oxc-parser@0.143.0)(rolldown@1.2.5)(rollup-plugin-visualizer@7.1.1(rolldown@1.2.5)(rollup@3.30.0))(rollup@3.30.0)(terser@5.50.0)(typescript@5.9.3)(vite@8.2.2(@types/node@22.20.4)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.50.0)(yaml@2.9.0))(vue-tsc@3.3.11(typescript@5.9.3))(yaml@2.9.0)
@@ -7577,7 +7577,7 @@ snapshots:
       detect-libc: 2.1.2
       is-glob: 4.0.3
       node-addon-api: 7.1.1
-      picomatch: 4.0.5
+      picomatch: 4.0.7
     optionalDependencies:
       '@parcel/watcher-android-arm64': 2.5.6
       '@parcel/watcher-darwin-arm64': 2.5.6

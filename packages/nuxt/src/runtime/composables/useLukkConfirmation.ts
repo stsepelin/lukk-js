@@ -1,6 +1,8 @@
 import type { ComputedRef, Ref } from 'vue'
 import { computed, useNuxtApp, useState, watch } from '#imports'
-import { CONFIRM_REQUIRED_KEY, CONFIRMATION_KEY, CONFIRMED_KEY } from '../keys'
+import { CONFIRM_REQUIRED_KEY, CONFIRMED_KEY } from '../keys'
+import type { LukkModeClient } from '../shared'
+import { useLukkSecret } from '../utils/secrets'
 
 /**
  * Declared rather than inferred: the module build cannot resolve `#imports`, so an inferred return type
@@ -12,8 +14,13 @@ export interface LukkConfirmation {
   confirmed: ComputedRef<boolean>
   required: Readonly<Ref<boolean>>
   token: Readonly<Ref<string | null>>
+  /**
+   * Re-confirm with the account password. Rejects with a `422` on `password` for a wrong password — and
+   * (lukk 0.7) for an account with a second factor when this session is not a recent multi-factor one:
+   * confirm with a user-verifying passkey there, or sign in again with the second factor.
+   */
   confirmPassword: (password: string) => Promise<void>
-  record: (result: { confirmation_token?: string }) => void
+  record: (result: { confirmation_token?: string } | { ok: true }) => void
   clear: () => void
   withConfirmation: <T>(action: () => Promise<T>) => Promise<T>
   cancel: () => void
@@ -35,17 +42,29 @@ export interface LukkConfirmation {
  *  - **Per-page (section):** gate the route with the `lukk-confirmed` middleware.
  */
 export function useLukkConfirmation(): LukkConfirmation {
-  const { $lukk } = useNuxtApp()
-  const token = useState<string | null>(CONFIRMATION_KEY, () => null)
+  const nuxtApp = useNuxtApp()
+  const $lukk: LukkModeClient = nuxtApp.$lukk
+  const token = useLukkSecret('confirmation')
   const confirmedFlag = useState<boolean>(CONFIRMED_KEY, () => false)
   const confirmed = computed(() => confirmedFlag.value)
   // True while a `withConfirmation` action is waiting on a fresh step-up — bind your modal to it.
   const required = useState<boolean>(CONFIRM_REQUIRED_KEY, () => false)
 
-  /** Re-confirm with the account password. */
-  /** The error that made a step-up unearnable, so the caller sees it instead of "cancelled". */
-  let unearnable: unknown = null
+  // The error that made a step-up unearnable, so the caller sees it instead of "cancelled". Shared by every
+  // instance of this composable in the app: the action waiting is usually a PAGE's `withConfirmation()`,
+  // and the 403 arrives through the MODAL's own `confirmPassword()` — held per instance, it never reached
+  // the waiter. On the app rather than in `useState`: the app is per request on the server, so nothing
+  // leaks between visitors, and unlike `useState` it is never serialised into the payload nor wrapped in a
+  // reactive proxy — the caller gets the very error lukk answered with.
+  // `earned` is replaced by a fresh object on every confirmation recorded in this app, so a 423 can tell
+  // whether one landed after the request it answers was sent.
+  const stepUp = ((nuxtApp as { _lukkStepUp?: { unearnable?: unknown, earned?: object } })._lukkStepUp ??= {})
 
+  /**
+   * Re-confirm with the account password. A `422` on `password` is a wrong password, or (lukk 0.7) an
+   * account whose second factor this session does not meet — the password cannot raise it; a user-verifying
+   * passkey (`useLukkPasskeys().confirm()`) or a fresh multi-factor sign-in can.
+   */
   async function confirmPassword(password: string): Promise<void> {
     try {
       record(await $lukk.confirmPassword(password))
@@ -66,27 +85,30 @@ export function useLukkConfirmation(): LukkConfirmation {
    * original call fails with a real error instead of hanging.
    */
   function abandonIfUnearnable(error: unknown): void {
-    if ((error as { status?: number }).status !== 403) return
+    if ((error as { status?: number } | null)?.status !== 403) return
 
     // Stashed so `confirmedOrCancelled` can reject with the REAL error. Rejecting with a synthetic
     // "confirmation cancelled" told the caller the user dismissed a modal they never saw, and threw
     // away the 403 that actually explains it — now the expected outcome for any machine token
     // holding `lukk.account` but not `lukk.account.delete`.
-    unearnable = error
+    stepUp.unearnable = error
     required.value = false
   }
 
   /**
    * Record a confirmation result: store the token when present (direct mode) and
-   * flip `confirmed`. Shared with the passkey step-up path.
+   * flip `confirmed`. Shared with the passkey step-up path. In bff mode the proxy keeps the token and the
+   * result is its acknowledgement, `{ ok: true }`.
    */
-  function record(result: { confirmation_token?: string }): void {
+  function record(result: { confirmation_token?: string } | { ok: true }): void {
+    const { confirmation_token: issued } = result as { confirmation_token?: string }
     // Client-only, both halves: a step-up is earned by a request the browser made, and a `true` serialised
     // into `__NUXT_DATA__` would claim one for whoever the render is later handed to.
     // Stryker disable next-line ConditionalExpression: the mutation run compiles the client, where this is `true` already; the server half is pinned in test/server-env/confirmation.test.ts.
     if (import.meta.client) {
-      if (result.confirmation_token) token.value = result.confirmation_token
+      if (issued) token.value = issued
       confirmedFlag.value = true
+      stepUp.earned = {}
     }
   }
 
@@ -105,17 +127,22 @@ export function useLukkConfirmation(): LukkConfirmation {
    * middleware instead.
    */
   async function withConfirmation<T>(action: () => Promise<T>): Promise<T> {
+    const earnedBefore = stepUp.earned
     try {
       return await action()
     }
     catch (error) {
-      if ((error as { status?: number }).status !== 423) throw error
+      if ((error as { status?: number } | null)?.status !== 423) throw error
+      // A confirmation landed while this request was out — the 423 answers the request, not that
+      // confirmation. Clearing it wiped the step-up just earned (another action's modal) and asked again:
+      // retry once with it instead.
+      if (stepUp.earned !== earnedBefore) return action()
       // The server rejected our confirmation → it's missing or stale; earn a fresh one.
       clear()
-      // Reset per CYCLE, not per composable. `unearnable` is only ever set, so once one action hit
-      // a 403 every later cancellation on the same instance rejected with that stale 403 —
+      // Reset per CYCLE. `unearnable` is otherwise only ever set, so once one action hit
+      // a 403 every later cancellation rejected with that stale 403 —
       // reporting "this token can never earn a step-up" for an operation the user simply dismissed.
-      unearnable = null
+      stepUp.unearnable = null
       required.value = true
       try {
         await confirmedOrCancelled()
@@ -138,7 +165,7 @@ export function useLukkConfirmation(): LukkConfirmation {
           return
         }
         // Stryker disable next-line ConditionalExpression: equivalent — `confirmed` is cleared before this watcher starts and it stops the moment `confirmed` turns true, so while it is alive the only change it can see with `ok` false is `required` going false.
-        if (!req) { stop(); reject(unearnable ?? new Error('lukk: confirmation cancelled')) }
+        if (!req) { stop(); reject(stepUp.unearnable ?? new Error('lukk: confirmation cancelled')) }
       })
     })
   }

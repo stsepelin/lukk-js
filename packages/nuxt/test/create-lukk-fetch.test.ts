@@ -1,5 +1,6 @@
 import type { $Fetch, FetchOptions } from 'ofetch'
 import { describe, expect, it, vi } from 'vitest'
+import { SESSION_CHANGED } from 'lukk-core'
 import { createLukkFetch, createRequestFetch, type LukkFetchDeps } from '../src/runtime/utils/create-lukk-fetch'
 
 interface FakeResponse { status: number, type?: string, statusText?: string, headers: Headers, _data?: unknown }
@@ -25,6 +26,8 @@ function build(overrides: Partial<LukkFetchDeps> = {}) {
     canRefresh: false,
     getCookieHeader: () => undefined,
     getBearer: () => null,
+    getConfirmation: () => null,
+    confirmationHeader: 'X-Lukk-Confirmation',
     refresh: vi.fn(async () => ({ access_token: 'new' })),
     onRedirect: vi.fn(),
     fetchImpl,
@@ -336,9 +339,38 @@ describe('createLukkFetch — onResponse redirects', () => {
 })
 
 describe('createLukkFetch — onResponseError', () => {
-  const errCtx = (status: number, data: unknown, retry: unknown = 0) => ({
+  const errCtx = (status: number, data: unknown, retry: unknown = 0, request = '/me', headers = new Headers()) => ({
+    request,
     response: { status, statusText: 'Err', _data: data, headers: new Headers() },
-    options: { retry },
+    options: { retry, headers },
+  })
+  const jwt = (sub: string) => `h.${Buffer.from(JSON.stringify({ sub })).toString('base64url')}.s`
+
+  it('does not replay a request made for one account as another after renewing — it rejects, distinguishably', async () => {
+    // Another tab signed in as B: renewed from the shared cookie, the token is B's, and ofetch's retry ran
+    // A's request as B.
+    let bearer = jwt('A')
+    const { opts, deps } = build({ canRefresh: true, getBearer: () => bearer, refresh: vi.fn(async () => { bearer = jwt('B'); return { access_token: bearer } }) })
+    await expect(opts.onResponseError(errCtx(401, {}, 1, '/me', new Headers({ authorization: `Bearer ${jwt('A')}` })))).rejects.toMatchObject({ status: 401, reason: SESSION_CHANGED, message: expect.stringContaining('another account') })
+    expect(deps.refresh).toHaveBeenCalledOnce()
+  })
+
+  it('retries as before for the same account, or a token without a subject', async () => {
+    // Sent as A and renewed as A; opaque tokens; sent with no bearer at all; renewed to a token without a subject.
+    for (const [before, after] of [[jwt('A'), jwt('A')], ['opaque', 'opaque-2'], [null, jwt('B')], [jwt('A'), 'opaque-2']] as const) {
+      let bearer: string = after
+      const { opts } = build({ canRefresh: true, getBearer: () => bearer, refresh: vi.fn(async () => { bearer = after; return { access_token: after } }) })
+      await expect(opts.onResponseError(errCtx(401, {}, 1, '/me', new Headers(before ? { authorization: `Bearer ${before}` } : {})))).resolves.toBeUndefined()
+    }
+  })
+
+  it('never renews for a 401 from a foreign origin — no credentials went there', async () => {
+    const { opts, deps } = build({ canRefresh: true })
+    await expect(opts.onResponseError(errCtx(401, {}, 1, 'https://elsewhere.test/hook'))).rejects.toMatchObject({ status: 401 })
+    expect(deps.refresh).not.toHaveBeenCalled()
+    // A Request object, as ofetch passes one through: its URL decides the same.
+    await expect(opts.onResponseError({ ...errCtx(401, {}, 1), request: new Request('https://elsewhere.test/hook') } as never)).rejects.toMatchObject({ status: 401 })
+    expect(deps.refresh).not.toHaveBeenCalled()
   })
 
   it('rejects with a typed LukkError (message + validation bag) on a non-retryable 4xx', async () => {
@@ -406,6 +438,16 @@ describe('createRequestFetch (server-BFF)', () => {
     expect((requestFetch.mock.calls[1] as [string, FetchOptions])[1].baseURL).toBe('/api')
   })
 
+  it('marks its requests as a render\'s own, so the app-API proxy never rotates for them', async () => {
+    const requestFetch = vi.fn(async () => ({ ok: true }))
+    const { deps } = build({ baseURL: '/api' })
+    await createRequestFetch(requestFetch, deps)('/me', { headers: { 'x-app': '1' } })
+
+    const headers = new Headers((requestFetch.mock.calls[0] as [string, FetchOptions])[1].headers as HeadersInit)
+    expect(headers.get('x-lukk-ssr')).toBe('1')
+    expect(headers.get('x-app')).toBe('1')
+  })
+
   it('blanks the inbound cookie for a target that is not the API — the transport attaches it before our hook', async () => {
     // Nuxt's request-aware fetch is h3's `fetchWithEvent`, which merges the visitor's whole inbound
     // `Cookie` into every request — absolute targets included — and does it BEFORE ofetch runs
@@ -422,13 +464,95 @@ describe('createRequestFetch (server-BFF)', () => {
   })
 
   it('leaves the request-aware transport to carry the cookie for the API itself', async () => {
+    // Was an ABSOLUTE `https://api.example.com` base, asserting the visitor's cookie went there: that is
+    // the defect of sending every cookie the app's origin holds to another host. The API this transport
+    // serves is the relative proxy mount; an absolute API base is now refused the cookie (below).
     const requestFetch = vi.fn(async () => ({ ok: true }))
-    const { deps } = build({ baseURL: 'https://api.example.com', isServer: true })
+    const { deps } = build({ baseURL: '/api', isServer: true })
     const api = createRequestFetch(requestFetch, deps)
 
-    await api('https://api.example.com/me')
+    await api('/me')
 
     const [, opts] = requestFetch.mock.calls[0] as [string, FetchOptions]
     expect((opts.headers as Record<string, string> | undefined)?.cookie).toBeUndefined()
+  })
+
+  it('blanks it for an absolute API on another host, too', async () => {
+    const requestFetch = vi.fn(async () => ({ ok: true }))
+    const { deps } = build({ baseURL: 'https://api.example.com', isServer: true })
+
+    await createRequestFetch(requestFetch, deps)('https://api.example.com/me')
+
+    expect(((requestFetch.mock.calls[0] as [string, FetchOptions])[1].headers as Record<string, string>).cookie).toBe('')
+  })
+
+  it('blanks it whatever shape the caller\'s headers take — a Headers instance would spread to nothing', async () => {
+    const requestFetch = vi.fn(async () => ({ ok: true }))
+    const { deps } = build({ baseURL: '/api', isServer: true })
+
+    await createRequestFetch(requestFetch, deps)('https://collector.example/x', { headers: new Headers({ 'x-trace': '1' }) })
+
+    expect((requestFetch.mock.calls[0] as [string, FetchOptions])[1].headers).toEqual({ 'x-trace': '1', 'cookie': '', 'x-lukk-ssr': '' })
+  })
+
+  it('judges a relative path by the per-call base it will actually be sent to', async () => {
+    const requestFetch = vi.fn(async () => ({ ok: true }))
+    const { deps } = build({ baseURL: '/api', isServer: true })
+
+    await createRequestFetch(requestFetch, deps)('/x', { baseURL: 'https://collector.example' })
+
+    expect(((requestFetch.mock.calls[0] as [string, FetchOptions])[1].headers as Record<string, string>).cookie).toBe('')
+  })
+
+  it('judges a Request by its URL instead of throwing during SSR only', async () => {
+    const requestFetch = vi.fn(async () => ({ ok: true }))
+    const { deps } = build({ baseURL: '/api', isServer: true })
+    const api = createRequestFetch(requestFetch, deps)
+
+    await api(new Request('https://collector.example/x'))
+
+    const [req, opts] = requestFetch.mock.calls[0] as [Request, FetchOptions]
+    expect(req).toBeInstanceOf(Request)
+    expect((opts.headers as Record<string, string>).cookie).toBe('')
+  })
+
+  it('is a real $Fetch: .raw hands back the response, .create keeps every rule, .native is fetch', async () => {
+    // Cast to `$Fetch` while being a bare function: `.raw`, `.create` and `.native` were undefined, and
+    // calling one threw — during SSR only, since the browser gets a real ofetch instance.
+    const response = Object.assign(new Response('{}'), { _data: { ok: true } })
+    const requestFetch = vi.fn(async (_req: unknown, opts?: FetchOptions) => {
+      const hooks = ([] as unknown[]).concat(opts?.onResponse ?? []) as ((ctx: unknown) => unknown)[]
+      for (const hook of hooks) await hook({ response, options: opts })
+      return { ok: true }
+    })
+    const { deps } = build({ baseURL: '/api', isServer: true })
+    const api = createRequestFetch(requestFetch, deps)
+
+    expect(await api.raw('/me')).toBe(response)
+    // The shared redirect watcher still runs alongside the capture.
+    expect(deps.onRedirect).not.toHaveBeenCalled()
+
+    const scoped = api.create({ headers: { 'x-app': 'a' } })
+    await scoped('https://collector.example/x')
+    const [, opts] = requestFetch.mock.calls.at(-1) as [string, FetchOptions]
+    expect(opts.headers).toEqual({ 'x-app': 'a', 'cookie': '', 'x-lukk-ssr': '' })
+    expect(opts.redirect).toBe('manual')
+
+    expect(api.native).toBe(globalThis.fetch)
+  })
+
+  it('.raw still surfaces an unfollowed redirect through the shared watcher', async () => {
+    const response = Object.assign(new Response(null, { status: 302, headers: { location: '/elsewhere' } }), { _data: undefined })
+    const requestFetch = vi.fn(async (_req: unknown, opts?: FetchOptions) => {
+      for (const hook of ([] as unknown[]).concat(opts?.onResponse ?? []) as ((ctx: unknown) => unknown)[]) await hook({ response, options: opts })
+      return undefined
+    })
+    const { deps } = build({ baseURL: '/api', isServer: true })
+
+    expect(await createRequestFetch(requestFetch, deps).raw('/me')).toBe(response)
+    expect(deps.onRedirect).toHaveBeenCalledWith('/elsewhere')
+
+    // A caller that switched the hook off entirely still gets the response — no `undefined` hook queued.
+    expect(await createRequestFetch(requestFetch, deps).raw('/me', { onResponse: undefined })).toBe(response)
   })
 })

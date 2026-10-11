@@ -19,6 +19,8 @@ describe('revokeDroppedSession', () => {
       // The refresh token too: a lukk release that accepts it ends the session even once the access token has expired.
       body: JSON.stringify({ refresh_token: 'rA2' }),
       redirect: 'manual',
+      // Under the upstream deadline — see "gives up on a lukk that never answers".
+      signal: expect.any(AbortSignal),
     })
     // Kept alive past the response on runtimes that end the invocation with it.
     expect(waitUntil).toHaveBeenCalledWith(expect.any(Promise))
@@ -38,6 +40,35 @@ describe('revokeDroppedSession', () => {
     const refreshOnly = fetchSpy.mock.calls[1]![1] as { headers: Record<string, string>, body: string }
     expect(refreshOnly.headers).not.toHaveProperty('Authorization')
     expect(refreshOnly.body).toBe(JSON.stringify({ refresh_token: 'rA' }))
+  })
+
+  it('cancels the answer\'s body it does not want, so the connection is released', async () => {
+    const cancel = vi.fn()
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(new ReadableStream({ cancel }), { status: 200 }))
+    const waitUntil = vi.fn()
+
+    revokeDroppedSession(event(waitUntil), { access: 'A2' }, 'https://lukk.test/auth')
+    await waitUntil.mock.calls[0]![0]
+
+    expect(cancel).toHaveBeenCalled()
+  })
+
+  it('gives up on a lukk that never answers, so the background work is bounded', async () => {
+    // Kept alive by `waitUntil` on runtimes that end the invocation with the response: a revocation that
+    // never settles held that invocation open until the platform killed it.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    vi.spyOn(globalThis, 'fetch').mockImplementation((_input, init) => new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(init.signal!.reason))
+    }))
+    const waitUntil = vi.fn()
+
+    revokeDroppedSession(event(waitUntil), { access: 'A2' }, 'https://lukk.test/auth')
+    let settled = false
+    void (waitUntil.mock.calls[0]![0] as Promise<unknown>).then(() => { settled = true })
+    await vi.advanceTimersByTimeAsync(15_000)
+
+    expect(settled).toBe(true)
+    vi.useRealTimers()
   })
 
   it('swallows a failure — best effort, never an unhandled rejection', async () => {

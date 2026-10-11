@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ACCESS_KEY, READY_KEY, USER_KEY } from '../src/runtime/keys'
+import { READY_KEY, USER_KEY } from '../src/runtime/keys'
 import { __test, ssrPayload, useState } from './mocks/imports'
+
+import serverPlugin from '../src/runtime/plugins/session.server'
+
+import { accessExpired } from '../src/runtime/server/access-token'
+import { useLukkSecret } from '../src/runtime/utils/secrets'
 
 const fetchUser = vi.fn()
 const loggedIn = { value: false }
@@ -16,11 +21,6 @@ vi.mock('../src/runtime/server/hydrate', () => ({
   withholdIfReplaced: (...a: unknown[]) => withholdIfReplaced(...a),
   hydratedSessionEnded: (...a: unknown[]) => hydratedSessionEnded(...a),
 }))
-
-// eslint-disable-next-line import/first
-import serverPlugin from '../src/runtime/plugins/session.server'
-// eslint-disable-next-line import/first
-import { accessExpired } from '../src/runtime/server/access-token'
 
 const run = (nuxtApp: unknown) => (serverPlugin as unknown as (app: unknown) => Promise<void>)(nuxtApp)
 
@@ -101,7 +101,7 @@ describe('session.server (BFF SSR hydration)', () => {
     // Invariant: the plugin seeds identity via `fetchUser` only — the access token is never written into
     // the SSR-serialized state. Swept, not spot-checked: naming one key passes for a token written under
     // any OTHER key, and `useState('lukk:ssrToken').value = access` was green before this.
-    expect(useState(ACCESS_KEY, () => null).value).toBeNull()
+    expect(useLukkSecret('access').value).toBeNull()
     const serialized = JSON.stringify(ssrPayload())
     expect(serialized).not.toContain(fresh().split('.')[1])
   })

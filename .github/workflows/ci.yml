@@ -29,7 +29,9 @@ jobs:
       - run: pnpm lint
 
       # Build core first (lukk-nuxt depends on it), the module, and prepare the
-      # playground so its .nuxt types exist for the Nuxt typecheck.
+      # playground so its .nuxt types exist for the Nuxt typecheck. That checks the
+      # playground — and through it the module's own runtime — in BOTH transport modes:
+      # `$lukk` is typed by mode, and bff mode once failed while direct passed.
       - run: pnpm --filter lukk-core build
       - run: pnpm --filter lukk-nuxt build
       - run: pnpm --filter lukk-nuxt exec nuxi prepare playground

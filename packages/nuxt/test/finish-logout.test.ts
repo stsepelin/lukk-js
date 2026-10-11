@@ -162,6 +162,15 @@ describe('finish-logout middleware (BFF)', () => {
     expect(event.deleted).toEqual([{ name: '__Host-lukk-logout', options: { path: '/', secure: true, sameSite: 'strict' } }])
   })
 
+  it('ends the session through the proxy under the app\'s own base path', async () => {
+    // Nitro routes a local fetch through the app mounted at `app.baseURL`; a root-relative path misses it.
+    ;(__test.runtimeConfig as { app?: unknown }).app = { baseURL: '/admin/' }
+    const event = makeEvent()
+    await run(event)
+
+    expect((event.fetch as ReturnType<typeof vi.fn>).mock.calls[0]![0]).toBe('/admin/api/_lukk/logout')
+  })
+
   it('ends the session through the proxy\'s /logout before the page renders, drops the note, and answers that the browser is signed out', async () => {
     const event = makeEvent()
     await run(event)
@@ -408,5 +417,26 @@ describe('finish-logout middleware (BFF)', () => {
     const bare = makeEvent({ cookies: { 'lukk-admin-logout': '1' } })
     await run(bare)
     expect(bare.deleted).toEqual([{ name: 'lukk-admin-logout', options: { path: '/', secure: false, sameSite: 'strict' } }])
+  })
+})
+
+describe('the cookie names the browser is told', () => {
+  // The browser writes the logout note under `public.lukk.logoutCookie`, which the module bakes in at BUILD
+  // from the build's `cookieSecure`; the server reads it under a name derived from the RUNTIME one. A
+  // runtime override (`NUXT_LUKK_COOKIE_SECURE=false` on a dev-over-http deploy, say) left the browser
+  // writing a note the server never looked for — and a logout that the next page load never finished.
+  it('tells the browser the names this server reads, whatever the build said', async () => {
+    __test.runtimeConfig.lukk = { sessionPassword: 'p'.repeat(32), cookieSecure: false, cookieNamespace: 'admin' } as unknown as Record<string, unknown>
+    __test.runtimeConfig.public.lukk = { logoutCookie: '__Host-lukk-logout', signedOutCookie: '__Host-lukk-signed-out', mode: 'bff' }
+
+    await run(makeEvent({ cookies: {} }))
+
+    expect(__test.runtimeConfig.public.lukk).toMatchObject({ logoutCookie: 'lukk-admin-logout', signedOutCookie: 'lukk-admin-signed-out' })
+  })
+
+  it('names them Secure-prefixed by default', async () => {
+    __test.runtimeConfig.public.lukk = { logoutCookie: 'stale', signedOutCookie: 'stale' }
+    await run(makeEvent({ cookies: {} }))
+    expect(__test.runtimeConfig.public.lukk).toMatchObject({ logoutCookie: '__Host-lukk-logout', signedOutCookie: '__Host-lukk-signed-out' })
   })
 })

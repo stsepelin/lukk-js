@@ -9,6 +9,7 @@ describe('public API barrel', () => {
     expect(publicApi.isTwoFactorChallenge).toBeTypeOf('function')
     expect(publicApi.bufferToBase64url).toBeTypeOf('function')
     expect(publicApi.singleFlight).toBeTypeOf('function')
+    expect(publicApi.REFRESHED_WITHOUT_TOKEN).toBeTypeOf('symbol')
   })
 })
 

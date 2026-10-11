@@ -7,6 +7,8 @@ vi.mock('../src/runtime/composables/useLukkFetch', () => ({ useLukkFetch: () => 
 
 // eslint-disable-next-line import/first
 import { useLukkForm } from '../src/runtime/composables/useLukkForm'
+// eslint-disable-next-line import/first
+import { useState } from './mocks/imports'
 
 const val422 = (errors: Record<string, string[]>): LukkError => ({ status: 422, message: 'The given data was invalid.', errors })
 
@@ -393,6 +395,58 @@ describe('useLukkForm', () => {
     expect(form.processing).toBe(false)
   })
 
+  it('rejects a cancelled submit with the AbortError itself — through real ofetch, which wraps it in a FetchError', async () => {
+    // ofetch rejects an aborted request with its own FetchError, the AbortError only on `.cause`; the
+    // docblock promised an AbortError, and `error.name === 'AbortError'` never matched.
+    const { createFetch, Headers: OFetchHeaders } = await import('ofetch')
+    const { createLukkFetch } = await import('../src/runtime/utils/create-lukk-fetch')
+    const real = createLukkFetch({
+      baseURL: '/api',
+      isServer: false,
+      canRefresh: false,
+      getCookieHeader: () => undefined,
+      getBearer: () => null,
+      getConfirmation: () => null,
+      confirmationHeader: 'X-Lukk-Confirmation',
+      refresh: vi.fn(),
+      onRedirect: vi.fn(),
+      fetchImpl: createFetch({
+        // Like fetch: an already-aborted signal rejects at once, a later abort when it comes.
+        fetch: ((_input: unknown, init?: RequestInit) => new Promise((_resolve, reject) => {
+          if (init?.signal?.aborted) return reject(init.signal.reason)
+          init?.signal?.addEventListener('abort', () => reject(init.signal!.reason))
+        })) as typeof globalThis.fetch,
+        Headers: OFetchHeaders as unknown as typeof globalThis.Headers,
+      }) as never,
+    })
+    api.mockImplementationOnce((url: string, opts: object) => real(url, opts as never))
+    const onError = vi.fn()
+    const form = useLukkForm({ a: 1 })
+
+    const pending = form.post('/slow', { onError })
+    form.cancel()
+
+    const error = await pending.catch((e: unknown) => e)
+    expect(error).toBeInstanceOf(DOMException)
+    expect((error as DOMException).name).toBe('AbortError')
+    expect(onError).toHaveBeenCalledWith(error)
+  })
+
+  it('leaves any other failure as it came — a timeout is not a cancel', async () => {
+    const timedOut = Object.assign(new Error('[POST] "/x": <no response> timeout'), { cause: new DOMException('timed out', 'TimeoutError') })
+    api.mockRejectedValueOnce(timedOut)
+    await expect(useLukkForm({ a: 1 }).post('/x')).rejects.toBe(timedOut)
+  })
+
+  it('still runs onFinish when onError throws — it is the finally-hook', async () => {
+    api.mockRejectedValueOnce(val422({ name: ['Required.'] }))
+    const onFinish = vi.fn()
+    const form = useLukkForm({ name: '' })
+
+    await expect(form.post('/x', { onError: () => { throw new Error('from the hook') }, onFinish })).rejects.toThrow('from the hook')
+    expect(onFinish).toHaveBeenCalledOnce()
+  })
+
   it('nestedErrors expands Laravel dotted keys into a nested object (flat errors still work)', async () => {
     const form = useLukkForm({ name: '', address: { street: '', city: '' } })
     api.mockRejectedValueOnce(val422({ 'name': ['Required.'], 'address.street': ['Street.'], 'address.city': ['City.'] }))
@@ -425,6 +479,21 @@ describe('useLukkForm', () => {
     // The dangerous keys land as harmless own props on null-prototype nodes, not on the global.
     expect(({} as Record<string, unknown>).polluted).toBeUndefined()
     expect(({} as Record<string, unknown>).p2).toBeUndefined()
+  })
+
+  it('keeps a remembered draft in its own namespace — a key can never alias lukk\'s (or the app\'s) state', () => {
+    // `useState` keys are global to the app. Unprefixed, `rememberKey: 'lukk:user'` made the draft the
+    // signed-in user's state, and any app key could be overwritten the same way.
+    const user = useState<unknown>('lukk:user', () => ({ id: 1, name: 'Ada' }))
+    const appState = useState<unknown>('cart', () => ['item'])
+
+    const form = useLukkForm({ name: '' }, { rememberKey: 'lukk:user' })
+    form.data.name = 'Mallory'
+    useLukkForm({ items: [] as string[] }, { rememberKey: 'cart' })
+
+    expect(user.value).toEqual({ id: 1, name: 'Ada' })
+    expect(appState.value).toEqual(['item'])
+    expect(useState('lukk:form:lukk:user', () => null).value).toEqual({ name: 'Mallory' })
   })
 
   it('rememberKey persists data across instances (survives SPA navigation)', () => {
@@ -543,5 +612,64 @@ describe('useLukkForm — gaps found by mutation testing', () => {
       expect(form.recentlySuccessful).toBe(true)
     }
     finally { vi.useRealTimers() }
+  })
+})
+
+describe('overlapping submits — the newest one owns the form', () => {
+  // An older submit settling late set `processing` false under the newer one, wrote its stale 422 over
+  // the newer success, and could no longer be cancelled.
+  const hangsUntilAborted = () => api.mockImplementationOnce((_url: string, opts: { signal: AbortSignal }) => new Promise((_resolve, reject) => {
+    opts.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
+  }))
+
+  it('aborts the previous submit when a new one starts', async () => {
+    hangsUntilAborted()
+    const form = useLukkForm({ email: 'e' })
+    const first = form.post('/a')
+    const second = form.post('/b')
+    await expect(first).rejects.toMatchObject({ name: 'AbortError' })
+    await second
+    expect(form.processing).toBe(false)
+    expect(form.wasSuccessful).toBe(true)
+  })
+
+  it('ignores a superseded submit that settles anyway — its errors, its processing, its success', async () => {
+    // A caller's own signal wins over ours, so the first one cannot be aborted: it settles late.
+    let failFirst!: (error: unknown) => void
+    api.mockImplementationOnce(() => new Promise((_resolve, reject) => { failFirst = reject }))
+    let finishSecond!: (value: unknown) => void
+    api.mockImplementationOnce(() => new Promise((resolve) => { finishSecond = resolve }))
+    const form = useLukkForm({ email: 'e' })
+    const own = new AbortController()
+
+    const first = form.post('/a', { signal: own.signal })
+    const second = form.post('/b', { signal: own.signal })
+    failFirst(val422({ email: ['stale'] }))
+    await expect(first).rejects.toMatchObject({ status: 422 })
+    expect(form.processing).toBe(true) // still the second's
+    expect(form.errors).toEqual({})
+
+    finishSecond({ ok: true })
+    await second
+    expect(form.processing).toBe(false)
+    expect(form.wasSuccessful).toBe(true)
+  })
+
+  it('a stale success does not report the form as succeeded under a newer failure', async () => {
+    let finishFirst!: (value: unknown) => void
+    api.mockImplementationOnce(() => new Promise((resolve) => { finishFirst = resolve }))
+    api.mockImplementationOnce(async () => { throw val422({ email: ['taken'] }) })
+    const form = useLukkForm({ email: 'e' })
+    const own = new AbortController()
+
+    const first = form.post('/a', { signal: own.signal })
+    await expect(form.post('/b', { signal: own.signal })).rejects.toMatchObject({ status: 422 })
+    form.data.email = 'changed'
+    finishFirst({ ok: true })
+    await first
+
+    expect(form.wasSuccessful).toBe(false)
+    expect(form.errors).toEqual({ email: 'taken' })
+    expect(form.isDirty).toBe(true) // not rebased onto the stale submit
   })
 })

@@ -1,7 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ACCESS_KEY, CHALLENGE_KEY, RESTORE_FAILED_KEY, USER_KEY } from '../src/runtime/keys'
+import { CONFIRMED_KEY, RESTORE_FAILED_KEY, USER_KEY } from '../src/runtime/keys'
 import { REFRESH_SETTLE_TIMEOUT, restoreState } from '../src/runtime/utils/restore-state'
 import { __test, useState } from './mocks/imports'
+
+import clientPlugin from '../src/runtime/plugins/client'
+
+import { useLukkAuth } from '../src/runtime/composables/useLukkAuth'
+
+import { useLukkPasskeys } from '../src/runtime/composables/useLukkPasskeys'
+import { useLukkSecret } from '../src/runtime/utils/secrets'
 
 // The REAL client plugin and the REAL composables, with only the wire stubbed: the races below live in
 // the handover between the plugin's refresh single-flight and the composable's session state, and a
@@ -26,13 +33,6 @@ vi.mock('lukk-core', async importActual => ({
 const { api } = vi.hoisted(() => ({ api: vi.fn() }))
 vi.mock('../src/runtime/composables/useLukkFetch', () => ({ useLukkFetch: () => api }))
 
-// eslint-disable-next-line import/first
-import clientPlugin from '../src/runtime/plugins/client'
-// eslint-disable-next-line import/first
-import { useLukkAuth } from '../src/runtime/composables/useLukkAuth'
-// eslint-disable-next-line import/first
-import { useLukkPasskeys } from '../src/runtime/composables/useLukkPasskeys'
-
 function deferred<T>() {
   let resolve!: (value: T) => void
   let reject!: (error: unknown) => void
@@ -42,7 +42,7 @@ function deferred<T>() {
 
 const pairFor = (account: string) => ({ access_token: account, expires_in: 900 })
 const macrotask = () => new Promise(resolve => setTimeout(resolve, 0))
-const access = () => useState<string | null>(ACCESS_KEY, () => null).value
+const access = () => useLukkSecret('access').value
 const rawRestoreFailed = () => useState<boolean>(RESTORE_FAILED_KEY, () => false).value
 
 /** A sign-in endpoint that, like lukk-core's `commit`, persists the pair it issued before resolving. */
@@ -214,11 +214,11 @@ describe('a sign-in during an in-flight restore', () => {
   it.each([
     ['register', (auth: ReturnType<typeof useLukkAuth>) => auth.register({ email: 'b', password: 'p', password_confirmation: 'p' })],
     ['a two-factor challenge', async (auth: ReturnType<typeof useLukkAuth>) => {
-      useState<string | null>(CHALLENGE_KEY, () => null).value = 'challenge'
+      useLukkSecret('challenge').value = 'challenge'
       await auth.verifyTwoFactor('123456')
     }],
     ['a recovery code', async (auth: ReturnType<typeof useLukkAuth>) => {
-      useState<string | null>(CHALLENGE_KEY, () => null).value = 'challenge'
+      useLukkSecret('challenge').value = 'challenge'
       await auth.verifyRecoveryCode('code')
     }],
     ['a passkey', async () => {
@@ -544,9 +544,13 @@ describe('gaps found by mutation testing', () => {
 
   it('a finished logout does not release sign-ins held for a second logout still renewing its token', async () => {
     // In the renewal gap nothing but the whole-logout hold keeps a sign-in out; the first logout must
-    // not clear the second one's.
+    // not clear the second one's. The second is the one that ends a session a sign-in issued while the
+    // first was out — a second `logout()` CALL now joins the first, which is how this used to overlap
+    // them and is the double-click defect.
     const first = deferred<void>()
     const renewal = deferred<{ access_token: string }>()
+    const landed = deferred<void>()
+    wire.client.login!.mockImplementationOnce(slowSignIn('B', landed.promise))
     wire.client.logout!
       .mockImplementationOnce(async () => { await first.promise })
       .mockImplementationOnce(async () => { throw { status: 401 } })
@@ -555,23 +559,23 @@ describe('gaps found by mutation testing', () => {
     boot()
     const auth = useLukkAuth()
 
+    const supersededSignIn = auth.login({ email: 'a', password: 'p' }).catch(() => {})
+    await macrotask()
     const firstLogout = auth.logout()
     await macrotask()
-    const secondLogout = auth.logout()
-    await macrotask() // second attempt rejected; its renewal is on the wire
+    landed.resolve()
+    await macrotask() // the sign-in landed after the logout: its own logout's attempt rejected, renewal out
     expect(wire.client.refreshTokens).toHaveBeenCalledOnce()
     first.resolve()
     await firstLogout
 
     const signingIn = auth.login({ email: 'b', password: 'p' })
     await macrotask()
-    expect(wire.client.login).not.toHaveBeenCalled()
+    expect(wire.client.login).toHaveBeenCalledOnce()
 
     renewal.resolve(pairFor('A'))
-    // The first logout ended the generation that renewal belonged to, so the second rejects — the session
-    // was already revoked by the first.
-    await Promise.all([secondLogout.catch(() => {}), signingIn])
-    expect(wire.client.login).toHaveBeenCalledOnce()
+    await Promise.all([supersededSignIn, signingIn.catch(() => {})])
+    expect(wire.client.login).toHaveBeenCalledTimes(2)
   })
 
   it('a registration answered with a two-factor challenge leaves a restore in progress alone', async () => {
@@ -596,9 +600,16 @@ describe('a sign-in or logout in another tab', () => {
   class FakeChannel {
     static instances: FakeChannel[] = []
     posted: unknown[] = []
+    closed = false
     onmessage: ((event: MessageEvent) => void) | null = null
     constructor(public name: string) { FakeChannel.instances.push(this) }
-    postMessage(message: unknown) { this.posted.push(message) }
+    postMessage(message: unknown) {
+      // Like the browser: a closed channel throws `InvalidStateError`.
+      if (this.closed) throw new DOMException('closed', 'InvalidStateError')
+      this.posted.push(message)
+    }
+
+    close() { this.closed = true }
   }
   const otherTabSays = async () => {
     FakeChannel.instances.at(-1)!.onmessage!({ data: 'changed' } as MessageEvent)
@@ -619,6 +630,16 @@ describe('a sign-in or logout in another tab', () => {
     await otherTabSays()
 
     expect(restoreState(__test.nuxtApp).epoch).toBeGreaterThan(before)
+  })
+
+  it('drops a 2FA challenge pending here when another tab changes the session', async () => {
+    // Redeemed after the other tab signed in, it would replace that tab's session with this attempt's.
+    boot()
+    useLukkSecret('challenge').value = 'pending-here'
+
+    await otherTabSays()
+
+    expect(useLukkSecret('challenge').value).toBeNull()
   })
 
   it('announces a sign-in and a logout to other tabs', async () => {
@@ -691,7 +712,7 @@ describe('a sign-in or logout in another tab', () => {
     boot()
     const auth = useLukkAuth()
     auth.user.value = { id: 'A' }
-    useState<string | null>(ACCESS_KEY, () => null).value = 'A'
+    useLukkSecret('access').value = 'A'
 
     await otherTabSays()
 
@@ -702,7 +723,7 @@ describe('a sign-in or logout in another tab', () => {
   it('direct: signs out when the other tab logged out, but keeps the user when it could not tell', async () => {
     boot()
     const auth = useLukkAuth()
-    useState<string | null>(ACCESS_KEY, () => null).value = 'A'
+    useLukkSecret('access').value = 'A'
 
     auth.user.value = { id: 'A' }
     wire.client.refreshTokens!.mockRejectedValueOnce({ status: 503 })
@@ -752,7 +773,7 @@ describe('a sign-in or logout in another tab', () => {
     userEndpoint({ A: slowA.promise })
     boot('bff')
     const auth = useLukkAuth()
-    useState<string | null>(ACCESS_KEY, () => null).value = 'A'
+    useLukkSecret('access').value = 'A'
     api.mockImplementationOnce(async () => { await slowA.promise; return { id: 'A' } })
 
     const loading = auth.fetchUser()
@@ -782,6 +803,28 @@ describe('a sign-in or logout in another tab', () => {
     ;(clientPlugin as unknown as () => unknown)()
     expect(FakeChannel.instances.at(-1)!.name).toBe('lukk:session:/#admin')
     expect(restoreState(__test.nuxtApp).scope).toBe('/#admin')
+  })
+
+  it('closes the channel when the app is torn down, and stops announcing on it', () => {
+    // Left open, an unmounted app (HMR, a micro-frontend, a test) kept answering other tabs and held the
+    // channel for the life of the page.
+    const unmount: (() => void)[] = []
+    __test.nuxtApp = { vueApp: { onUnmount: (fn: () => void) => { unmount.push(fn) } } }
+    boot()
+    const channel = FakeChannel.instances.at(-1)!
+    expect(channel.closed).toBe(false)
+
+    for (const fn of unmount) fn()
+
+    expect(channel.closed).toBe(true)
+    expect(channel.onmessage).toBeNull()
+    expect(restoreState(__test.nuxtApp).announce).toBeUndefined()
+  })
+
+  it('still wires the channel on a Vue without app.onUnmount', () => {
+    __test.nuxtApp = { vueApp: {} }
+    boot()
+    expect(FakeChannel.instances.at(-1)!.onmessage).toBeTypeOf('function')
   })
 
   it('does not listen where the browser has no BroadcastChannel', () => {
@@ -905,7 +948,7 @@ describe('claiming the session a sign-in issued', () => {
     ['a password login', (auth: ReturnType<typeof useLukkAuth>) => auth.login({ email: 'b', password: 'p' })],
     ['a registration', (auth: ReturnType<typeof useLukkAuth>) => auth.register({ email: 'b', password: 'p', password_confirmation: 'p' })],
     ['a two-factor challenge', async (auth: ReturnType<typeof useLukkAuth>) => {
-      useState<string | null>(CHALLENGE_KEY, () => null).value = 'challenge'
+      useLukkSecret('challenge').value = 'challenge'
       await auth.verifyTwoFactor('123456')
     }],
     ['a passkey login', async () => {
@@ -1031,7 +1074,7 @@ describe('after clearNuxtState()', () => {
     boot()
     const auth = useLukkAuth()
     useState(USER_KEY, () => null).value = undefined
-    useState(CHALLENGE_KEY, () => null).value = undefined
+    useLukkSecret('challenge').value = undefined
     useState(RESTORE_FAILED_KEY, () => false).value = undefined
 
     expect(auth.loggedIn.value).toBe(false)
@@ -1105,7 +1148,7 @@ describe('a logout while a sign-in is on the wire', () => {
     ['a password login', (auth: ReturnType<typeof useLukkAuth>) => auth.login({ email: 'b', password: 'p' }), 'login'],
     ['a registration', (auth: ReturnType<typeof useLukkAuth>) => auth.register({ email: 'b', password: 'p', password_confirmation: 'p' }), 'register'],
     ['a two-factor challenge', (auth: ReturnType<typeof useLukkAuth>) => {
-      useState<string | null>(CHALLENGE_KEY, () => null).value = 'challenge'
+      useLukkSecret('challenge').value = 'challenge'
       return auth.verifyTwoFactor('123456')
     }, 'twoFactorChallenge'],
     ['a passkey login', () => {
@@ -1137,6 +1180,36 @@ describe('a logout while a sign-in is on the wire', () => {
     expect(access()).toBeNull()
   })
 
+  it('still ends that session when the sign-in lands while the logout is itself still out', async () => {
+    // A logout already out went out before this session existed, so it cannot end it: joining it — as a
+    // second `logout()` call otherwise does — would leave the session the server just issued alive.
+    const response = deferred<void>()
+    wire.client.login!.mockImplementationOnce(slowSignIn('B', response.promise))
+    const bearers: (string | null)[] = []
+    const first = deferred<void>()
+    wire.client.logout!
+      .mockImplementationOnce(async () => { bearers.push(wire.hooks!.getAccessToken()); await first.promise })
+      .mockImplementation(async () => { bearers.push(wire.hooks!.getAccessToken()) })
+    userEndpoint()
+    boot()
+    const auth = useLukkAuth()
+
+    const signingIn = auth.login({ email: 'b', password: 'p' })
+    await macrotask()
+    const loggingOut = auth.logout()
+    await vi.waitFor(() => expect(bearers).toEqual([null]))
+
+    response.resolve()
+    await macrotask()
+    first.resolve()
+    await loggingOut
+    await signingIn
+
+    expect(bearers).toEqual([null, 'B'])
+    expect(auth.loggedIn.value).toBe(false)
+    expect(access()).toBeNull()
+  })
+
   it.each([
     ['a two-factor challenge', () => ({ two_factor: true, challenge_token: 'c' })],
     ['rejected credentials', () => { throw { status: 422 } }],
@@ -1155,6 +1228,37 @@ describe('a logout while a sign-in is on the wire', () => {
 
     expect(bearers).toEqual([null])
     expect(auth.pendingTwoFactor.value).toBe(false)
+  })
+
+  it('neither ends a session nor keeps the challenge when a passkey sign-in answers with one after a logout', async () => {
+    // lukk 0.7 can answer a passkey sign-in with a two-factor challenge. Issued after the visitor
+    // logged out, it must not leave them mid-sign-in — and there is no session for a second logout.
+    const response = deferred<void>()
+    wire.client.loginWithPasskey!.mockImplementationOnce(slowSignIn('B', response.promise, () => ({ two_factor: true, challenge_token: 'c' })))
+    vi.stubGlobal('navigator', { credentials: { get: vi.fn(async () => ({ id: 'credential' })) } })
+    const bearers = logoutSpy()
+    boot()
+    const auth = useLukkAuth()
+
+    const signingIn = useLukkPasskeys().login()
+    await macrotask()
+    await auth.logout()
+    response.resolve()
+    await signingIn
+
+    expect(bearers).toEqual([null])
+    expect(auth.pendingTwoFactor.value).toBe(false)
+  })
+
+  it('records a passkey sign-in\'s challenge before anything else has read the challenge state', async () => {
+    // The first reader of the challenge state may be this sign-in, so it must create it.
+    wire.client.loginWithPasskey!.mockImplementationOnce(async () => ({ two_factor: true, challenge_token: 'c' }))
+    vi.stubGlobal('navigator', { credentials: { get: vi.fn(async () => ({ id: 'credential' })) } })
+    boot()
+
+    await useLukkPasskeys().login()
+
+    expect(useLukkSecret('challenge').value).toBe('c')
   })
 
   it('does not end a session that a registration never issued', async () => {
@@ -1276,5 +1380,215 @@ describe('client plugin — gaps found by mutation testing', () => {
     boot()
     await restore()
     expect(restoreState(__test.nuxtApp).refreshing).toBeNull()
+  })
+})
+
+describe('a step-up belongs to the session that earned it', () => {
+  // After signing in as B — here or in another tab — `confirmed` stayed true (the `lukk-confirmed`
+  // middleware let B through on A's step-up) and, in direct mode, A's confirmation token was still attached
+  // to B's requests.
+  const confirmedAsA = () => {
+    useLukkSecret('confirmation').value = 'step-up-of-A'
+    useState<boolean>(CONFIRMED_KEY, () => false).value = true
+  }
+  const stepUpGone = () => {
+    expect(useLukkSecret('confirmation').value).toBeNull()
+    expect(useState<boolean>(CONFIRMED_KEY, () => false).value).toBe(false)
+  }
+  class FakeChannel {
+    static last: FakeChannel | undefined
+    onmessage: ((event: MessageEvent) => void) | null = null
+    constructor() { FakeChannel.last = this }
+    postMessage() {}
+    close() {}
+  }
+
+  it.each(['direct', 'bff'] as const)('%s: a sign-in here drops it', async (mode) => {
+    userEndpoint()
+    boot(mode)
+    confirmedAsA()
+
+    await useLukkAuth().login({ email: 'b', password: 'p' })
+
+    stepUpGone()
+  })
+
+  it.each(['direct', 'bff'] as const)('%s: another tab changing the session drops it', async (mode) => {
+    vi.stubGlobal('window', { BroadcastChannel: FakeChannel })
+    userEndpoint()
+    boot(mode)
+    confirmedAsA()
+
+    FakeChannel.last!.onmessage!({ data: 'changed' } as MessageEvent)
+    await macrotask()
+
+    stepUpGone()
+  })
+
+  it('direct: a refresh that turns out to be another account drops it', async () => {
+    const jwt = (sub: string) => `h.${Buffer.from(JSON.stringify({ sub })).toString('base64url')}.s`
+    wire.client.refreshTokens!.mockResolvedValueOnce({ access_token: jwt('B'), expires_in: 900 })
+    userEndpoint()
+    boot()
+    useState(USER_KEY, () => null).value = { id: 'A' }
+    restoreState(__test.nuxtApp).subject = 'A'
+    confirmedAsA()
+
+    await (__test.nuxtApp as { $lukkRefresh: () => Promise<unknown> }).$lukkRefresh()
+    await macrotask()
+
+    stepUpGone()
+  })
+
+  it('direct: a refresh for the same account keeps it', async () => {
+    const jwt = (sub: string) => `h.${Buffer.from(JSON.stringify({ sub })).toString('base64url')}.s`
+    wire.client.refreshTokens!.mockResolvedValueOnce({ access_token: jwt('A'), expires_in: 900 })
+    userEndpoint()
+    boot()
+    useState(USER_KEY, () => null).value = { id: 'A', abilities: [] }
+    restoreState(__test.nuxtApp).subject = 'A'
+    confirmedAsA()
+
+    await (__test.nuxtApp as { $lukkRefresh: () => Promise<unknown> }).$lukkRefresh()
+    await macrotask()
+
+    expect(useLukkSecret('confirmation').value).toBe('step-up-of-A')
+    expect(useState<boolean>(CONFIRMED_KEY, () => false).value).toBe(true)
+  })
+})
+
+describe('a user load the session switched accounts under', () => {
+  // Direct mode. The user request goes out as A; its 401 renews the shared refresh cookie — another tab
+  // signed in as B — and lukk-nuxt does not re-send it as B: it rejects with `SESSION_CHANGED`, a 401. Read
+  // as lukk's answer about the visitor, that signed the tab out (`user` null, subject forgotten), while the
+  // resync the same refresh started loaded B — unless IT failed too, and then the tab sat signed out holding
+  // B's token, with no subject left to notice the switch on the next refresh.
+  const jwt = (sub: string) => `h.${Buffer.from(JSON.stringify({ sub })).toString('base64url')}.s`
+  const sessionChanged = { status: 401, message: 'The session changed to another account while this request was out; it was not sent again.', reason: 'session_changed' }
+  const unavailable = { status: 503, message: 'Service Unavailable' }
+
+  /** Signed in as A on screen; the next refresh hands back B. `answers` are the user endpoint's, after A's own. */
+  function switchedUnder(answers: Array<() => unknown>) {
+    wire.client.refreshTokens!.mockResolvedValue({ access_token: jwt('B'), expires_in: 900 })
+    boot()
+    useLukkSecret('access').value = jwt('A')
+    useState(USER_KEY, () => null).value = { id: 'A' }
+    restoreState(__test.nuxtApp).subject = 'A'
+    api.mockImplementationOnce(async () => {
+      await (__test.nuxtApp as { $lukkRefresh: () => Promise<unknown> }).$lukkRefresh()
+      throw sessionChanged
+    })
+    for (const answer of answers) api.mockImplementationOnce(async () => answer())
+  }
+
+  it('does not sign the tab out, and loads the account the session now holds — though the resync failed', async () => {
+    // A's request, then the resync's (503), then the load's own second ask, as B.
+    switchedUnder([() => { throw unavailable }, () => ({ id: 'B' })])
+    const auth = useLukkAuth()
+
+    await auth.fetchUser()
+    await macrotask()
+
+    expect(auth.user.value).toEqual({ id: 'B' })
+    expect(restoreState(__test.nuxtApp).subject).toBe('B')
+  })
+
+  it('leaves the user as it was when nothing could be loaded — and the next refresh still sees the switch', async () => {
+    switchedUnder([() => { throw unavailable }, () => { throw unavailable }])
+    const auth = useLukkAuth()
+
+    await auth.fetchUser()
+    await macrotask()
+
+    expect(auth.user.value).toEqual({ id: 'A' }) // "couldn't tell" — as any failed load
+    expect(access()).toBe(jwt('B'))
+    expect(restoreState(__test.nuxtApp).subject).toBe('A')
+
+    api.mockImplementation(async () => ({ id: 'B' }))
+    await (__test.nuxtApp as { $lukkRefresh: () => Promise<unknown> }).$lukkRefresh()
+    await macrotask()
+    expect(auth.user.value).toEqual({ id: 'B' })
+  })
+
+  it('asks again once only: a session that keeps switching is left to the next refresh', async () => {
+    // Switching on every ask but the sixth — bounded, so a load that kept asking ends on an assertion, not a hang.
+    switchedUnder([() => { throw unavailable }, ...Array.from({ length: 4 }, () => () => { throw sessionChanged }), () => ({ id: 'C' })])
+    const auth = useLukkAuth()
+
+    await auth.fetchUser()
+
+    expect(auth.user.value).toEqual({ id: 'A' })
+    expect(api).toHaveBeenCalledTimes(3) // A's request, the resync's, one more ask
+  })
+
+  it('does not ask again for a load a sign-in or logout superseded meanwhile — nothing more is sent', async () => {
+    switchedUnder([() => ({ id: 'B' })])
+    api.mockReset()
+    api.mockImplementationOnce(async () => {
+      restoreState(__test.nuxtApp).epoch++ // a sign-in, here or in another tab, landed while A's request was out
+      throw sessionChanged
+    })
+    api.mockImplementation(async () => ({ id: 'B' }))
+    const auth = useLukkAuth()
+
+    await auth.fetchUser()
+
+    expect(api).toHaveBeenCalledOnce()
+    expect(auth.user.value).toEqual({ id: 'A' }) // the newer load owns the answer
+  })
+
+  it('reads a load rejected with nothing at all as "couldn\'t tell", as before', async () => {
+    boot()
+    useState(USER_KEY, () => null).value = { id: 'A' }
+    api.mockRejectedValueOnce(null)
+    const auth = useLukkAuth()
+
+    await auth.fetchUser()
+
+    expect(auth.user.value).toEqual({ id: 'A' })
+  })
+})
+
+describe('a logout the session switched accounts under', () => {
+  // Direct mode. The logout goes out with A's (expired) token; another tab has meanwhile signed in as B, so
+  // the renewal that follows lukk's 401 comes back as B. The session the browser now holds is B's: the logout
+  // must end THAT one — read as "no session left", B stayed live upstream behind a tab showing nobody.
+  const jwt = (sub: string) => `h.${Buffer.from(JSON.stringify({ sub })).toString('base64url')}.s`
+
+  it('ends the session the tab now holds, and signs the tab out', async () => {
+    const sentWith: Array<string | null> = []
+    wire.client.logout = vi.fn(async () => {
+      sentWith.push(wire.hooks!.getAccessToken())
+      if (sentWith.length === 1) throw { status: 401, message: 'Unauthenticated.' }
+    })
+    wire.client.refreshTokens = vi.fn(async () => ({ access_token: jwt('B'), expires_in: 900 }))
+    userEndpoint()
+    boot()
+    useLukkSecret('access').value = jwt('A')
+    useState(USER_KEY, () => null).value = { id: 'A' }
+    restoreState(__test.nuxtApp).subject = 'A'
+    const auth = useLukkAuth()
+
+    await auth.logout()
+
+    expect(sentWith).toEqual([jwt('A'), jwt('B')])
+    expect(auth.user.value).toBeNull()
+    expect(access()).toBeNull()
+  })
+
+  it('stops after the one renewal: a second 401 is the answer', async () => {
+    wire.client.logout = vi.fn(async () => { throw { status: 401, message: 'Unauthenticated.' } })
+    wire.client.refreshTokens = vi.fn(async () => ({ access_token: jwt('B'), expires_in: 900 }))
+    userEndpoint()
+    boot()
+    useLukkSecret('access').value = jwt('A')
+    useState(USER_KEY, () => null).value = { id: 'A' }
+    const auth = useLukkAuth()
+
+    await expect(auth.logout()).rejects.toMatchObject({ status: 401 })
+
+    expect(wire.client.logout).toHaveBeenCalledTimes(2)
+    expect(auth.user.value).toBeNull()
+    expect(access()).toBeNull()
   })
 })

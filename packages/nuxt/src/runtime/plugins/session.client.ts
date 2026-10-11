@@ -1,5 +1,6 @@
 import { useLukkAuth } from '../composables/useLukkAuth'
-import { ACCESS_KEY, READY_KEY } from '../keys'
+import { READY_KEY } from '../keys'
+import { useLukkSecret } from '../utils/secrets'
 import { clearLogoutCookie, hasLogoutCookie, logoutNoteAt, setLogoutCookie } from '../utils/logout-cookie'
 import { clearPendingLogout, readPendingLogout, signedInSince } from '../utils/pending-logout'
 import { restoreState } from '../utils/restore-state'
@@ -67,7 +68,7 @@ export default defineNuxtPlugin({
       else if (note?.fid !== undefined) {
         await auth.initSession()
         // Stryker disable next-line ArrowFunction: equivalent — the client plugin creates this key first, and `tokenFamily` reads undefined and null alike.
-        const access = useState<string | null>(ACCESS_KEY, () => null)
+        const access = useLukkSecret('access')
         // On the restored session's FAMILY, not on `loggedIn`: an app with no `user.endpoint` never reads as
         // logged in, and this branch would then drop the note of a session the restore had just renewed.
         if (tokenFamily(access.value) === note.fid) {

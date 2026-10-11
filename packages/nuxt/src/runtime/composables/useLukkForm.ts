@@ -1,11 +1,25 @@
 import type { FetchOptions } from 'ofetch'
 import type { LukkError } from 'lukk-core'
 import { computed, reactive, ref, shallowRef, useState } from '#imports'
+import { FORM_KEY_PREFIX } from '../keys'
 import { useLukkFetch } from './useLukkFetch'
 
 type FormFields = Record<string, unknown>
-/** First validation message per field (Laravel returns an array; we surface [0]). */
-type FormErrors<T> = Partial<Record<keyof T, string>>
+/** The key Laravel reports a nested field's error under: `authorization.role`, `items.0.name`. */
+type DottedPath = `${string}.${string}`
+/** A field of the form, or a nested field's dotted path. */
+type ErrorKey<T> = keyof T | DottedPath
+/** First validation message per field (Laravel returns an array; we surface [0]) — nested ones by dotted path. */
+type FormErrors<T> = Partial<Record<keyof T, string>> & { [path: DottedPath]: string | undefined }
+/**
+ * `errors` expanded along the data's own shape: `nestedErrors.authorization?.role`, `nestedErrors.items?.[0]?.name`.
+ * A nested field's own message (Laravel can report `items` as well as `items.0.name`) is in `errors.items`.
+ */
+type NestedErrors<T> = { [K in keyof T]?: ErrorNode<T[K]> }
+type ErrorNode<V> = V extends Blob | Date ? string
+  : V extends readonly (infer E)[] ? { [index: number]: ErrorNode<E> }
+    : V extends object ? NestedErrors<V>
+      : string
 type FormMethod = 'get' | 'post' | 'put' | 'patch' | 'delete'
 
 /** Lifecycle hooks fired around a submit (in addition to the returned promise). */
@@ -45,8 +59,8 @@ export interface LukkForm<T extends FormFields> {
   readonly data: T
   /** First validation message per field, from the last `422`. */
   errors: FormErrors<T>
-  /** `errors` with Laravel's dotted keys (`address.street`) expanded into a nested object. */
-  readonly nestedErrors: Record<string, unknown>
+  /** `errors` with Laravel's dotted keys (`address.street`) expanded into a nested object, typed along `data`. */
+  readonly nestedErrors: NestedErrors<T>
   /** True while a submit is in flight. */
   readonly processing: boolean
   /** True after the last submit succeeded (reset at the next submit). */
@@ -58,10 +72,10 @@ export interface LukkForm<T extends FormFields> {
   /** Whether `data` differs from the current defaults (structural comparison). */
   readonly isDirty: boolean
   setError: {
-    (field: keyof T, message: string): LukkForm<T>
+    (field: ErrorKey<T>, message: string): LukkForm<T>
     (errors: FormErrors<T>): LukkForm<T>
   }
-  clearErrors: (...fields: (keyof T)[]) => LukkForm<T>
+  clearErrors: (...fields: ErrorKey<T>[]) => LukkForm<T>
   reset: (...fields: (keyof T)[]) => LukkForm<T>
   resetAndClearErrors: (...fields: (keyof T)[]) => LukkForm<T>
   defaults: {
@@ -147,7 +161,7 @@ export function useLukkForm<T extends FormFields>(initial: T, options: UseLukkFo
   // `rememberKey` backs `data` with Nuxt `useState` so it survives SPA navigation; otherwise
   // it's a plain per-instance reactive. Either way it's the live, editable field object.
   const data = options.rememberKey
-    ? useState<T>(options.rememberKey, () => cloneData(initial) as T).value
+    ? useState<T>(`${FORM_KEY_PREFIX}:${options.rememberKey}`, () => cloneData(initial) as T).value
     : reactive(cloneData(initial)) as T
   // A plain-object deep clone of the live data (File/Blob by reference).
   const snapshot = (): FormFields => cloneData(data) as FormFields
@@ -194,23 +208,23 @@ export function useLukkForm<T extends FormFields>(initial: T, options: UseLukkFo
   let recentlyTimer: ReturnType<typeof setTimeout> | undefined
   let inFlight: AbortController | undefined
 
-  function setError(field: keyof T, message: string): LukkForm<T>
+  function setError(field: ErrorKey<T>, message: string): LukkForm<T>
   function setError(errorBag: FormErrors<T>): LukkForm<T>
-  function setError(fieldOrBag: keyof T | FormErrors<T>, message?: string): LukkForm<T> {
+  function setError(fieldOrBag: ErrorKey<T> | FormErrors<T>, message?: string): LukkForm<T> {
     if (typeof fieldOrBag === 'object') Object.assign(errors.value, fieldOrBag)
     else errors.value[fieldOrBag] = message
     return form
   }
 
   /** Clear the named field errors, or all of them when called with no arguments. */
-  function clearErrors(...fields: (keyof T)[]): LukkForm<T> {
+  function clearErrors(...fields: ErrorKey<T>[]): LukkForm<T> {
     if (!fields.length) {
       errors.value = {}
       return form
     }
-    const drop = new Set<keyof T>(fields)
+    const drop = new Set<ErrorKey<T>>(fields)
     errors.value = Object.fromEntries(
-      Object.entries(errors.value).filter(([key]) => !drop.has(key as keyof T)),
+      Object.entries(errors.value).filter(([key]) => !drop.has(key)),
     ) as FormErrors<T>
     return form
   }
@@ -271,6 +285,9 @@ export function useLukkForm<T extends FormFields>(initial: T, options: UseLukkFo
    * `get` sends the (flat) fields as the query string; every other verb sends them as the body,
    * switching to `multipart/form-data` when the payload holds a `File`/`Blob` (put uploads on a
    * body verb — a file in a `get` query is stringified and lost).
+   * A new submit aborts one still in flight (it rejects with an `AbortError`); one that settles anyway — it
+   * ran under a signal of your own — still settles its own promise and hooks, but leaves the form's state to
+   * the newer submit.
    */
   async function submit<R = unknown>(method: FormMethod, url: string, options: LukkFormSubmitOptions<R> = {}): Promise<R> {
     const { onSuccess, onError, onFinish, forceFormData, ...fetchOptions } = options
@@ -285,18 +302,28 @@ export function useLukkForm<T extends FormFields>(initial: T, options: UseLukkFo
     const carrier = method === 'get'
       ? { query: payload }
       : { body: forceFormData === true || hasFiles(payload) ? toFormData(payload as Record<string, unknown>) : payload }
-    // Our own controller powers `cancel()`; a caller's own `signal` (in fetchOptions) wins.
+    // Our own controller powers `cancel()`; a caller's own `signal` (in fetchOptions) wins. A newer submit
+    // supersedes the one still out (as Inertia's does): that one is aborted, and — should it settle anyway,
+    // under a signal of the caller's own — it touches none of the form's state, which is the newest one's.
+    // Left to it, a late 422 overwrote the newer success and `processing` went false under the newer submit.
+    inFlight?.abort()
     const controller = new AbortController()
     inFlight = controller
+    const newest = () => inFlight === controller
 
     let result: R
     try {
       result = await api(url, { method, ...carrier, signal: controller.signal, ...fetchOptions }) as R
     }
-    catch (error) {
-      processing.value = false
+    catch (caught) {
+      if (newest()) processing.value = false
+      // An aborted submit — `cancel()`, or a signal of the caller's own — rejects with the AbortError itself, as
+      // documented: ofetch wraps it in its own FetchError (the abort only on `.cause`), and
+      // `error.name === 'AbortError'` never matched.
+      const cause = (caught as { cause?: unknown } | null)?.cause
+      const error = cause instanceof DOMException && cause.name === 'AbortError' ? cause : caught
       const bag = (error as LukkError | null)?.errors
-      if (bag) {
+      if (bag && newest()) {
         // Guard the shape: a non-conforming/empty bag must not mask the LukkError with a
         // TypeError, nor leave a phantom key (present in `errors` but with no message).
         for (const [field, messages] of Object.entries(bag)) {
@@ -307,15 +334,18 @@ export function useLukkForm<T extends FormFields>(initial: T, options: UseLukkFo
           if (Array.isArray(messages) && messages.length) errors.value[field as keyof T] = messages[0]
         }
       }
-      await onError?.(error as LukkError)
-      await onFinish?.() // finally-hook: fires on failure too
+      try { await onError?.(error as LukkError) }
+      finally { await onFinish?.() } // the finally-hook: fires on failure too, even when onError throws
       throw error
     }
 
-    processing.value = false
-    wasSuccessful.value = true
-    recentlySuccessful.value = true
-    recentlyTimer = setTimeout(() => { recentlySuccessful.value = false }, recentlySuccessfulMs)
+    const current = newest()
+    if (current) {
+      processing.value = false
+      wasSuccessful.value = true
+      recentlySuccessful.value = true
+      recentlyTimer = setTimeout(() => { recentlySuccessful.value = false }, recentlySuccessfulMs)
+    }
     // Snapshot the baseline identity now; `defaults()` (which always reassigns it) inside
     // onSuccess will change it — a per-submit check that's immune to a concurrent submit.
     const baselineBeforeSuccess = baseline.value
@@ -324,7 +354,8 @@ export function useLukkForm<T extends FormFields>(initial: T, options: UseLukkFo
       // Rebase to the just-submitted data (so `isDirty` clears), unless the success hook
       // already re-set the defaults itself (e.g. `defaults()`; `form.reset()` for a create form
       // leaves the baseline identity intact and correctly rebases to the reset data).
-      if (baseline.value === baselineBeforeSuccess) baseline.value = snapshot()
+      // Not for a superseded submit: the form holds what was typed since, for the newer one.
+      if (current && baseline.value === baselineBeforeSuccess) baseline.value = snapshot()
     }
     finally {
       await onFinish?.() // finally-hook: fires even if onSuccess throws

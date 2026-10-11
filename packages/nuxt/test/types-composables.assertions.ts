@@ -4,13 +4,14 @@
  * declarations under. An inferred member degrades to `any` there, which fails an `expectTypeOf` below
  * or leaves a `@ts-expect-error` unused.
  */
-import type { AccountExport, ChangePasswordInput, LoginInput, LoginResult, LukkUser, PasskeySummary, RecoveryCodeCount, RegisterInput, RegisterResult, ResetPasswordInput, TwoFactorEnrollment } from 'lukk-core'
+import { type AccountExport, type ChangePasswordInput, isRegistrationPending, isTwoFactorChallenge, type LoginInput, type LoginResult, type LukkUser, type PasskeySummary, type RecoveryCodeCount, type RegisterInput, type RegisterResult, type ResetPasswordInput, type TwoFactorEnrollment, type LukkClient, type RegistrationPending, type TwoFactorChallenge } from 'lukk-core'
 import type { $Fetch } from 'ofetch'
+import type { LukkBffClient } from '../src/runtime/shared'
 import { expectTypeOf } from 'vitest'
 import type { ComputedRef, Ref } from 'vue'
 import { useLukkAbilities } from '../src/runtime/composables/useLukkAbilities'
 import { useLukkAccount } from '../src/runtime/composables/useLukkAccount'
-import { useLukkAuth } from '../src/runtime/composables/useLukkAuth'
+import { type BffSignInResult, useLukkAuth } from '../src/runtime/composables/useLukkAuth'
 import { useLukkChangePassword } from '../src/runtime/composables/useLukkChangePassword'
 import { useLukkConfirmation } from '../src/runtime/composables/useLukkConfirmation'
 import { useLukkEmailVerification } from '../src/runtime/composables/useLukkEmailVerification'
@@ -104,7 +105,7 @@ form.data = { email: '', remember: true }
 // --- useLukkPasskeys --------------------------------------------------------------------------------
 const passkeys = useLukkPasskeys()
 expectTypeOf(passkeys.register).toEqualTypeOf<(name?: string) => Promise<void>>()
-expectTypeOf(passkeys.login).toEqualTypeOf<() => Promise<void>>()
+expectTypeOf(passkeys.login).toEqualTypeOf<() => Promise<LoginResult | BffSignInResult>>()
 expectTypeOf(passkeys.confirm).toEqualTypeOf<() => Promise<void>>()
 expectTypeOf(passkeys.list).toEqualTypeOf<() => Promise<{ passkeys: PasskeySummary[] }>>()
 expectTypeOf(passkeys.remove).toEqualTypeOf<(id: string) => Promise<void>>()
@@ -139,8 +140,13 @@ expectTypeOf(auth.ready).toEqualTypeOf<ComputedRef<boolean>>()
 expectTypeOf(auth.whenReady).toEqualTypeOf<() => Promise<void>>()
 expectTypeOf(auth.restoreFailed).toEqualTypeOf<ComputedRef<boolean>>()
 expectTypeOf(auth.pendingTwoFactor).toEqualTypeOf<ComputedRef<boolean>>()
-expectTypeOf(auth.register).toEqualTypeOf<(input: RegisterInput) => Promise<RegisterResult>>()
-expectTypeOf(auth.login).toEqualTypeOf<(credentials: LoginInput) => Promise<LoginResult>>()
+expectTypeOf(auth.register).toEqualTypeOf<(input: RegisterInput) => Promise<RegisterResult | BffSignInResult>>()
+expectTypeOf(auth.login).toEqualTypeOf<(credentials: LoginInput) => Promise<LoginResult | BffSignInResult>>()
+// In BFF mode a sign-in resolves to the proxy's `{ ok, expires_in }` — no token reaches the browser — so
+// `access_token` is not something the result can be assumed to have.
+declare const signedIn: Awaited<ReturnType<typeof auth.login>>
+// @ts-expect-error — narrow first (`'access_token' in result`): in BFF mode there is none
+void signedIn.access_token
 expectTypeOf(auth.verifyTwoFactor).toEqualTypeOf<(code: string) => Promise<void>>()
 expectTypeOf(auth.verifyRecoveryCode).toEqualTypeOf<(recoveryCode: string) => Promise<void>>()
 expectTypeOf(auth.logout).toEqualTypeOf<() => Promise<void>>()
@@ -149,3 +155,38 @@ expectTypeOf(auth.fetchUser).toEqualTypeOf<() => Promise<void>>()
 expectTypeOf(auth.initSession).toEqualTypeOf<() => Promise<void>>()
 // @ts-expect-error the restore owns it
 auth.loggedIn.value = true
+
+// --- lukk-core's guards on the composables' results ------------------------------------------------------
+// `isTwoFactorChallenge(await login(...))` is what UPGRADE.md recommends, and the composables resolve the
+// BFF shape too: guards typed for lukk-core's own result alone rejected them (TS2345).
+declare const loginOutcome: Awaited<ReturnType<ReturnType<typeof useLukkAuth>['login']>>
+if (isTwoFactorChallenge(loginOutcome)) expectTypeOf(loginOutcome.challenge_token).toEqualTypeOf<string>()
+declare const registered: Awaited<ReturnType<ReturnType<typeof useLukkAuth>['register']>>
+if (isRegistrationPending(registered)) expectTypeOf(registered.registered).toEqualTypeOf<true>()
+
+// --- `$lukk` in bff mode ---------------------------------------------------------------------------------------
+// The proxy answers a sign-in or renewal with its acknowledgement, and a step-up without its token.
+declare const bff: LukkBffClient
+expectTypeOf(bff.login).returns.toEqualTypeOf<Promise<TwoFactorChallenge | BffSignInResult>>()
+expectTypeOf(bff.loginWithPasskey).returns.toEqualTypeOf<Promise<TwoFactorChallenge | BffSignInResult>>()
+expectTypeOf(bff.register).returns.toEqualTypeOf<Promise<RegistrationPending | TwoFactorChallenge | BffSignInResult>>()
+expectTypeOf(bff.twoFactorChallenge).returns.toEqualTypeOf<Promise<BffSignInResult>>()
+expectTypeOf(bff.refreshTokens).returns.toEqualTypeOf<Promise<BffSignInResult>>()
+expectTypeOf(bff.confirmPassword).returns.toEqualTypeOf<Promise<{ ok: true }>>()
+expectTypeOf(bff.confirmPasskey).returns.toEqualTypeOf<Promise<{ ok: true }>>()
+expectTypeOf(bff.logout).toEqualTypeOf<LukkClient['logout']>() // the rest as lukk-core types them
+
+// --- useLukkForm, nested data -----------------------------------------------------------------------------
+// Laravel reports a nested field under its dotted key (`authorization.role`), and `nestedErrors` expands
+// those: `errors['authorization.role']` was TS2551, `nestedErrors.authorization?.role` an error on `unknown`.
+const nested = useLukkForm({ name: '', authorization: { role: '' }, items: [{ name: '' }], tags: [''] })
+expectTypeOf(nested.errors['authorization.role']).toEqualTypeOf<string | undefined>()
+expectTypeOf(nested.errors['items.0.name']).toEqualTypeOf<string | undefined>()
+expectTypeOf(nested.errors.name).toEqualTypeOf<string | undefined>()
+expectTypeOf(nested.nestedErrors.name).toEqualTypeOf<string | undefined>()
+expectTypeOf(nested.nestedErrors.authorization?.role).toEqualTypeOf<string | undefined>()
+expectTypeOf(nested.nestedErrors.items?.[0]?.name).toEqualTypeOf<string | undefined>()
+expectTypeOf(nested.nestedErrors.tags?.[0]).toEqualTypeOf<string | undefined>()
+nested.setError('authorization.role', 'Pick a role.')
+// @ts-expect-error a key with no dot is a field of the form, and this one is not
+nested.errors.role = 'x'

@@ -5,6 +5,7 @@ import type {
   LoginInput,
   LoginResult,
   LukkError,
+  LukkStatus,
   PasskeyLoginOptions,
   PasskeySummary,
   PublicKeyCredentialCreationOptionsJSON,
@@ -31,8 +32,12 @@ export interface LukkClientHooks {
   getAccessToken?: () => string | null | Promise<string | null>
   /** Step-up token for `X-Lukk-Confirmation`, when one has been earned. */
   getConfirmationToken?: () => string | null | Promise<string | null>
-  /** Obtain a fresh pair when a request 401s. Return null if not refreshable. */
-  refresh?: () => Promise<TokenPair | null>
+  /**
+   * Renew the session when a request 401s: a fresh pair (handed to `onTokens`, then the request is
+   * retried), `REFRESHED_WITHOUT_TOKEN` when it was renewed somewhere this client holds no token for
+   * (a BFF proxy re-sealing its own session — the request is retried as is), or null if not refreshable.
+   */
+  refresh?: () => Promise<RefreshOutcome>
   /** Persist a freshly-minted pair (login / 2FA / passkey login / restore). */
   onTokens?: (pair: TokenPair) => void | Promise<void>
   /** Refresh failed → the session is gone. */
@@ -40,6 +45,19 @@ export interface LukkClientHooks {
   /** Header carrying the confirmation token (default `X-Lukk-Confirmation`). */
   confirmationHeader?: string
 }
+
+/**
+ * What a `refresh` hook returns when the session WAS renewed but there is no token for this client to
+ * hold — a BFF proxy rotates and re-seals server-side and tells the browser only that it did.
+ *
+ * A symbol, not a shape, on purpose: the pair a hook returns is shape-gated (`isTokenPair`) because it
+ * may come straight from a response body, and no body can produce a symbol. So "renewed" can only ever
+ * be said by the binding's own code, never by whatever a server answered.
+ */
+export const REFRESHED_WITHOUT_TOKEN: unique symbol = Symbol('lukk.refreshed-without-token')
+
+/** A `refresh` hook's answer: a new pair, a renewal with no token to hold, or null when not refreshable. */
+export type RefreshOutcome = TokenPair | typeof REFRESHED_WITHOUT_TOKEN | null
 
 /** Collapse concurrent calls into a single in-flight promise. */
 export function singleFlight<T>(fn: () => Promise<T>): () => Promise<T> {
@@ -68,8 +86,10 @@ export function createLukkClient(hooks: LukkClientHooks) {
     // Only attach credentials to a same-origin-as-baseURL target — never leak the
     // bearer / confirmation token (or cookies) to an absolute, cross-origin URL.
     const sameOrigin = isSameOrigin(hooks.baseURL, path)
+    // The account this request is made for, should a renewal come back as another (see below).
+    let sentAs: string | null | undefined
     if (sameOrigin) {
-      const token = await hooks.getAccessToken?.()
+      const token = sentAs = await hooks.getAccessToken?.()
       if (token) headers.set('Authorization', `Bearer ${token}`)
       const confirmation = await hooks.getConfirmationToken?.()
       if (confirmation) headers.set(confirmHeader, confirmation)
@@ -88,8 +108,10 @@ export function createLukkClient(hooks: LukkClientHooks) {
       headers,
     })
 
-    if (res.status === 401 && allowRetry && refreshOnce) {
-      let pair: TokenPair | null
+    // Only where credentials went: a foreign target's 401 says nothing about this session, and renewing for it
+    // spent a rotation, re-sent the body to that host, and on a failed renewal cleared the live token.
+    if (res.status === 401 && allowRetry && refreshOnce && sameOrigin) {
+      let pair: RefreshOutcome
       // A throwing refresh hook means "not refreshable" — honor the documented contract.
       try { pair = await refreshOnce() }
       // Stryker disable next-line BlockStatement: emptying this catch leaves `pair` undefined instead
@@ -100,8 +122,13 @@ export function createLukkClient(hooks: LukkClientHooks) {
       // and a binding that persists the whole object would store attacker-shaped data.
       if (isTokenPair(pair)) {
         await hooks.onTokens?.(pair)
+        // Renewed as ANOTHER account — another tab signed in, and the shared refresh cookie is theirs now:
+        // a request composed for the previous one is not replayed as this one (a transfer, a delete).
+        if (switchedAccount(sentAs, pair.access_token)) throw sessionChanged()
         return request<T>(path, init, false) // retry once with the new token
       }
+      // Renewed where this client can't see — nothing to store, and the retry carries what it always did.
+      if (pair === REFRESHED_WITHOUT_TOKEN) return request<T>(path, init, false)
       await hooks.onUnauthenticated?.()
     }
 
@@ -129,7 +156,7 @@ export function createLukkClient(hooks: LukkClientHooks) {
     register: (input: RegisterInput) => request<RegisterResult>('/register', json(input), false).then(commit),
     login: (c: LoginInput) => request<LoginResult>('/login', json(c), false).then(commit),
     twoFactorChallenge: (i: TwoFactorInput) => request<TokenPair>('/two-factor-challenge', json(i), false).then(commit),
-    /** Direct mode passes the refresh token; cookie/BFF mode relies on the cookie. */
+    /** Body mode passes the refresh token; cookie mode (including lukk-nuxt's direct mode) omits it and relies on lukk's cookie. */
     refreshTokens: (refresh_token?: string) => request<TokenPair>('/refresh', json(refresh_token ? { refresh_token } : {}), false),
     /** Silently restore a session on app load (returns null when there's no valid refresh). */
     restore: () => request<TokenPair>('/refresh', json({}), false).then(commit).catch(() => null as TokenPair | null),
@@ -137,6 +164,11 @@ export function createLukkClient(hooks: LukkClientHooks) {
      * End the session. `retry: false` skips the refresh-and-retry on a 401, for a binding that renews
      * the token itself: one that holds refreshes back while a logout is on the wire would otherwise
      * have that refresh wait on the very logout waiting for it.
+     *
+     * `refreshToken` presents the session's refresh token (body mode — cookie mode sends lukk's cookie
+     * instead). lukk ends the session by it even once the access token has expired, the RFC 7009 shape:
+     * revoke by the token the client holds, without spending a rotation to get a fresh bearer first.
+     * Older lukk releases ignore it and use the bearer, as before.
      */
     //
     // Sent with a JSON body: lukk accepts a logout authenticated only by the refresh cookie (an expired
@@ -147,15 +179,18 @@ export function createLukkClient(hooks: LukkClientHooks) {
     // `keepalive`, so a page that navigates away right after starting it doesn't cancel it — a cancelled
     // logout never reached lukk, and the session outlived what the user saw. A browser that refuses a
     // keepalive request needing a CORS preflight rejects it with a TypeError; it is sent again without.
-    // Stryker disable next-line LogicalOperator: `?? true` and `&& true` differ only for `undefined`,
-    // and `request`'s own parameter default turns that back into `true` — the same call either way.
-    logout: (options: { retry?: boolean } = {}) => request<void>('/logout', { ...json({}), keepalive: true }, options.retry ?? true)
-      .catch((error: unknown) => {
-        if (!(error instanceof TypeError)) throw error
-        // Stryker disable next-line LogicalOperator: as above — `undefined` reaches `request`'s
-        // parameter default and becomes `true` regardless.
-        return request<void>('/logout', json({}), options.retry ?? true)
-      }),
+    logout: (options: { retry?: boolean, refreshToken?: string } = {}) => {
+      const body = options.refreshToken ? { refresh_token: options.refreshToken } : {}
+      // Stryker disable next-line LogicalOperator: `?? true` and `&& true` differ only for `undefined`,
+      // and `request`'s own parameter default turns that back into `true` — the same call either way.
+      return request<void>('/logout', { ...json(body), keepalive: true }, options.retry ?? true)
+        .catch((error: unknown) => {
+          if (!(error instanceof TypeError)) throw error
+          // Stryker disable next-line LogicalOperator: as above — `undefined` reaches `request`'s
+          // parameter default and becomes `true` regardless.
+          return request<void>('/logout', json(body), options.retry ?? true)
+        })
+    },
     /**
      * Confirm this client received the session a sign-in just issued (lukk's `claim_seconds`): a session
      * first used after that window is revoked. Any authenticated request claims too; this one exists so a
@@ -167,16 +202,16 @@ export function createLukkClient(hooks: LukkClientHooks) {
 
     // --- email verification ---
     /** Resend the email-verification link to the authenticated user (a no-op if already verified). */
-    sendEmailVerification: () => request<void>('/email/verification-notification', { method: 'POST' }),
+    sendEmailVerification: () => request<LukkStatus>('/email/verification-notification', { method: 'POST' }),
 
     // --- password reset (public; pairs with lukk's features.password_reset) ---
     /** Request a password-reset link be emailed. Always resolves 200 (no user enumeration). */
-    forgotPassword: (email: string) => request<void>('/forgot-password', json({ email })),
+    forgotPassword: (email: string) => request<LukkStatus>('/forgot-password', json({ email })),
     /** Complete a reset with the token + email from the emailed link and the new password. */
-    resetPassword: (input: ResetPasswordInput) => request<void>('/reset-password', json(input)),
+    resetPassword: (input: ResetPasswordInput) => request<LukkStatus>('/reset-password', json(input)),
     /** Change the password of the SIGNED-IN user. Revokes every other session upstream; this one
      *  survives, so no re-login and no token change here. */
-    changePassword: (input: ChangePasswordInput) => request<void>('/password', json(input)),
+    changePassword: (input: ChangePasswordInput) => request<LukkStatus>('/password', json(input)),
 
     // --- the account itself (behind step-up) ---
     /**
@@ -198,6 +233,13 @@ export function createLukkClient(hooks: LukkClientHooks) {
     // --- step-up confirmation ---
     confirmPassword: (password: string) => request<ConfirmationToken>('/confirm-password', json({ password })),
     confirmPasskey: (ceremony_id: string, credential: unknown) => request<ConfirmationToken>('/confirm-passkey', json({ ceremony_id, credential })),
+    /**
+     * Options for a passkey STEP-UP (lukk ≥ 0.7). Unlike `passkeyLoginOptions`, lukk lists the user's
+     * own credentials and asks for `userVerification: required` when the account can reach AAL2 — and
+     * then enforces it, so an assertion made against the anonymous login options can be refused.
+     * A 404 means a lukk that predates the route.
+     */
+    passkeyConfirmationOptions: () => request<PasskeyLoginOptions>('/confirm-passkey/options', { method: 'POST' }),
 
     // --- 2FA management (behind step-up) ---
     enableTwoFactor: () => request<TwoFactorEnrollment>('/two-factor', { method: 'POST' }),
@@ -210,7 +252,11 @@ export function createLukkClient(hooks: LukkClientHooks) {
     passkeyRegistrationOptions: () => request<PublicKeyCredentialCreationOptionsJSON>('/passkeys/registration-options', { method: 'POST' }),
     registerPasskey: (credential: unknown, name?: string) => request<void>('/passkeys', json({ credential, name })),
     passkeyLoginOptions: () => request<PasskeyLoginOptions>('/passkeys/login-options', { method: 'POST' }),
-    loginWithPasskey: (ceremony_id: string, credential: unknown) => request<TokenPair>('/passkeys/login', json({ ceremony_id, credential }), false).then(commit),
+    /**
+     * A token pair, or — lukk ≥ 0.7, for a single-factor assertion on an account with confirmed
+     * two-factor — a {@link TwoFactorChallenge}, completed exactly like a password sign-in's.
+     */
+    loginWithPasskey: (ceremony_id: string, credential: unknown) => request<LoginResult>('/passkeys/login', json({ ceremony_id, credential }), false).then(commit),
     listPasskeys: () => request<{ passkeys: PasskeySummary[] }>('/passkeys'),
     deletePasskey: (id: string) => request<void>(`/passkeys/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   }
@@ -296,17 +342,64 @@ async function parseBody<T>(res: Response): Promise<T> {
 }
 
 /**
+ * `LukkError.reason` of a request that was refused (401) and NOT sent again: renewing the session showed
+ * that it now belongs to another account than the one the request was made for — another tab signed in.
+ * The new session is kept; the caller decides whether to repeat the action as that account.
+ */
+export const SESSION_CHANGED = 'session_changed'
+
+function sessionChanged(): LukkError {
+  return { status: 401, message: 'The session changed to another account while this request was out; it was not sent again.', reason: SESSION_CHANGED }
+}
+
+/** Did a renewal hand back a token for another account than `before`'s? Only when both name one. */
+function switchedAccount(before: string | null | undefined, after: string): boolean {
+  const was = jwtSubject(before)
+  const now = jwtSubject(after)
+  return was !== undefined && now !== undefined && was !== now
+}
+
+/** A JWT's `sub` — decoded, not verified: which account a token says it is for, nothing more. */
+function jwtSubject(jwt: string | null | undefined): string | undefined {
+  try {
+    const sub = (JSON.parse(atob(jwt!.split('.')[1]!.replace(/-/g, '+').replace(/_/g, '/'))) as { sub?: unknown }).sub
+    return typeof sub === 'string' || typeof sub === 'number' ? String(sub) : undefined
+  }
+  // Stryker disable next-line BlockStatement: equivalent — an emptied catch falls off the end of the function, which returns undefined as well.
+  catch {
+    return undefined
+  }
+}
+
+/**
  * Build a {@link LukkError} from a status + an already-parsed Laravel error body
  * (`{ message, errors }`). Exported so lukk-nuxt shapes app-API errors identically.
  */
-export function lukkError(status: number, statusText: string, body: { message?: string, errors?: Record<string, string[]> } | null | undefined): LukkError {
+export function lukkError(status: number, statusText: string, body: { message?: string, errors?: Record<string, string[]>, reason?: unknown } | null | undefined): LukkError {
   const b = body ?? {}
-  return { status, message: b.message ?? statusText, ...(b.errors ? { errors: b.errors } : {}) }
+  return {
+    status,
+    message: b.message ?? statusText,
+    ...(b.errors ? { errors: b.errors } : {}),
+    // lukk's machine-readable cause, where it names one (a 423 `confirmation_session_mismatch`).
+    ...(typeof b.reason === 'string' ? { reason: b.reason } : {}),
+  }
 }
 
 async function toLukkError(res: Response): Promise<LukkError> {
-  let body: { message?: string, errors?: Record<string, string[]> } = {}
+  let body: { message?: string, errors?: Record<string, string[]>, reason?: unknown } = {}
   try { body = JSON.parse(await res.text()) }
   catch { /* non-JSON error body */ }
-  return lukkError(res.status, res.statusText, body)
+  const error = lukkError(res.status, res.statusText, body)
+  const retryAfter = retryAfterSeconds(res.headers.get('retry-after'))
+  if (retryAfter !== undefined) error.retryAfter = retryAfter
+  return error
+}
+
+/**
+ * A `Retry-After` header's delay-seconds (RFC 9110 §10.2.3), or undefined — the HTTP-date form is left out
+ * rather than guessed at. Exported so lukk-nuxt's app-API errors carry it the same way.
+ */
+export function retryAfterSeconds(value: string | null): number | undefined {
+  return value && /^\d+$/.test(value) ? Number(value) : undefined
 }
