@@ -5,8 +5,15 @@
  * the two never drift on what counts as expired.
  */
 export function accessExpired(jwt: string): boolean {
+  const expires = jwtExpiry(jwt)
+  // Malformed, or no `exp` → refresh.
+  return expires === undefined || expires <= Date.now() + 10_000
+}
+
+/** When a lukk JWT expires, in ms — **decoded, not verified** — or `undefined` when it names no `exp`. */
+export function jwtExpiry(jwt: string): number | undefined {
   const parts = jwt.split('.')
-  if (parts.length !== 3) return true // malformed → refresh
+  if (parts.length !== 3) return undefined
   try {
     // Decode base64url via `base64` (universally-typed `BufferEncoding`; this file is pulled
     // into the app/plugin compile context where `base64url` isn't in the encoding union).
@@ -15,9 +22,10 @@ export function accessExpired(jwt: string): boolean {
     // package holds 100% branch coverage.
     const b64 = parts[1]!.replace(/-/g, '+').replace(/_/g, '/')
     const payload = JSON.parse(Buffer.from(b64, 'base64').toString()) as { exp?: number }
-    return typeof payload.exp !== 'number' || payload.exp * 1000 <= Date.now() + 10_000
+    return typeof payload.exp === 'number' ? payload.exp * 1000 : undefined
   }
+  // Stryker disable next-line BlockStatement: equivalent — an emptied catch returns undefined, the same value.
   catch {
-    return true
+    return undefined
   }
 }

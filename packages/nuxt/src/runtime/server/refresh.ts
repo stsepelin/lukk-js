@@ -1,6 +1,7 @@
 import type { H3Event } from 'h3'
 import { isSessionEnded, sessionEnded, sessionKey } from './ended-sessions'
-import { forgetRefreshJournal, type Link, refreshHeads, refreshJournals, responsesOut } from './refresh-journal'
+import { confirmationsHeld, forgetRefreshJournal, type Link, refreshHeads, refreshJournals, responsesOut } from './refresh-journal'
+import { jwtExpiry } from './access-token'
 import { reportUnusableBase, resolveTarget, UPSTREAM_TIMEOUT_MS } from './proxy-utils'
 
 export interface TokenSession {
@@ -268,9 +269,72 @@ export function headPair(id: string | undefined, pair: TokenSession): TokenSessi
  * nothing, withhold the cookie" (for a pair the session moved past). Taken anyway, the 30 s window began for
  * a cookie the browser never got, and its next request — still on the consumed token — reached lukk past it
  * as a replay. Every delivery point goes through here, so none of them can drift.
+ *
+ * `held` is the confirmation the caller's seal holds. A step-up sealed for the session since (see
+ * `holdConfirmation`) is carried onto the pair returned: this cookie lands after the step-up's, and without
+ * it the browser lost the confirmation — the next gated call reached lukk without one, a `423`, and the user
+ * was asked to confirm again.
  */
-export function deliverPair(event: H3Event, id: string | undefined, pair: TokenSession): TokenSession | null {
-  return browserGone(event) ? null : currentPair(id, pair)
+export function deliverPair(event: H3Event, id: string | undefined, pair: TokenSession, held: string | undefined): TokenSession | null {
+  if (browserGone(event)) return null
+  const newest = currentPair(id, pair)
+  const confirmation = heldConfirmation(id)
+  return newest && confirmation !== undefined && confirmation !== held ? { ...newest, confirmation } : newest
+}
+
+/** The step-up held for session `id` (`holdConfirmation`), if any. */
+export function heldConfirmation(id: string | undefined): string | undefined {
+  return confirmationsHeld.get(id!)?.token
+}
+
+/**
+ * The last check before a cookie re-sealed after `deliverPair` leaves: has a sign-in or logout ended its
+ * session (`sessionEnded`)? If not, a step-up sealed for the session while this one was being sealed or
+ * checked — `deliverPair` read the held one before those awaits, and a shared store's answer is real I/O — is
+ * sealed in, and the session checked again: the step-up's cookie is out, and this one lands after it.
+ */
+export async function endedOrConfirmationCarried(session: { id?: string, data: TokenSession, update: (update: TokenSession) => Promise<unknown> }): Promise<boolean> {
+  for (;;) {
+    if (await sessionEnded(sessionKey(session))) return true
+    const late = heldConfirmation(sessionKey(session))
+    if (late === undefined || late === session.data.confirmation) return false
+    await session.update({ confirmation: late })
+  }
+}
+
+/** The most sessions whose confirmation is held at once (`holdConfirmation`); past it, a new one is not held. */
+export const CONFIRMATIONS_HELD_LIMIT = 50_000
+
+/** Warned past `CONFIRMATIONS_HELD_LIMIT` already — once per process. */
+let confirmationLimitWarned = false
+
+/**
+ * Hold `token`, the step-up just sealed for session `id`, until the confirmation's own expiry — for the
+ * responses sealed before it that are still out (`deliverPair`). The newest replaces any held before it. Not
+ * a token it cannot read an expiry from: nothing would end it. Gone with the session (`forgetRefreshJournal`
+ * — a logout, a replacing sign-in, a refused refresh) and when lukk refuses it (`dropConfirmation`). Bounded
+ * as the head hold is: past `CONFIRMATIONS_HELD_LIMIT` sessions a new one is not held (warned once).
+ */
+export function holdConfirmation(id: string, token: string): void {
+  const expires = jwtExpiry(token)
+  if (expires === undefined) return
+  const held = confirmationsHeld.get(id)
+  if (!held && confirmationsHeld.size >= CONFIRMATIONS_HELD_LIMIT) {
+    if (!confirmationLimitWarned) console.warn(`[lukk-nuxt] More than ${CONFIRMATIONS_HELD_LIMIT} sessions hold a step-up confirmation at once; the newest are not carried onto a response sealed before them.`)
+    confirmationLimitWarned = true
+    return
+  }
+  clearTimeout(held?.timer)
+  // A delay past what a timer can hold fires at once (Node) — the confirmation is then simply not carried.
+  confirmationsHeld.set(id, { token, timer: unref(setTimeout(() => confirmationsHeld.delete(id), Math.max(0, expires - Date.now()))) })
+}
+
+/** lukk refused `token` (a `423`): no response carries it on from here. One held since stays. */
+export function dropConfirmation(id: string | undefined, token: string | undefined): void {
+  const held = confirmationsHeld.get(id!)
+  if (!held || held.token !== token) return
+  clearTimeout(held.timer)
+  confirmationsHeld.delete(id!)
 }
 
 /** Has the browser gone, so that this response can no longer reach it? */
