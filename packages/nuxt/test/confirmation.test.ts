@@ -252,3 +252,17 @@ describe('the unearnable error does not outlive its cycle', () => {
     await expect(second).rejects.toThrow('lukk: confirmation cancelled')
   })
 })
+
+describe('a rejection that carries nothing', () => {
+  // `(error as { status }).status` threw a TypeError for a `null` or `undefined` rejection, replacing the
+  // caller's error with one about lukk-nuxt.
+  it.each([null, undefined])('confirmPassword passes %s through as it came', async (nothing) => {
+    __test.nuxtApp = { $lukk: { confirmPassword: vi.fn().mockRejectedValue(nothing) } }
+    await expect(useLukkConfirmation().confirmPassword('p')).rejects.toBe(nothing)
+  })
+
+  it.each([null, undefined])('withConfirmation passes %s through as it came', async (nothing) => {
+    __test.nuxtApp = { $lukk: {} }
+    await expect(useLukkConfirmation().withConfirmation(() => Promise.reject(nothing))).rejects.toBe(nothing)
+  })
+})

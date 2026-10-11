@@ -165,11 +165,34 @@ describe('reachesLukk', () => {
     expect(reachesLukk(target, base)).toBe(true)
   })
 
+  it.each([
+    ['https://h.test/index.phpauth/login', 'https://h.test/auth'],
+    ['https://h.test/index.PHPauth/refresh', 'https://h.test/auth'],
+    ['https://h.test/index.phpauth/refresh', 'https://h.test/auth'],
+    ['https://h.test/index.php%61uth/confirm-password', 'https://h.test/auth'],
+    ['https://h.test/index%2ephpauth/login', 'https://h.test/auth'],
+    ['https://h.test/index.php%2509auth/login', 'https://h.test/auth'],
+    ['https://h.test/index.phpauth%2Flogin', 'https://h.test/auth'],
+    ['https://h.test/index.phpindex.phpauth/login', 'https://h.test/auth'],
+    ['https://h.test/index.php/x.phpauth/login', 'https://h.test/auth'],
+    ['https://h.test/app/index.phpauth/login', 'https://h.test/app/auth'],
+    ['https://h.test/auth/login', 'https://h.test/index.phpauth'],
+  ])('sees a script name with no slash after it — Symfony strips it as a prefix: %s', (target, base) => {
+    // Symfony matches SCRIPT_NAME (`/index.php`) at the start of REQUEST_URI with nothing required after it,
+    // and the remainder becomes the path, a `/` put in front: behind nginx + php-fpm, `/index.phpauth/login`
+    // routes as `/auth/login`.
+    expect(reachesLukk(target, base)).toBe(true)
+  })
+
   it('lets an app\'s own routes behind a front controller, and .php names elsewhere, through', () => {
     expect(reachesLukk('https://api.test/index.php/users', 'https://api.test/auth')).toBe(false)
     expect(reachesLukk('https://api.test/files/report.php', 'https://api.test/auth')).toBe(false)
     expect(reachesLukk('https://api.test/index.php', 'https://api.test/auth')).toBe(false)
-    expect(reachesLukk('https://api.test/index.phpx/auth/login', 'https://api.test/auth')).toBe(false) // not a .php script
+    expect(reachesLukk('https://api.test/report.phpx/data', 'https://api.test/auth')).toBe(false) // read as `/x/data`
+    // Symfony strips ONE script: past it, a segment that merely contains `.php` is path, not a script.
+    expect(reachesLukk('https://api.test/index.php/a.phpx/auth/login', 'https://api.test/auth')).toBe(false)
+    expect(reachesLukk('https://api.test/blog/php-tips', 'https://api.test/auth')).toBe(false)
+    expect(reachesLukk('https://api.test/docs/auth.php', 'https://api.test/auth')).toBe(false)
     expect(reachesLukk('https://api.test/auth/login', 'https://api.test/app.phpx/auth')).toBe(false) // nor in baseURL
     expect(reachesLukk('https://api.test/index%25252ephp/auth/login', 'https://api.test/auth')).toBe(true) // three decodings deep
   })

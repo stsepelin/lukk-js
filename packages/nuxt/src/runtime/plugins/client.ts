@@ -3,7 +3,8 @@ import { defineNuxtPlugin, useNuxtApp, useRuntimeConfig } from '#imports'
 import { useLukkAuth } from '../composables/useLukkAuth'
 import { useLukkSecret } from '../utils/secrets'
 import { confirmationHeaderName, isAuthRejection, LUKK_BFF_PREFIX, underAppBase } from '../shared'
-import { acrossTabs, restoreState, settle } from '../utils/restore-state'
+import { acrossTabs, dropStepUp, restoreState, settle } from '../utils/restore-state'
+import { dropLukkReloadState } from '../utils/reload-state'
 import { tokenSubject } from '../utils/token-subject'
 
 /**
@@ -39,6 +40,8 @@ function isReplacedSession(error: unknown): boolean {
 export default defineNuxtPlugin({
   name: 'lukk:client',
   setup() {
+    // Before Nuxt restores a reload's saved state over the session this page is about to resolve.
+    dropLukkReloadState()
     const cfg = useRuntimeConfig().public.lukk as {
       mode: 'bff' | 'direct'
       baseURL: string
@@ -168,12 +171,13 @@ export default defineNuxtPlugin({
 
     async function resyncUser(pair: TokenPair | typeof REFRESHED_WITHOUT_TOKEN): Promise<void> {
       const { user, fetchUser } = useLukkAuth()
-      if (resyncing || user.value == null) return
-
       // No token in BFF mode (`REFRESHED_WITHOUT_TOKEN` has no `access_token`), so no subject to compare;
       // the abilities resync below still applies.
       const subject = tokenSubject((pair as Partial<TokenPair>).access_token)
       const switched = subject !== undefined && state.subject !== undefined && subject !== state.subject
+      // A step-up the previous account earned is not this one's (see `dropStepUp`).
+      if (switched) dropStepUp(nuxtApp)
+      if (resyncing || user.value == null) return
 
       // `resyncing` breaks the cycle where `fetchUser`'s own 401 refreshes again and re-enters here.
       if (!switched && user.value.abilities === undefined) return
@@ -278,6 +282,8 @@ export default defineNuxtPlugin({
       // pending here too: redeemed, it would replace the session the other tab began.
       state.epoch++
       useLukkSecret('challenge').value = null
+      // And a step-up earned by the session that changed (see `dropStepUp`).
+      dropStepUp(nuxtApp)
 
       if (cfg.mode === 'direct') {
         // The in-memory token is the old session's; the cookie is the new one's. Renew from the cookie,

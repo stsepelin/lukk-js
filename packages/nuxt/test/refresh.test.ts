@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { currentPair, refreshOnce } from '../src/runtime/server/refresh'
+import { currentPair, holdHead, refreshOnce, RESPONSES_OUT_LIMIT } from '../src/runtime/server/refresh'
 import { endSession, forgetEndedSessions, markSessionEnded, useSharedEndedSessions } from '../src/runtime/server/ended-sessions'
-import { refreshJournals } from '../src/runtime/server/refresh-journal'
+import { refreshHeads, refreshJournals, responsesOut } from '../src/runtime/server/refresh-journal'
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -139,7 +139,9 @@ describe('refreshOnce when lukk can\'t be reached', () => {
       expect(vi.getTimerCount()).toBe(2) // its link's, and the session head's
       await vi.advanceTimersByTimeAsync(30_000)
       expect(vi.getTimerCount()).toBe(1) // the head outlives the link, for responses still out
-      await vi.advanceTimersByTimeAsync(5 * 60_000)
+      await vi.advanceTimersByTimeAsync(10 * 60_000 - 30_000 - 1)
+      expect(vi.getTimerCount()).toBe(1) // the hold, from the rotation
+      await vi.advanceTimersByTimeAsync(1)
       expect(vi.getTimerCount()).toBe(0)
     }
     finally { vi.useRealTimers() }
@@ -1007,8 +1009,8 @@ describe('currentPair', () => {
       expect(currentPair(sid, { access: 'a1', refresh: 't1' })).toBeNull()
       const head = { access: 'a2', refresh: 't2' }
       expect(currentPair(sid, head)).toBe(head) // the head itself stands
-      // The marker outlives the links by the in-flight bound, then the session is unknown again.
-      await vi.advanceTimersByTimeAsync(5 * 60_000)
+      // The marker outlives the links by the hold (no response is out here), then the session is unknown again.
+      await vi.advanceTimersByTimeAsync(10 * 60_000)
       const old = { access: 'a1', refresh: 't1' }
       expect(currentPair(sid, old)).toBe(old)
     }
@@ -1268,5 +1270,83 @@ describe('refreshOnce outcome', () => {
     expect(b.pair?.access).toBe('B2')
     first(answer(200, { access_token: 'A2' }))
     expect((await a).pair?.access).toBe('A2')
+  })
+})
+
+describe('holdHead — the head outlives every response that may still seal a pair', () => {
+  /** A response that says when it closes, as Node's does. */
+  function response(o: { closes?: boolean } = {}) {
+    const closing: (() => void)[] = []
+    const res = o.closes === false ? {} : { once: (name: string, fn: () => void) => { if (name === 'close') closing.push(fn) } }
+    return { event: { node: { req: {}, res } } as never, close: () => closing.splice(0).forEach(fn => fn()) }
+  }
+  const rotate = async (sid: string, from: string, to: string) => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(JSON.stringify({ access_token: `a-${to}`, refresh_token: to }), { status: 200 }))
+    return refreshOnce({ id: 'h3', data: { refresh: from, sid } }, 'https://lukk/auth')
+  }
+  afterEach(() => { vi.useRealTimers(); responsesOut.clear() })
+
+  it('keeps the head while a response is out, then for the hold after the last one closes', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    const sid = `held-${Math.random()}`
+    const first = response()
+    const second = response()
+    holdHead(first.event, sid)
+    holdHead(second.event, sid)
+    await rotate(sid, 't0', 't1')
+
+    await vi.advanceTimersByTimeAsync(3 * 60 * 60_000) // hours past the hold
+    expect(refreshHeads.get(sid)?.token).toBe('t1')
+    first.close()
+    await vi.advanceTimersByTimeAsync(60 * 60_000)
+    expect(refreshHeads.get(sid)?.token).toBe('t1') // one still out
+    second.close()
+    expect(responsesOut.has(sid)).toBe(false)
+    await vi.advanceTimersByTimeAsync(10 * 60_000 - 1)
+    expect(refreshHeads.has(sid)).toBe(true) // the hold, from the last close
+    await vi.advanceTimersByTimeAsync(1)
+    expect(refreshHeads.has(sid)).toBe(false)
+  })
+
+  it('counts nothing for a response without a close event, or a session without an id', async () => {
+    holdHead(response({ closes: false }).event, 'no-close')
+    holdHead(response().event, undefined)
+    expect(responsesOut.size).toBe(0)
+  })
+
+  it('a closing response re-arms nothing for a session with no head', () => {
+    const r = response()
+    holdHead(r.event, 'headless')
+    r.close()
+    expect(refreshHeads.has('headless')).toBe(false)
+    expect(responsesOut.has('headless')).toBe(false)
+  })
+
+  it('extends the head when a pair leading from it is handed out', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    const sid = `handout-${Math.random()}`
+    await rotate(sid, 't0', 't1')
+    await vi.advanceTimersByTimeAsync(9 * 60_000)
+    // A straggler on t0 is handed t1, nine minutes on: the head lasts the hold again from now.
+    expect((await refreshOnce({ id: 'h3', data: { refresh: 't0', sid } }, 'https://lukk/auth')).pair?.refresh).toBe('t1')
+    await vi.advanceTimersByTimeAsync(10 * 60_000 - 1)
+    expect(refreshHeads.get(sid)?.token).toBe('t1')
+    await vi.advanceTimersByTimeAsync(1)
+    expect(refreshHeads.has(sid)).toBe(false)
+  })
+
+  it('is bounded: past the limit a new session is not held, and that is warned about once', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    for (let i = 0; i < RESPONSES_OUT_LIMIT; i++) responsesOut.set(`filler-${i}`, 1)
+    const held = response()
+    holdHead(held.event, 'filler-0') // a session already counted still is
+    expect(responsesOut.get('filler-0')).toBe(2)
+    holdHead(response().event, 'over-1')
+    expect(responsesOut.has('over-1')).toBe(false)
+    expect(warn).toHaveBeenCalledOnce()
+    expect(String(warn.mock.calls[0]![0])).toContain(String(RESPONSES_OUT_LIMIT))
+    holdHead(response().event, 'over-2')
+    expect(responsesOut.has('over-2')).toBe(false)
+    expect(warn).toHaveBeenCalledOnce()
   })
 })

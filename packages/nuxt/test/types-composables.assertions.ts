@@ -4,8 +4,9 @@
  * declarations under. An inferred member degrades to `any` there, which fails an `expectTypeOf` below
  * or leaves a `@ts-expect-error` unused.
  */
-import type { AccountExport, ChangePasswordInput, LoginInput, LoginResult, LukkUser, PasskeySummary, RecoveryCodeCount, RegisterInput, RegisterResult, ResetPasswordInput, TwoFactorEnrollment } from 'lukk-core'
+import { type AccountExport, type ChangePasswordInput, isRegistrationPending, isTwoFactorChallenge, type LoginInput, type LoginResult, type LukkUser, type PasskeySummary, type RecoveryCodeCount, type RegisterInput, type RegisterResult, type ResetPasswordInput, type TwoFactorEnrollment, type LukkClient, type RegistrationPending, type TwoFactorChallenge } from 'lukk-core'
 import type { $Fetch } from 'ofetch'
+import type { LukkBffClient } from '../src/runtime/shared'
 import { expectTypeOf } from 'vitest'
 import type { ComputedRef, Ref } from 'vue'
 import { useLukkAbilities } from '../src/runtime/composables/useLukkAbilities'
@@ -154,3 +155,38 @@ expectTypeOf(auth.fetchUser).toEqualTypeOf<() => Promise<void>>()
 expectTypeOf(auth.initSession).toEqualTypeOf<() => Promise<void>>()
 // @ts-expect-error the restore owns it
 auth.loggedIn.value = true
+
+// --- lukk-core's guards on the composables' results ------------------------------------------------------
+// `isTwoFactorChallenge(await login(...))` is what UPGRADE.md recommends, and the composables resolve the
+// BFF shape too: guards typed for lukk-core's own result alone rejected them (TS2345).
+declare const loginOutcome: Awaited<ReturnType<ReturnType<typeof useLukkAuth>['login']>>
+if (isTwoFactorChallenge(loginOutcome)) expectTypeOf(loginOutcome.challenge_token).toEqualTypeOf<string>()
+declare const registered: Awaited<ReturnType<ReturnType<typeof useLukkAuth>['register']>>
+if (isRegistrationPending(registered)) expectTypeOf(registered.registered).toEqualTypeOf<true>()
+
+// --- `$lukk` in bff mode ---------------------------------------------------------------------------------------
+// The proxy answers a sign-in or renewal with its acknowledgement, and a step-up without its token.
+declare const bff: LukkBffClient
+expectTypeOf(bff.login).returns.toEqualTypeOf<Promise<TwoFactorChallenge | BffSignInResult>>()
+expectTypeOf(bff.loginWithPasskey).returns.toEqualTypeOf<Promise<TwoFactorChallenge | BffSignInResult>>()
+expectTypeOf(bff.register).returns.toEqualTypeOf<Promise<RegistrationPending | TwoFactorChallenge | BffSignInResult>>()
+expectTypeOf(bff.twoFactorChallenge).returns.toEqualTypeOf<Promise<BffSignInResult>>()
+expectTypeOf(bff.refreshTokens).returns.toEqualTypeOf<Promise<BffSignInResult>>()
+expectTypeOf(bff.confirmPassword).returns.toEqualTypeOf<Promise<{ ok: true }>>()
+expectTypeOf(bff.confirmPasskey).returns.toEqualTypeOf<Promise<{ ok: true }>>()
+expectTypeOf(bff.logout).toEqualTypeOf<LukkClient['logout']>() // the rest as lukk-core types them
+
+// --- useLukkForm, nested data -----------------------------------------------------------------------------
+// Laravel reports a nested field under its dotted key (`authorization.role`), and `nestedErrors` expands
+// those: `errors['authorization.role']` was TS2551, `nestedErrors.authorization?.role` an error on `unknown`.
+const nested = useLukkForm({ name: '', authorization: { role: '' }, items: [{ name: '' }], tags: [''] })
+expectTypeOf(nested.errors['authorization.role']).toEqualTypeOf<string | undefined>()
+expectTypeOf(nested.errors['items.0.name']).toEqualTypeOf<string | undefined>()
+expectTypeOf(nested.errors.name).toEqualTypeOf<string | undefined>()
+expectTypeOf(nested.nestedErrors.name).toEqualTypeOf<string | undefined>()
+expectTypeOf(nested.nestedErrors.authorization?.role).toEqualTypeOf<string | undefined>()
+expectTypeOf(nested.nestedErrors.items?.[0]?.name).toEqualTypeOf<string | undefined>()
+expectTypeOf(nested.nestedErrors.tags?.[0]).toEqualTypeOf<string | undefined>()
+nested.setError('authorization.role', 'Pick a role.')
+// @ts-expect-error a key with no dot is a field of the form, and this one is not
+nested.errors.role = 'x'

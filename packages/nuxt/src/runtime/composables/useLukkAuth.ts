@@ -1,5 +1,6 @@
-import { isRegistrationPending, isTwoFactorChallenge, type LoginInput, type LoginResult, type LukkUser, type RegisterInput, type RegisterResult, shapeUser, userShapeWarning } from 'lukk-core'
+import { isRegistrationPending, isTwoFactorChallenge, type LoginInput, type LoginResult, type LukkError, type LukkUser, type RegisterInput, type RegisterResult, shapeUser, userShapeWarning } from 'lukk-core'
 import type { ComputedRef, Ref } from 'vue'
+import type { BffSignInResult } from '../shared'
 import { computed, useNuxtApp, useRuntimeConfig, useState } from '#imports'
 import { CONFIRMED_KEY, READY_KEY, RESTORE_FAILED_KEY, USER_KEY } from '../keys'
 import { useLukkSecret } from '../utils/secrets'
@@ -23,15 +24,7 @@ interface PublicLukk {
   logoutCookie?: string
 }
 
-/**
- * What a sign-in resolves to in BFF mode: the proxy's acknowledgement. The token pair stays in the sealed
- * session server-side, so there is no `access_token` — narrow with `'access_token' in result` (or
- * `isTwoFactorChallenge`) before reading one.
- */
-export interface BffSignInResult {
-  ok: true
-  expires_in?: number
-}
+export type { BffSignInResult }
 
 /**
  * Declared rather than inferred: the module build cannot resolve `#imports`, so an inferred return type
@@ -210,7 +203,17 @@ export function useLukkAuth(): LukkAuth {
   async function completeTwoFactor(input: { code?: string, recovery_code?: string }): Promise<void> {
     if (!challenge.value) throw new Error('lukk: no pending two-factor challenge')
     const challengeToken = challenge.value
-    const { current } = await signIn(nuxtApp, () => $lukk.twoFactorChallenge({ challenge_token: challengeToken, ...input }), () => true)
+    let current: boolean
+    try {
+      ({ current } = await signIn(nuxtApp, () => $lukk.twoFactorChallenge({ challenge_token: challengeToken, ...input }), () => true))
+    }
+    catch (error) {
+      // lukk refused the CHALLENGE itself (expired, already used, issued before the password changed) —
+      // not the code: it can never succeed, so it goes and `pendingTwoFactor` with it. Kept, every code
+      // the user typed burned the throttle on it. Only this attempt's own: a newer sign-in may have set one.
+      if ((error as LukkError | null)?.errors?.challenge_token && challenge.value === challengeToken) challenge.value = null
+      throw error
+    }
     if (!current) return endSupersededSignIn(undefined, true)
     challenge.value = null
     await fetchUser()

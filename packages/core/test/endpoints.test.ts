@@ -181,11 +181,17 @@ describe('guards', () => {
   it('isTwoFactorChallenge', () => {
     expect(isTwoFactorChallenge({ two_factor: true, challenge_token: 'c' })).toBe(true)
     expect(isTwoFactorChallenge({ access_token: 'a', expires_in: 1 })).toBe(false)
+    // Any value: the lukk-nuxt composables resolve their BFF shape, and a void answer is possible.
+    expect(isTwoFactorChallenge({ ok: true, expires_in: 900 })).toBe(false)
+    expect(isTwoFactorChallenge(null)).toBe(false)
+    expect(isTwoFactorChallenge(undefined)).toBe(false)
   })
 
   it('isRegistrationPending', () => {
     expect(isRegistrationPending({ registered: true, requires_verification: true })).toBe(true)
     expect(isRegistrationPending({ access_token: 'a', expires_in: 1 })).toBe(false)
+    expect(isRegistrationPending(null)).toBe(false)
+    expect(isRegistrationPending(undefined)).toBe(false)
   })
 })
 

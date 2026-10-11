@@ -84,7 +84,7 @@ export function useLukkConfirmation(): LukkConfirmation {
    * original call fails with a real error instead of hanging.
    */
   function abandonIfUnearnable(error: unknown): void {
-    if ((error as { status?: number }).status !== 403) return
+    if ((error as { status?: number } | null)?.status !== 403) return
 
     // Stashed so `confirmedOrCancelled` can reject with the REAL error. Rejecting with a synthetic
     // "confirmation cancelled" told the caller the user dismissed a modal they never saw, and threw
@@ -129,7 +129,7 @@ export function useLukkConfirmation(): LukkConfirmation {
       return await action()
     }
     catch (error) {
-      if ((error as { status?: number }).status !== 423) throw error
+      if ((error as { status?: number } | null)?.status !== 423) throw error
       // A confirmation landed while this request was out — the 423 answers the request, not that
       // confirmation. Clearing it wiped the step-up just earned (another action's modal) and asked again:
       // retry once with it instead.

@@ -98,37 +98,56 @@ export function routeWithin(target: string, base: string): string | null {
  * own host everything is refused; on another host nothing is (lukk bound to a separate domain).
  */
 export function reachesLukk(target: string, base: string): boolean {
-  if (reaches(target, base)) return true
   // Read through any PHP front controller as well. Laravel served through one routes `/index.php/auth/login`
-  // exactly as `/auth/login` — Symfony strips the script name — so with `api.target` at the app's root that
-  // path streamed lukk's token pair out; under a sub-path the script sits further in (`/app/index.php/auth/…`),
-  // and without URL rewriting `baseURL` names it too (`https://h/index.php/auth`). So both are judged again
-  // with every segment naming a `.php` script dropped — AS WELL AS, never instead of, as written above:
-  // dropped whole, a segment takes what it hides with it (`/auth%2Flogin%3F.php`).
+  // exactly as `/auth/login`: Symfony matches SCRIPT_NAME at the start of REQUEST_URI (decoded) and routes
+  // what follows it — with no `/` required after the script name, so `/index.phpauth/login` is
+  // `/auth/login` too, a `/` put in front. With `api.target` at the app's root such a path streamed lukk's
+  // token pair out; under a sub-path the script sits further in (`/app/index.php/auth/…`), and without URL
+  // rewriting `baseURL` names it too (`https://h/index.php/auth`). This side cannot know the script's name,
+  // so every `.php` is read as the end of one (see `scriptReadings`), in target and base alike — AS WELL
+  // AS, never instead of, the path as written: the first reading of each is the path itself (the target as
+  // written against the base as configured, in the first round), since dropped whole, a segment takes what
+  // it hides with it (`/auth%2Flogin%3F.php`).
   //
   // On every round of decoding, as `reaches` judges the path itself: a hop that decodes once more turns
   // `/index.php%2Fauth/login` into `/index.php/auth/login` and `/index%252ephp/…` into `/index%2ephp/…`,
-  // which Symfony reads as the script. So each round's string is split on `/` and `\` (as a decoding hop
-  // treats them alike) — without the tab, LF and CR a re-parsing hop strips from anywhere, which turn
-  // `index.php%09` and `index.ph%09p` into `index.php` (from that string only: the next round decodes what
-  // was actually there) — its scripts dropped, and the rest judged — a `?` or `#` it decoded kept encoded,
-  // so that `reaches` reads it both ways.
-  const lukk = withoutScripts(base)
+  // which Symfony reads as the script. (Each round's readings come from that round's string; the next round
+  // decodes what was actually there.)
+  const { origin: baseOrigin, pathname: basePath } = new URL(base)
+  const bases = scriptReadings(basePath).map(path => `${baseOrigin}${path}`)
   const { origin, pathname } = new URL(target)
   let path = pathname
-  // Stryker disable next-line EqualityOperator: equivalent — a script only a fifth decoding reveals sits in a path still decoding after four rounds, which `reaches` refuses above, as written. (`round--` never ends: that timeout is a synchronous loop, the detection.)
+  // Stryker disable next-line EqualityOperator: equivalent — a script only a fifth decoding reveals sits in a path still decoding after four rounds, which `reaches` refuses on the first round's reading of the path itself. (`round--` never ends: that timeout is a synchronous loop, the detection.)
   for (let round = 0; round < DECODING_ROUNDS; round++) {
-    const rest = path.replace(/[\t\n\r]/g, '').split(/[/\\]/).filter(segment => !/\.php$/i.test(segment)).join('/').replace(/[?#]/g, encodeURIComponent)
-    if (reaches(`${origin}${rest}`, lukk)) return true
+    for (const reading of scriptReadings(path)) {
+      if (bases.some(lukk => reaches(`${origin}${reading}`, lukk))) return true
+    }
     path = decodeAscii(path)
   }
   return false
 }
 
-/** `url` with every path segment that names a `.php` script dropped. */
-function withoutScripts(url: string): string {
-  const { origin, pathname } = new URL(url)
-  return `${origin}${pathname.split('/').filter(segment => !/\.php$/i.test(decodeAscii(segment))).join('/')}`
+/**
+ * The ways a PHP front controller could read `path` (one round's string): split on `/` and `\` (a decoding
+ * hop treats them alike), without the tab, LF and CR a re-parsing hop strips from anywhere (`index.ph%09p` is
+ * `index.php` to it). For each `.php`, its segment replaced by what follows it — nothing, for a segment that
+ * ends there (`index.php` is dropped), `auth` for `index.phpauth`, as Symfony routes it — and every other
+ * segment ending in `.php` dropped too, however many scripts are written. A `?` or `#` the string holds is kept encoded, so
+ * that `reaches` reads it both ways.
+ */
+function scriptReadings(path: string): string[] {
+  const segments = path.replace(/[\t\n\r]/g, '').split(/[/\\]/)
+  const isScript = (segment: string) => /\.php$/i.test(segment)
+  // The path itself, and one reading per `.php`: a script ending its segment is dropped there (and so
+  // every script dropped, by the reading of whichever comes first, as before).
+  const readings = [segments]
+  segments.forEach((segment, at) => {
+    for (const { index } of segment.matchAll(/\.php/gi)) {
+      const rest = segment.slice(index + 4)
+      readings.push(segments.flatMap((other, i) => (i === at ? (rest ? [rest] : []) : isScript(other) ? [] : [other])))
+    }
+  })
+  return readings.map(reading => reading.join('/').replace(/[?#]/g, encodeURIComponent))
 }
 
 /** `reachesLukk` for one reading of the path — the front controller aside. */

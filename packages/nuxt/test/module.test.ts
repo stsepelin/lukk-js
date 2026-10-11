@@ -105,13 +105,16 @@ describe('lukk-nuxt module', () => {
     // Was `Promise<TokenPair | null>`, which the BFF default never resolved to: its refresh hands the
     // browser no token. That assertion pinned the untruthful type, so it changed with it.
     expect(contents).toContain(`import type { LukkClient, RefreshOutcome } from 'lukk-core'`)
-    expect(contents).toContain('$lukk: LukkClient')
+    // By mode: in bff mode the sign-ins and renewals resolve the proxy's acknowledgement, not a token pair.
+    expect(contents).toContain(`import type { LukkBffClient } from './runtime/shared'`)
+    expect(contents).toContain('type LukkTransportClient = LukkBffClient')
+    expect(contents).toContain('$lukk: LukkTransportClient')
     expect(contents).toContain('$lukkRefresh: () => Promise<RefreshOutcome>')
     // Provided by the plugin all along, and missing from the types.
     expect(contents).toContain('$lukkRestore: () => Promise<{ pair: RefreshOutcome, unavailable: boolean, superseded?: boolean }>')
     // And in templates, where `$lukk` was untyped: Vue reads globals from ComponentCustomProperties.
     expect(contents).toContain(`declare module 'vue'`)
-    expect(contents).toMatch(/interface ComponentCustomProperties \{[^}]*\$lukk: LukkClient/)
+    expect(contents).toMatch(/interface ComponentCustomProperties \{[^}]*\$lukk: LukkTransportClient/)
     // All three provides, as on NuxtApp: `$lukkRestore` was typed there and missing here.
     expect(contents).toMatch(/interface ComponentCustomProperties \{[^}]*\$lukkRestore: \(\) => Promise<\{ pair: RefreshOutcome, unavailable: boolean, superseded\?: boolean \}>/)
   })
@@ -460,6 +463,14 @@ describe('lukk-nuxt module', () => {
     expect(bad('X-Step-Up')).not.toThrow()
   })
 
+  it('validates the EFFECTIVE confirmationHeader — one set through runtimeConfig too', () => {
+    // defu gives the app's own `runtimeConfig.public.lukk` precedence: a reserved name there passed the
+    // build and was silently replaced at runtime, mismatching lukk's own header — a 423 forever.
+    const viaRuntimeConfig = (confirmationHeader: string) => () => setup({ baseURL: 'https://api/auth', mode: 'bff' }, { runtimeConfig: { public: { lukk: { confirmationHeader } } } })
+    expect(viaRuntimeConfig('Authorization')).toThrow(/confirmationHeader "Authorization" must be a valid HTTP header name/)
+    expect(viaRuntimeConfig('X-Step-Up')).not.toThrow()
+  })
+
   it('warns when baseURL is empty', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     setup({ baseURL: '', mode: 'direct' })
@@ -575,10 +586,13 @@ describe('lukk-nuxt module — what it registers, and when it speaks up', () => 
     // browser — and `$lukkRestore` was not typed at all. The exact text pinned both; it changed with them.
     expect(template.getContents()).toBe([
       `import type { LukkClient, RefreshOutcome } from 'lukk-core'`,
+      `import type { LukkBffClient } from './runtime/shared'`,
+      `/** The client as this app's transport answers: bff mode's sign-ins and renewals carry no token. */`,
+      `type LukkTransportClient = LukkBffClient`,
       `declare module '#app' {`,
       `  interface NuxtApp {`,
       `    /** The lukk-core client, wired for the configured transport. */`,
-      `    $lukk: LukkClient`,
+      `    $lukk: LukkTransportClient`,
       `    /**`,
       `     * The shared single-flight refresh: the new pair in direct mode; \`REFRESHED_WITHOUT_TOKEN\` in bff`,
       `     * mode, where the proxy re-sealed the session and the browser holds no token; \`null\` when the`,
@@ -592,7 +606,7 @@ describe('lukk-nuxt module — what it registers, and when it speaks up', () => 
       `// Templates read globals from here, not from NuxtApp, so \`$lukk\` in a <template> was untyped.`,
       `declare module 'vue' {`,
       `  interface ComponentCustomProperties {`,
-      `    $lukk: LukkClient`,
+      `    $lukk: LukkTransportClient`,
       `    $lukkRefresh: () => Promise<RefreshOutcome>`,
       `    $lukkRestore: () => Promise<{ pair: RefreshOutcome, unavailable: boolean, superseded?: boolean }>`,
       `  }`,
@@ -600,6 +614,13 @@ describe('lukk-nuxt module — what it registers, and when it speaks up', () => 
       `export {}`,
       ``,
     ].join('\n'))
+  })
+
+  it('types $lukk as the plain lukk-core client in direct mode', () => {
+    setup({ baseURL: 'https://api/auth', mode: 'direct' })
+    const contents = (kit.addTypeTemplate.mock.calls[0]![0] as { getContents: () => string }).getContents()
+    expect(contents).toContain('type LukkTransportClient = LukkClient\n')
+    expect(contents).not.toContain('LukkBffClient')
   })
 
   it('warns about a half-configured app-API proxy in bff mode only, and not when it is whole or absent', () => {

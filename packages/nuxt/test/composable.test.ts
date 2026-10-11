@@ -286,6 +286,49 @@ describe('useLukkAuth', () => {
     expect(twoFactorChallenge).toHaveBeenCalledWith({ challenge_token: 'ct', recovery_code: 'RECOVERY-1' })
   })
 
+  it('drops an expired or invalid challenge (422 on challenge_token), so the user signs in again', async () => {
+    // Kept, `pendingTwoFactor` stayed true for good and every code burned the throttle on a dead challenge.
+    const expired = { status: 422, message: 'Invalid.', errors: { challenge_token: ['The two-factor challenge has expired.'] } }
+    withApp({ login: vi.fn().mockResolvedValue({ two_factor: true, challenge_token: 'ct' }), twoFactorChallenge: vi.fn().mockRejectedValue(expired) })
+    const { login, verifyTwoFactor, pendingTwoFactor } = useLukkAuth()
+    await login({ email: 'e', password: 'p' })
+
+    await expect(verifyTwoFactor('123456')).rejects.toBe(expired)
+    expect(pendingTwoFactor.value).toBe(false)
+  })
+
+  it('keeps the challenge for a wrong code — the user tries again', async () => {
+    const wrong = { status: 422, message: 'Invalid.', errors: { code: ['The provided two-factor code was invalid.'] } }
+    withApp({ login: vi.fn().mockResolvedValue({ two_factor: true, challenge_token: 'ct' }), twoFactorChallenge: vi.fn().mockRejectedValue(wrong) })
+    const { login, verifyTwoFactor, pendingTwoFactor } = useLukkAuth()
+    await login({ email: 'e', password: 'p' })
+
+    await expect(verifyTwoFactor('000000')).rejects.toBe(wrong)
+    expect(pendingTwoFactor.value).toBe(true)
+  })
+
+  it.each([null, { status: 429, message: 'Too Many Attempts.' }])('keeps the challenge for a failure without a bag (a throttle, an outage): %j', async (failure) => {
+    withApp({ login: vi.fn().mockResolvedValue({ two_factor: true, challenge_token: 'ct' }), twoFactorChallenge: vi.fn().mockRejectedValue(failure) })
+    const { login, verifyTwoFactor, pendingTwoFactor } = useLukkAuth()
+    await login({ email: 'e', password: 'p' })
+
+    await expect(verifyTwoFactor('000000')).rejects.toBe(failure)
+    expect(pendingTwoFactor.value).toBe(true)
+  })
+
+  it('leaves a newer sign-in\'s challenge alone when the old one is refused', async () => {
+    const expired = { status: 422, message: 'Invalid.', errors: { challenge_token: ['The two-factor challenge has expired.'] } }
+    withApp({ login: vi.fn().mockResolvedValue({ two_factor: true, challenge_token: 'old' }), twoFactorChallenge: vi.fn(async () => {
+      useLukkSecret('challenge').value = 'new' // another sign-in's challenge landed while this code was out
+      throw expired
+    }) })
+    const { login, verifyTwoFactor, pendingTwoFactor } = useLukkAuth()
+    await login({ email: 'e', password: 'p' })
+
+    await expect(verifyTwoFactor('123456')).rejects.toBe(expired)
+    expect(pendingTwoFactor.value).toBe(true) // the newer challenge stands
+  })
+
   it('throws when completing 2FA without a pending challenge', async () => {
     withApp({ twoFactorChallenge: vi.fn() })
     await expect(useLukkAuth().verifyTwoFactor('123')).rejects.toThrow('no pending')

@@ -36,8 +36,16 @@ export const refreshJournals: Map<string, Map<string, Link>> = ((globalThis as {
  * Per session id: the newest refresh token the BFF has produced for it — its HEAD — independent of the links'
  * short windows. A response that took longer than those windows (a slow upstream, a long render) is about to
  * seal a pair; if the session has moved past it, the links that led on may be gone, and only this says so.
+ * Kept `REFRESH_HOLD_MS` past the latest rotation, hand-out or response, and while any is out (`holdHead`).
  */
 export const refreshHeads: Map<string, { token: string, timer: ReturnType<typeof setTimeout> }> = ((globalThis as { __lukkRefreshHeads?: Map<string, { token: string, timer: ReturnType<typeof setTimeout> }> }).__lukkRefreshHeads ??= new Map())
+
+/**
+ * Per session id: how many responses are out that may still seal a pair for it (`holdHead`). While any is,
+ * the session's head stays — the one thing that tells such a response, however late, that the session has
+ * moved past the pair it is carrying.
+ */
+export const responsesOut: Map<string, number> = ((globalThis as { __lukkResponsesOut?: Map<string, number> }).__lukkResponsesOut ??= new Map())
 
 /** Drop a session's journal and its head, and every timer they hold. */
 export function forgetRefreshJournal(key: string): void {

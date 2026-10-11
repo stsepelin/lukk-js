@@ -1,3 +1,4 @@
+import type { LukkClient, RegistrationPending, TwoFactorChallenge } from 'lukk-core'
 // Public runtime constants — one source of truth for the proxy mount + session name.
 
 /** The same-origin path the BFF proxy is mounted at. Reserved by lukk-nuxt. */
@@ -267,4 +268,30 @@ export function isAuthRejection(error: unknown): boolean {
   const e = error as { statusCode?: number, status?: number } | null | undefined
   const status = e?.statusCode ?? e?.status
   return status === 401 || status === 403
+}
+
+/**
+ * What a sign-in or renewal resolves to in BFF mode: the proxy's acknowledgement. The token pair stays in the
+ * sealed session server-side, so there is no `access_token` — narrow with `'access_token' in result` (or
+ * `isTwoFactorChallenge`) before reading one.
+ */
+export interface BffSignInResult {
+  ok: true
+  expires_in?: number
+}
+
+/**
+ * `useNuxtApp().$lukk` in BFF mode. The same lukk-core client, but its calls go through the proxy, which keeps
+ * every token server-side: a sign-in, a 2FA completion and a renewal resolve the proxy's acknowledgement, and a
+ * step-up resolves without its token (the proxy holds it). Typed as the raw client, code read an
+ * `access_token` or a `confirmation_token` that was never there.
+ */
+export type LukkBffClient = Omit<LukkClient, 'login' | 'loginWithPasskey' | 'register' | 'twoFactorChallenge' | 'refreshTokens' | 'confirmPassword' | 'confirmPasskey'> & {
+  login: (...args: Parameters<LukkClient['login']>) => Promise<TwoFactorChallenge | BffSignInResult>
+  loginWithPasskey: (...args: Parameters<LukkClient['loginWithPasskey']>) => Promise<TwoFactorChallenge | BffSignInResult>
+  register: (...args: Parameters<LukkClient['register']>) => Promise<RegistrationPending | TwoFactorChallenge | BffSignInResult>
+  twoFactorChallenge: (...args: Parameters<LukkClient['twoFactorChallenge']>) => Promise<BffSignInResult>
+  refreshTokens: (...args: Parameters<LukkClient['refreshTokens']>) => Promise<BffSignInResult>
+  confirmPassword: (...args: Parameters<LukkClient['confirmPassword']>) => Promise<{ ok: true }>
+  confirmPasskey: (...args: Parameters<LukkClient['confirmPasskey']>) => Promise<{ ok: true }>
 }

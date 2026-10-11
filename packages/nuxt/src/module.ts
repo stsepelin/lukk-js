@@ -128,7 +128,7 @@ export interface ModuleOptions {
    * Laravel API-Resource `{ "data": {...} }` (never a paginated/error envelope). Set a different
    * key for another wrapper, or `false` to disable unwrapping and store the response as-is.
    */
-  user: { endpoint: string, key?: string | false }
+  user: { endpoint?: string, key?: string | false }
   /**
    * BFF only: the secret that seals the server-side token session (≥ 32 chars).
    * Prefer setting it via the `NUXT_LUKK_SESSION_PASSWORD` env var.
@@ -165,7 +165,7 @@ export interface ModuleOptions {
    * least as long as lukk's `refresh_ttl`, or idle sessions end before their refresh token does. It must be a
    * positive whole number of seconds; anything else fails the build (`0` would mean a seal that never expires).
    */
-  session: { password: string, cookieSecure?: boolean, name?: string, sharedStore?: string, maxAge?: number }
+  session: { password?: string, cookieSecure?: boolean, name?: string, sharedStore?: string, maxAge?: number }
   /**
    * BFF only, optional: proxy your own app API so it's authenticated out of the
    * box. Requests to `${path}/**` are forwarded to the FIXED `target` (your
@@ -193,7 +193,7 @@ export interface ModuleOptions {
    * app's own cookie (a locale, a feature flag) reach the browser. The sealed session
    * cookie is never forwardable regardless of this list.
    */
-  api: { path: string, target: string, forceJson: boolean, forwardSetCookie: string[] }
+  api: { path?: string, target?: string, forceJson?: boolean, forwardSetCookie?: string[] }
   /**
    * BFF only, opt-in: the request header your TRUSTED edge sets with the real client IP
    * (`'cf-connecting-ip'`, `'x-real-ip'`, …). Both proxies then forward that address upstream as
@@ -221,6 +221,18 @@ export interface ModuleOptions {
   bodyLimit?: number
 }
 
+/**
+ * The options as `setup` receives them: the defaults below merged in, deeply. Nuxt types what an app writes
+ * as a SHALLOW `Partial<ModuleOptions>`, so the nested fields the defaults fill are optional in
+ * `ModuleOptions` — required, a documented `api: { path, target }` failed the app's typecheck — and
+ * required again here, where the merge guarantees them.
+ */
+type ResolvedModuleOptions = ModuleOptions & {
+  user: { endpoint: string }
+  session: { password: string }
+  api: Required<ModuleOptions['api']>
+}
+
 export default defineNuxtModule<ModuleOptions>({
   meta: {
     name: 'lukk-nuxt',
@@ -238,7 +250,9 @@ export default defineNuxtModule<ModuleOptions>({
     api: { path: '', target: '', forceJson: true, forwardSetCookie: [] },
     clientIpHeader: '',
   },
-  setup(options, nuxt) {
+  setup(input, nuxt) {
+    // The defaults are merged in (defu, deeply) before `setup` runs.
+    const options = input as ResolvedModuleOptions
     const resolver = createResolver(import.meta.url)
     // Normalize the app-proxy mount once (a trailing slash would make `/api//**`).
     const apiPath = options.api.path.replace(/\/$/, '')
@@ -352,8 +366,10 @@ export default defineNuxtModule<ModuleOptions>({
     // An empty or non-token value becomes a computed header key that `Headers.set` rejects, 502ing
     // every proxied request; a name the proxies set themselves silently breaks step-up (or, in the
     // auth proxy, clobbers Accept/Content-Type). Both fail loudly here rather than at request time.
-    if (!isUsableConfirmationHeader(options.confirmationHeader)) {
-      fail(`[lukk-nuxt] confirmationHeader "${options.confirmationHeader}" must be a valid HTTP header name that neither the proxies nor the transport already own (not Authorization, Accept, Content-Type, Cookie, a forwarding header, a hop-by-hop or browser-forbidden header like Connection or Origin, or a Proxy-/Sec- name). Use a token such as X-Lukk-Confirmation.`)
+    // The EFFECTIVE value, as everything below: a consumer's own `runtimeConfig.public.lukk` wins the merge.
+    const confirmationHeader = (nuxt.options.runtimeConfig.public.lukk as { confirmationHeader: string }).confirmationHeader
+    if (!isUsableConfirmationHeader(confirmationHeader)) {
+      fail(`[lukk-nuxt] confirmationHeader "${confirmationHeader}" must be a valid HTTP header name that neither the proxies nor the transport already own (not Authorization, Accept, Content-Type, Cookie, a forwarding header, a hop-by-hop or browser-forbidden header like Connection or Origin, or a Proxy-/Sec- name). Use a token such as X-Lukk-Confirmation.`)
     }
 
     // Read by nothing: refuse a value that would have meant something, rather than drop it silently.
@@ -445,10 +461,14 @@ export default defineNuxtModule<ModuleOptions>({
       filename: 'types/lukk-nuxt.d.ts',
       getContents: () => [
         `import type { LukkClient, RefreshOutcome } from 'lukk-core'`,
+        // By mode: in bff mode the sign-ins and renewals resolve the proxy's acknowledgement, never a pair.
+        ...(options.mode === 'bff'
+          ? [`import type { LukkBffClient } from '${resolver.resolve('./runtime/shared')}'`, `/** The client as this app's transport answers: bff mode's sign-ins and renewals carry no token. */`, `type LukkTransportClient = LukkBffClient`]
+          : [`type LukkTransportClient = LukkClient`]),
         `declare module '#app' {`,
         `  interface NuxtApp {`,
         `    /** The lukk-core client, wired for the configured transport. */`,
-        `    $lukk: LukkClient`,
+        `    $lukk: LukkTransportClient`,
         `    /**`,
         `     * The shared single-flight refresh: the new pair in direct mode; \`REFRESHED_WITHOUT_TOKEN\` in bff`,
         `     * mode, where the proxy re-sealed the session and the browser holds no token; \`null\` when the`,
@@ -462,7 +482,7 @@ export default defineNuxtModule<ModuleOptions>({
         `// Templates read globals from here, not from NuxtApp, so \`$lukk\` in a <template> was untyped.`,
         `declare module 'vue' {`,
         `  interface ComponentCustomProperties {`,
-        `    $lukk: LukkClient`,
+        `    $lukk: LukkTransportClient`,
         `    $lukkRefresh: () => Promise<RefreshOutcome>`,
         `    $lukkRestore: () => Promise<{ pair: RefreshOutcome, unavailable: boolean, superseded?: boolean }>`,
         `  }`,

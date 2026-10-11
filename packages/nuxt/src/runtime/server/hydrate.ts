@@ -9,7 +9,7 @@ import { logoutNoted } from './logout-note'
 import { revokeDroppedSession } from './revoke-dropped'
 import { readSealedSessionWithId, sessionCookie, sessionSeal } from './sealed-session'
 import { warnIfSessionTooLarge } from './session-size'
-import { deliverPair, refreshOnce, type TokenSession } from './refresh'
+import { deliverPair, holdHead, refreshOnce, type TokenSession } from './refresh'
 
 interface LukkServerConfig {
   sessionPassword?: string
@@ -97,6 +97,8 @@ export async function resolveHydrationAccess(event: H3Event): Promise<string | n
     // A session a sign-in replaced or a logout ended while this render was out is not re-sealed — that
     // would put it back in the browser. The client decides instead.
     if (await sessionEnded(sessionKey(session))) return null
+    // A render takes as long as it takes: the session's head outlives it (see `holdHead`).
+    holdHead(event, sessionKey(session))
     const { pair } = await refreshOnce(session, baseURL, visitorIp(event, clientIpHeader))
     // Stryker disable next-line OptionalChaining: equivalent — a null pair makes `.access` throw into the catch below, which returns null too.
     if (!pair?.access) return null

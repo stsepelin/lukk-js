@@ -7,7 +7,7 @@ import { sessionEnded, sessionKey } from './ended-sessions'
 import { logoutNoted, withholdSignedOut } from './logout-note'
 import { revokeDroppedSession } from './revoke-dropped'
 import { readSealedSession, sessionCookie as sessionCookieOptions, sessionSeal } from './sealed-session'
-import { deliverPair, refreshOnce, type TokenSession } from './refresh'
+import { deliverPair, holdHead, refreshOnce, type TokenSession } from './refresh'
 
 /**
  * Optional BFF app-API proxy. Forwards same-origin `${apiPath}/**` to the fixed
@@ -129,6 +129,8 @@ export default defineEventHandler(async (event) => {
     // Not for a session a sign-in replaced or a logout ended while this request was out: re-sealing it
     // would put the previous session back in the browser. The stale bearer then 401s upstream.
     const ended = () => sessionEnded(sessionKey(session))
+    // An app-API response has no deadline: the session's head outlives it (see `holdHead`).
+    holdHead(event, sessionKey(session))
     // Stryker disable next-line ObjectLiteral: `pair` is read only for truthiness on this path, and an absent key is as falsy as `null`.
     const { pair } = await ended() ? { pair: null } : await refreshOnce(session, baseURL, clientIp)
     if (pair && !(await ended())) {

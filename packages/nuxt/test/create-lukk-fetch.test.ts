@@ -1,5 +1,6 @@
 import type { $Fetch, FetchOptions } from 'ofetch'
 import { describe, expect, it, vi } from 'vitest'
+import { SESSION_CHANGED } from 'lukk-core'
 import { createLukkFetch, createRequestFetch, type LukkFetchDeps } from '../src/runtime/utils/create-lukk-fetch'
 
 interface FakeResponse { status: number, type?: string, statusText?: string, headers: Headers, _data?: unknown }
@@ -338,9 +339,38 @@ describe('createLukkFetch — onResponse redirects', () => {
 })
 
 describe('createLukkFetch — onResponseError', () => {
-  const errCtx = (status: number, data: unknown, retry: unknown = 0) => ({
+  const errCtx = (status: number, data: unknown, retry: unknown = 0, request = '/me', headers = new Headers()) => ({
+    request,
     response: { status, statusText: 'Err', _data: data, headers: new Headers() },
-    options: { retry },
+    options: { retry, headers },
+  })
+  const jwt = (sub: string) => `h.${Buffer.from(JSON.stringify({ sub })).toString('base64url')}.s`
+
+  it('does not replay a request made for one account as another after renewing — it rejects, distinguishably', async () => {
+    // Another tab signed in as B: renewed from the shared cookie, the token is B's, and ofetch's retry ran
+    // A's request as B.
+    let bearer = jwt('A')
+    const { opts, deps } = build({ canRefresh: true, getBearer: () => bearer, refresh: vi.fn(async () => { bearer = jwt('B'); return { access_token: bearer } }) })
+    await expect(opts.onResponseError(errCtx(401, {}, 1, '/me', new Headers({ authorization: `Bearer ${jwt('A')}` })))).rejects.toMatchObject({ status: 401, reason: SESSION_CHANGED, message: expect.stringContaining('another account') })
+    expect(deps.refresh).toHaveBeenCalledOnce()
+  })
+
+  it('retries as before for the same account, or a token without a subject', async () => {
+    // Sent as A and renewed as A; opaque tokens; sent with no bearer at all; renewed to a token without a subject.
+    for (const [before, after] of [[jwt('A'), jwt('A')], ['opaque', 'opaque-2'], [null, jwt('B')], [jwt('A'), 'opaque-2']] as const) {
+      let bearer: string = after
+      const { opts } = build({ canRefresh: true, getBearer: () => bearer, refresh: vi.fn(async () => { bearer = after; return { access_token: after } }) })
+      await expect(opts.onResponseError(errCtx(401, {}, 1, '/me', new Headers(before ? { authorization: `Bearer ${before}` } : {})))).resolves.toBeUndefined()
+    }
+  })
+
+  it('never renews for a 401 from a foreign origin — no credentials went there', async () => {
+    const { opts, deps } = build({ canRefresh: true })
+    await expect(opts.onResponseError(errCtx(401, {}, 1, 'https://elsewhere.test/hook'))).rejects.toMatchObject({ status: 401 })
+    expect(deps.refresh).not.toHaveBeenCalled()
+    // A Request object, as ofetch passes one through: its URL decides the same.
+    await expect(opts.onResponseError({ ...errCtx(401, {}, 1), request: new Request('https://elsewhere.test/hook') } as never)).rejects.toMatchObject({ status: 401 })
+    expect(deps.refresh).not.toHaveBeenCalled()
   })
 
   it('rejects with a typed LukkError (message + validation bag) on a non-retryable 4xx', async () => {

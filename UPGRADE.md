@@ -157,7 +157,7 @@ composables (`useLukkAuth`, `useLukkConfirmation`) rather than those keys, which
 
 ### `useLukkFetch` sends credentials only where it has checked they belong
 
-**Medium impact — if you pass your own `onRequest` to `useLukkFetch()`, or a per-call `baseURL`.**
+**Medium impact in direct mode or for a cross-origin call; low in BFF mode on the app's own origin — if you pass your own `onRequest` to `useLukkFetch()`, or a per-call `baseURL`.**
 
 The instance used to default to `credentials: 'include'` and narrow it in its own `onRequest` hook.
 ofetch merges per-call options by spreading, so a call passing its own `onRequest` **replaced** that
@@ -167,7 +167,9 @@ the API's origin. The same decision now also looks at a per-call `baseURL`: an a
 only on the API's own origin (or this app's, in BFF mode).
 
 What changes for you: a call that replaces the hook, or that redirects the base to another origin, now
-goes out **without** the session cookie or bearer and gets a `401`. Wrap lukk's instance instead of
+goes out **without** the bearer (direct mode) or the cookies (any cross-origin target) and gets a `401`.
+In BFF mode a same-origin call still carries the session cookie — the browser sends it to its own
+origin under `same-origin` — so it is unaffected. Wrap lukk's instance instead of
 replacing its hook, and keep authenticated calls on the API's origin.
 
 ### Smaller changes you may notice
@@ -209,7 +211,13 @@ replacing its hook, and keep authenticated calls on the API's origin.
   newest pair if the session rotated it meanwhile — or seals nothing, leaving the browser its newer cookie,
   if the session has moved past it and the links that led on are gone: for the app-API proxy and SSR, a
   response slower than the links' window (30 s from delivery, up to 10 min 30 s for one never delivered); for the
-  auth proxy, which gives up on lukk after 15 s, only a journal that overflowed meanwhile. A step-up
+  auth proxy, which gives up on lukk after 15 s, only a journal that overflowed meanwhile. That the session
+  has moved past it is known from its HEAD, its newest refresh token, which the BFF keeps 10 min past the
+  latest rotation, hand-out or response — and for as long as any response that may seal a pair for the
+  session is still out, however long that takes (an app-API long-poll has no deadline); only once neither
+  the links nor the head are left is a pair sealed as it is. A logout, and the revoke of a session a
+  sign-in replaced, present the session's current tokens from the journal rather than the cookie's spent
+  ones, so lukk ends it through the bearer instead of reading a replay. A step-up
   confirmation answering on such a request is not recorded: the auth proxy answers `409` ("Your session was
   renewed meanwhile. Please confirm again.") and the user is asked to confirm again. So the journal can answer a replay well
   after lukk rotated — past lukk's own grace window, on a slow refresh or a slow response — and such a
@@ -233,6 +241,31 @@ replacing its hook, and keep authenticated calls on the API's origin.
 
 **Low impact — informational.**
 
+- **A request made for one account is not replayed as another.** In direct mode, when a `401` renewal comes
+  back as a different account (another tab signed in; the refresh cookie is shared), lukk-core's client and
+  `useLukkFetch` no longer retry the request: it rejects with a `401` whose `reason` is `SESSION_CHANGED`
+  (`'session_changed'`, exported by lukk-core). The new session is kept and the user reloaded; repeating the
+  action as that account is the caller's call. A `401` from another origin — where no credentials went —
+  is no longer renewed for at all.
+- **A step-up belongs to the session that earned it.** A sign-in (here or in another tab), or a renewal that
+  turns out to be another account, now drops `confirmed` and the held confirmation token, so the
+  `lukk-confirmed` middleware no longer lets the new account through on the old one's step-up.
+- **`useLukkForm`**: a new submit aborts one still in flight, and a superseded one that settles anyway no
+  longer touches `processing`, `errors` or the success state. `errors` accepts Laravel's dotted keys
+  (`errors['authorization.role']`), and `nestedErrors` is typed along `data`
+  (`nestedErrors.authorization?.role`, `nestedErrors.items?.[0]?.name`).
+- **An expired or invalid two-factor challenge** (`422` on `challenge_token`) clears `pendingTwoFactor`, so
+  the user signs in again instead of burning the throttle on it. A wrong code keeps it.
+- **Types**: `isTwoFactorChallenge` and `isRegistrationPending` accept any value, so
+  `isTwoFactorChallenge(await login(...))` type-checks on the composables' results. The module's nested
+  options (`api`, `session`, `user`) are optional field by field, as their defaults fill them. In BFF mode
+  `useNuxtApp().$lukk` is typed `LukkBffClient`: its sign-ins and renewals resolve the proxy's
+  `{ ok, expires_in }`, and a step-up resolves without its token.
+- **`confirmationHeader`** is validated as it ends up — one set through `runtimeConfig.public.lukk` too.
+- **`experimental.restoreState`**: lukk's session state (`lukk:user`, `lukk:ready`, `lukk:confirmed`, …) is
+  taken out of the snapshot Nuxt saves when it reloads the page itself (a chunk error, a new deploy), so it
+  can no longer be restored over the session the new page resolved. `useLukkForm` drafts are kept.
+
 - **`useLukkForm`**: a cancelled submit rejects with the `AbortError` itself (ofetch's `FetchError` wrapped
   it); `onFinish` runs even when `onError` throws.
 - **`useLukkFetch` in direct mode attaches the held step-up token** (`confirmationHeader`) to requests on
@@ -247,8 +280,9 @@ replacing its hook, and keep authenticated calls on the API's origin.
   another tab changes the session).
 - **The app-API proxy refuses lukk's routes behind a PHP front controller** (`/api/index.php/auth/login`)
   with `404` — wherever the script sits, so a Laravel app under a sub-path (`api.target` at
-  `https://host/app`, lukk at `/app/auth`) is covered at `/app/index.php/auth/login` too. Any path segment
-  ending in `.php` is read as a front controller (also after a decoding hop, and with the tab, LF and CR
+  `https://host/app`, lukk at `/app/auth`) is covered at `/app/index.php/auth/login` too. Every `.php` in
+  the path is read as the end of a front controller's name, as Symfony strips it — with no `/` needed after
+  it, so `/api/index.phpauth/login` is refused too (also after a decoding hop, and with the tab, LF and CR
   such a hop strips), in the path and in `baseURL` alike (Laravel without URL
   rewriting, `baseURL` at `https://host/index.php/auth`); the path is also judged as written, so such a
   segment never hides an encoded `/`, `?`, `#` or `..`. It cannot see lukk's extra guard mounts

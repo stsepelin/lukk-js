@@ -33,8 +33,10 @@ export interface TwoFactorChallenge {
 /** `POST /auth/login` result — a token pair, or a 2FA challenge. */
 export type LoginResult = TokenPair | TwoFactorChallenge
 
-export function isTwoFactorChallenge(r: LoginResult): r is TwoFactorChallenge {
-  return (r as TwoFactorChallenge).two_factor === true
+export function isTwoFactorChallenge(r: unknown): r is TwoFactorChallenge {
+  // Any result, not only lukk-core's `LoginResult`: the lukk-nuxt composables resolve their BFF shape too,
+  // and `isTwoFactorChallenge(await login(...))` must type-check there.
+  return (r as Partial<TwoFactorChallenge> | null)?.two_factor === true
 }
 
 /**
@@ -65,8 +67,9 @@ export interface RegistrationPending {
  *  challenge if the new user is already enrolled, or a verify-first pending shape. */
 export type RegisterResult = LoginResult | RegistrationPending
 
-export function isRegistrationPending(r: RegisterResult): r is RegistrationPending {
-  return (r as RegistrationPending).registered === true
+export function isRegistrationPending(r: unknown): r is RegistrationPending {
+  // Any result, as `isTwoFactorChallenge` takes.
+  return (r as Partial<RegistrationPending> | null)?.registered === true
 }
 
 export type RegisterCredentials = LukkIdentifier & {

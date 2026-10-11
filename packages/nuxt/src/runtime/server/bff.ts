@@ -8,7 +8,7 @@ import { endSession, newSessionId, sessionEnded, sessionKey, sessionReplaced, wi
 import { revokeDroppedSession } from './revoke-dropped'
 import { readSealedSession, sessionCookie, sessionSeal } from './sealed-session'
 import { warnIfSessionTooLarge } from './session-size'
-import { deliverPair, refreshOnce, type TokenSession } from './refresh'
+import { deliverPair, headPair, holdHead, refreshOnce, type TokenSession } from './refresh'
 
 type SessionCookieOptions = ReturnType<typeof sessionCookie>
 
@@ -71,6 +71,9 @@ export default defineEventHandler(async (event) => {
   // path is worth a second iron-open when auth state actually changes).
   const hasCookie = !!getCookie(event, sessionName)
   const sealed = await readSealedSession(event, sessionPassword, sessionName)
+  // This response may seal a pair for the session — renewed here, or the one it arrived with (a step-up):
+  // the session's head outlives it however long it takes (see `holdHead`).
+  if (sealed.refresh) holdHead(event, sealed.sid)
   let rwSession: ReturnType<typeof openSession> | null = null
   const session = () => (rwSession ??= openSession(event, sessionPassword, sessionName, cookieOptions, sessionMaxAge))
 
@@ -122,7 +125,10 @@ export default defineEventHandler(async (event) => {
   // with it even when the access token has expired and a refresh is throttled or failing — and without
   // spending a rotation first. Older releases ignore the field and use the bearer, as before.
   const endsSession = route === '/logout'
-  let logoutRefresh = sealed.refresh
+  // The session's current tokens, should a rotation the browser never received have spent the cookie's (see
+  // `headPair`): what a logout presents, and what a replacing sign-in revokes.
+  const current = headPair(sealed.sid, sealed)
+  let logoutRefresh = current.refresh
 
   function callLukk(access: string | undefined): Promise<Upstream> {
     // This path builds its headers from scratch rather than forwarding the client's, so there is
@@ -231,7 +237,7 @@ export default defineEventHandler(async (event) => {
     return { ok: true, expires_in: newest === pair ? expiresIn : undefined }
   }
 
-  let upstream = await callLukk(sealed.access)
+  let upstream = await callLukk(endsSession ? current.access : sealed.access)
   // Rotated tokens this request re-sealed, if any — revoked should the session turn out to be replaced.
   let resealedTokens: TokenSession | undefined
   // A refresh that failed without lukk rejecting the token (a throttle, an outage): the session is live.
@@ -320,7 +326,7 @@ export default defineEventHandler(async (event) => {
     // browser (a dropped connection, an aborted fetch), the browser kept using it for as long.
     if (sealed.access || sealed.refresh) {
       await endSession(sessionKey(s), { replaced: true })
-      revokeDroppedSession(event, sealed, baseURL, clientIp)
+      revokeDroppedSession(event, current, baseURL, clientIp)
     }
     // `confirmation: undefined` too: a fresh token pair means a new SESSION, and a step-up earned by
     // the previous one must not carry over. Before confirmations were bound to the earning session

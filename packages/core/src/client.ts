@@ -86,8 +86,10 @@ export function createLukkClient(hooks: LukkClientHooks) {
     // Only attach credentials to a same-origin-as-baseURL target — never leak the
     // bearer / confirmation token (or cookies) to an absolute, cross-origin URL.
     const sameOrigin = isSameOrigin(hooks.baseURL, path)
+    // The account this request is made for, should a renewal come back as another (see below).
+    let sentAs: string | null | undefined
     if (sameOrigin) {
-      const token = await hooks.getAccessToken?.()
+      const token = sentAs = await hooks.getAccessToken?.()
       if (token) headers.set('Authorization', `Bearer ${token}`)
       const confirmation = await hooks.getConfirmationToken?.()
       if (confirmation) headers.set(confirmHeader, confirmation)
@@ -106,7 +108,9 @@ export function createLukkClient(hooks: LukkClientHooks) {
       headers,
     })
 
-    if (res.status === 401 && allowRetry && refreshOnce) {
+    // Only where credentials went: a foreign target's 401 says nothing about this session, and renewing for it
+    // spent a rotation, re-sent the body to that host, and on a failed renewal cleared the live token.
+    if (res.status === 401 && allowRetry && refreshOnce && sameOrigin) {
       let pair: RefreshOutcome
       // A throwing refresh hook means "not refreshable" — honor the documented contract.
       try { pair = await refreshOnce() }
@@ -118,6 +122,9 @@ export function createLukkClient(hooks: LukkClientHooks) {
       // and a binding that persists the whole object would store attacker-shaped data.
       if (isTokenPair(pair)) {
         await hooks.onTokens?.(pair)
+        // Renewed as ANOTHER account — another tab signed in, and the shared refresh cookie is theirs now:
+        // a request composed for the previous one is not replayed as this one (a transfer, a delete).
+        if (switchedAccount(sentAs, pair.access_token)) throw sessionChanged()
         return request<T>(path, init, false) // retry once with the new token
       }
       // Renewed where this client can't see — nothing to store, and the retry carries what it always did.
@@ -332,6 +339,36 @@ async function parseBody<T>(res: Response): Promise<T> {
   if (!text) return undefined as T
   try { return JSON.parse(text) as T }
   catch { throw { status: res.status, message: 'lukk: invalid JSON in response body' } satisfies LukkError }
+}
+
+/**
+ * `LukkError.reason` of a request that was refused (401) and NOT sent again: renewing the session showed
+ * that it now belongs to another account than the one the request was made for — another tab signed in.
+ * The new session is kept; the caller decides whether to repeat the action as that account.
+ */
+export const SESSION_CHANGED = 'session_changed'
+
+function sessionChanged(): LukkError {
+  return { status: 401, message: 'The session changed to another account while this request was out; it was not sent again.', reason: SESSION_CHANGED }
+}
+
+/** Did a renewal hand back a token for another account than `before`'s? Only when both name one. */
+function switchedAccount(before: string | null | undefined, after: string): boolean {
+  const was = jwtSubject(before)
+  const now = jwtSubject(after)
+  return was !== undefined && now !== undefined && was !== now
+}
+
+/** A JWT's `sub` — decoded, not verified: which account a token says it is for, nothing more. */
+function jwtSubject(jwt: string | null | undefined): string | undefined {
+  try {
+    const sub = (JSON.parse(atob(jwt!.split('.')[1]!.replace(/-/g, '+').replace(/_/g, '/'))) as { sub?: unknown }).sub
+    return typeof sub === 'string' || typeof sub === 'number' ? String(sub) : undefined
+  }
+  // Stryker disable next-line BlockStatement: equivalent — an emptied catch falls off the end of the function, which returns undefined as well.
+  catch {
+    return undefined
+  }
 }
 
 /**

@@ -37,14 +37,17 @@ const expired = () => `${Buffer.from('{"alg":"HS256"}').toString('base64url')}.$
 
 function event(path = '/api/me'): H3Event {
   const res = new Map<string, unknown>()
+  const closing: (() => void)[] = []
   return {
+    // The response's `close` (Node emits it once the response has finished or the connection gone).
+    __close: () => closing.splice(0).forEach(fn => fn()),
     path,
     method: 'GET',
     headers: {},
     context: {},
     node: {
       req: { url: path, headers: { cookie: '__Host-lukk-session=STALE' }, socket: {} },
-      res: { getHeader: (k: string) => res.get(k), setHeader: (k: string, v: unknown) => { res.set(k, v) }, removeHeader: (k: string) => { res.delete(k) } },
+      res: { getHeader: (k: string) => res.get(k), setHeader: (k: string, v: unknown) => { res.set(k, v) }, removeHeader: (k: string) => { res.delete(k) }, once: (name: string, fn: () => void) => { if (name === 'close') closing.push(fn) } },
     },
   } as unknown as H3Event
 }
@@ -451,5 +454,97 @@ describe('a rotation nobody received, adopted by the next request', () => {
     fetchSpy.mockImplementation(async () => new Response('{}', { status: 401 }))
     const { pair } = await refreshOnce({ id: 'h3', data: { refresh: 't0', sid } }, 'https://lukk.test/auth')
     expect(pair?.refresh === 't1').toBe(held)
+  })
+})
+
+describe('a response still out keeps the session\'s head, however long it takes', () => {
+  // The head says "the session has moved past this pair" once the links that would say so have expired. It
+  // lived five minutes past the LAST rotation — but an app-API response has no deadline, and one delivering
+  // after the head had gone re-sealed the pair it started with over the newer one: the browser's next
+  // refresh replayed that token past lukk's grace window, and the family was revoked.
+  const rotations = (...tokens: string[]) => {
+    const spy = vi.spyOn(globalThis, 'fetch')
+    for (const t of tokens) spy.mockImplementationOnce(async () => new Response(JSON.stringify({ access_token: `a-${t}`, refresh_token: t, expires_in: 900 }), { status: 200 }))
+    return spy
+  }
+  const sessionOn = (on: H3Event, data: TokenSession) => ({ id: 'h3', data: { ...data }, update: vi.fn(async (pair: TokenSession) => {
+    on.node.res.setHeader('set-cookie', [`__Host-lukk-session=${pair.refresh}`])
+  }) })
+  /** An app-API request on `refresh`, its upstream answering at once: rotates or adopts, and delivers. */
+  async function quick(sid: string, refresh: string): Promise<unknown> {
+    sealed = { access: expired(), refresh, sid }
+    const r = event()
+    rw = sessionOn(r, sealed)
+    proxyRequest.mockImplementationOnce(async (ev: unknown, _target: string, opts: { onResponse?: (e: unknown, x: unknown) => Promise<void> }) => {
+      await opts.onResponse!(ev, { status: 200, type: 'basic', headers: new Headers() })
+      return {}
+    })
+    await (apiProxy as unknown as (e: H3Event) => Promise<unknown>)(r)
+    ;(r as unknown as { __close: () => void }).__close()
+    return r.node.res.getHeader('set-cookie')
+  }
+
+  it.each([
+    ['six minutes', 6 * 60_000],
+    ['two hours', 2 * 60 * 60_000],
+  ])('withholds a slow response\'s pair the session moved past %s ago — the exact timeline', async (_, after) => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    rotations('rt3', 'rt4')
+    const sid = `slow-head-${Math.random()}`
+
+    // Tab A: a slow app-API request rotates rt2 → rt3, its upstream still streaming.
+    let answer!: () => void
+    const answered = new Promise<void>((resolve) => { answer = resolve })
+    sealed = { access: expired(), refresh: 'rt2', sid }
+    const a = event()
+    rw = sessionOn(a, sealed)
+    proxyRequest.mockImplementationOnce(async (ev: unknown, _target: string, opts: { onResponse?: (e: unknown, x: unknown) => Promise<void> }) => {
+      await answered
+      await opts.onResponse!(ev, { status: 200, type: 'basic', headers: new Headers() })
+      return {}
+    })
+    const slow = (apiProxy as unknown as (e: H3Event) => Promise<unknown>)(a)
+    await vi.advanceTimersByTimeAsync(0)
+
+    // Tab B, on the old cookie, adopts rt3 and carries it home; the browser then renews rt3 → rt4.
+    expect(await quick(sid, 'rt2')).toEqual(['__Host-lukk-session=rt3'])
+    expect(await quick(sid, 'rt3')).toEqual(['__Host-lukk-session=rt4'])
+
+    // Long after every link and the head's five minutes, tab A's response is ready to leave.
+    await vi.advanceTimersByTimeAsync(after)
+    answer()
+    await slow
+
+    // Not rt3 over the browser's rt4 — its session cookie is withheld.
+    expect(a.node.res.getHeader('set-cookie') ?? []).toEqual([])
+    ;(a as unknown as { __close: () => void }).__close()
+  })
+
+  it('lets the head go once no response is out — the hold after the last one', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    rotations('rt3')
+    const sid = `head-released-${Math.random()}`
+    expect(await quick(sid, 'rt2')).toEqual(['__Host-lukk-session=rt3'])
+    const { refreshHeads } = await import('../src/runtime/server/refresh-journal')
+    expect(refreshHeads.get(sid)?.token).toBe('rt3')
+    await vi.advanceTimersByTimeAsync(10 * 60_000 + 1)
+    expect(refreshHeads.has(sid)).toBe(false)
+  })
+
+  it('holds the head for a render that renews, until its page has left', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    rotations('rt1')
+    const sid = `render-held-${Math.random()}`
+    sealed = { access: expired(), refresh: 'rt0', sid }
+    const page = event('/dashboard')
+    rw = sessionOn(page, sealed)
+    expect(await resolveHydrationAccess(page)).toBe('a-rt1')
+    const { refreshHeads } = await import('../src/runtime/server/refresh-journal')
+
+    await vi.advanceTimersByTimeAsync(60 * 60_000) // an hour-long render
+    expect(refreshHeads.get(sid)?.token).toBe('rt1')
+    ;(page as unknown as { __close: () => void }).__close()
+    await vi.advanceTimersByTimeAsync(10 * 60_000)
+    expect(refreshHeads.has(sid)).toBe(false)
   })
 })

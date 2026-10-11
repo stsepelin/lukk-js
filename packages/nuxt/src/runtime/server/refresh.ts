@@ -1,6 +1,6 @@
 import type { H3Event } from 'h3'
 import { isSessionEnded, sessionEnded, sessionKey } from './ended-sessions'
-import { forgetRefreshJournal, type Link, refreshHeads, refreshJournals } from './refresh-journal'
+import { forgetRefreshJournal, type Link, refreshHeads, refreshJournals, responsesOut } from './refresh-journal'
 import { reportUnusableBase, resolveTarget, UPSTREAM_TIMEOUT_MS } from './proxy-utils'
 
 export interface TokenSession {
@@ -89,8 +89,11 @@ export const REFRESH_INFLIGHT_MAX_MS = 5 * 60_000
  * + `REFRESH_STRAGGLER_MS`: the burst of a user returning near its end still has its thirty seconds), and a
  * link is also cut to it when the rotation of the pair it handed out lands. After that its end is only ever
  * brought forward, and never past the end of the link after it in its chain. If the session has moved past
- * a pair altogether and the links that would say so have expired, the session's HEAD (`refreshHeads`, kept
- * `REFRESH_INFLIGHT_MAX_MS` past each rotation) still does, and the cookie is withheld. So answers from the
+ * a pair altogether and the links that would say so have expired, the session's HEAD (`refreshHeads`) still
+ * does, and the cookie is withheld. The head lasts `REFRESH_HOLD_MS` past the latest rotation, hand-out or
+ * response, and for as long as any response that may seal a pair for the session is out (`holdHead`):
+ * a response has no deadline, and one delivering after the head had gone sealed its pair over the newer
+ * one — the browser's next refresh then replayed it past lukk's grace window. So answers from the
  * journal can come well after lukk rotated — past lukk's own grace window, on a slow refresh or a slow
  * response. That is deliberate: the alternative replays a token the browser still holds into a revoke.
  * The whole journal goes when the session presents a token outside it (it has moved on), when lukk refuses
@@ -166,7 +169,10 @@ export function refreshOnce(session: { id?: string, data: TokenSession }, baseUR
 function adopt(id: string, journal: Map<string, Link>, token: string): Promise<RefreshResult> {
   const head = chainFrom(journal, token).at(-1)![1]
   const rotating = inflightRefresh.get(flightKey(id, head.pair.refresh!))
-  return rotating ? waitOn(rotating) : Promise.resolve(handOut(head))
+  if (rotating) return waitOn(rotating)
+  // Handed out: a response is about to carry it, so the head lasts at least as long again from now.
+  armHead(id, head.pair.refresh!)
+  return Promise.resolve(handOut(head))
 }
 
 /**
@@ -243,6 +249,19 @@ export function currentPair(id: string | undefined, pair: TokenSession): TokenSe
 }
 
 /**
+ * The session's current pair for the one `pair` came from, looked up WITHOUT taking anything: the head of the
+ * chain its refresh token starts, or `pair` itself when the journal has no link from it. For the calls that
+ * present a session's tokens to END it — a logout, the revoke of a session a sign-in replaced. Handed the
+ * cookie's own spent token (a rotation the browser never received), lukk consumed it past its grace window:
+ * the family was revoked, which is wanted, but as a REUSE, with `RefreshTokenReused` — a theft alarm for a
+ * token this server rotated itself. With the head, lukk ends it through the bearer, as any logout.
+ */
+export function headPair(id: string | undefined, pair: TokenSession): TokenSession {
+  const journal = refreshJournals.get(id!)
+  return journal?.has(pair.refresh!) ? chainFrom(journal, pair.refresh!).at(-1)![1].pair : pair
+}
+
+/**
  * `currentPair` at a caller's point of delivery — unless the browser has gone: a navigation aborted the
  * request, the tab closed, the connection dropped. Nothing this response carries arrives then, so nothing is
  * taken — the links stay held — and nothing is delivered: `null`, which every caller already reads as "seal
@@ -302,8 +321,7 @@ function record(id: string, consumed: string, result: RefreshResult, flight: Fli
   journal.set(consumed, link)
   // The session's head, for as long as a response it might still be sealing can be out (see `refreshHeads`) —
   // the end of the chain this rotation joins, not its own pair: a slow rotation can land after the next one.
-  clearTimeout(refreshHeads.get(id)?.timer)
-  refreshHeads.set(id, { token: chainFrom(journal, consumed).at(-1)![1].pair.refresh!, timer: unref(setTimeout(() => refreshHeads.delete(id), REFRESH_INFLIGHT_MAX_MS)) })
+  armHead(id, chainFrom(journal, consumed).at(-1)![1].pair.refresh!)
   if (journal.size > REFRESH_JOURNAL_MAX_LINKS) {
     const [oldest, dropped] = journal.entries().next().value!
     clearTimeout(dropped.timer)
@@ -312,6 +330,49 @@ function record(id: string, consumed: string, result: RefreshResult, flight: Fli
   // And not for a session another instance ended: the shared store answers asynchronously.
   void sessionEnded(id).then((ended) => {
     if (ended) forgetRefreshJournal(id)
+  })
+}
+
+/**
+ * Make `token` the session's head, for `REFRESH_HOLD_MS` from now — and past that for as long as a response
+ * that may seal a pair for the session is out (see `holdHead`), which re-arms it as the last one closes.
+ */
+function armHead(id: string, token: string): void {
+  clearTimeout(refreshHeads.get(id)?.timer)
+  refreshHeads.set(id, { token, timer: unref(setTimeout(() => {
+    if (!responsesOut.has(id)) refreshHeads.delete(id)
+  }, REFRESH_HOLD_MS)) })
+}
+
+/** The most sessions whose responses are counted at once (`holdHead`); past it, a session is not held. */
+export const RESPONSES_OUT_LIMIT = 50_000
+
+/** Warned past `RESPONSES_OUT_LIMIT` already — once per process is enough to say the bound was reached. */
+let holdLimitWarned = false
+
+/**
+ * Count this response as out for session `id` until it closes — finished, or the connection gone — so the
+ * session's head outlives it (see `armHead`). For every response that may seal a pair: one that rotates
+ * (the app-API proxy, the auth proxy, SSR) or re-seals the pair it arrived with (a step-up). Bounded: past
+ * `RESPONSES_OUT_LIMIT` sessions a new one is not counted (warned once), and its head lasts its usual time.
+ */
+export function holdHead(event: H3Event, id: string | undefined): void {
+  const res = event.node.res as { once?: (name: string, listener: () => void) => unknown }
+  // A response that cannot say when it closes is not counted: it would hold the head for good.
+  if (!id || !res.once) return
+  if (!responsesOut.has(id) && responsesOut.size >= RESPONSES_OUT_LIMIT) {
+    if (!holdLimitWarned) console.warn(`[lukk-nuxt] More than ${RESPONSES_OUT_LIMIT} sessions have a response out at once; the newest are not held against a late delivery.`)
+    holdLimitWarned = true
+    return
+  }
+  responsesOut.set(id, (responsesOut.get(id) ?? 0) + 1)
+  res.once('close', () => {
+    const left = responsesOut.get(id)! - 1
+    if (left) return void responsesOut.set(id, left)
+    responsesOut.delete(id)
+    // The last one: the head lasts the hold from now, not from a rotation that may be long past.
+    const head = refreshHeads.get(id)
+    if (head) armHead(id, head.token)
   })
 }
 

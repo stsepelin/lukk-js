@@ -614,3 +614,62 @@ describe('useLukkForm — gaps found by mutation testing', () => {
     finally { vi.useRealTimers() }
   })
 })
+
+describe('overlapping submits — the newest one owns the form', () => {
+  // An older submit settling late set `processing` false under the newer one, wrote its stale 422 over
+  // the newer success, and could no longer be cancelled.
+  const hangsUntilAborted = () => api.mockImplementationOnce((_url: string, opts: { signal: AbortSignal }) => new Promise((_resolve, reject) => {
+    opts.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
+  }))
+
+  it('aborts the previous submit when a new one starts', async () => {
+    hangsUntilAborted()
+    const form = useLukkForm({ email: 'e' })
+    const first = form.post('/a')
+    const second = form.post('/b')
+    await expect(first).rejects.toMatchObject({ name: 'AbortError' })
+    await second
+    expect(form.processing).toBe(false)
+    expect(form.wasSuccessful).toBe(true)
+  })
+
+  it('ignores a superseded submit that settles anyway — its errors, its processing, its success', async () => {
+    // A caller's own signal wins over ours, so the first one cannot be aborted: it settles late.
+    let failFirst!: (error: unknown) => void
+    api.mockImplementationOnce(() => new Promise((_resolve, reject) => { failFirst = reject }))
+    let finishSecond!: (value: unknown) => void
+    api.mockImplementationOnce(() => new Promise((resolve) => { finishSecond = resolve }))
+    const form = useLukkForm({ email: 'e' })
+    const own = new AbortController()
+
+    const first = form.post('/a', { signal: own.signal })
+    const second = form.post('/b', { signal: own.signal })
+    failFirst(val422({ email: ['stale'] }))
+    await expect(first).rejects.toMatchObject({ status: 422 })
+    expect(form.processing).toBe(true) // still the second's
+    expect(form.errors).toEqual({})
+
+    finishSecond({ ok: true })
+    await second
+    expect(form.processing).toBe(false)
+    expect(form.wasSuccessful).toBe(true)
+  })
+
+  it('a stale success does not report the form as succeeded under a newer failure', async () => {
+    let finishFirst!: (value: unknown) => void
+    api.mockImplementationOnce(() => new Promise((resolve) => { finishFirst = resolve }))
+    api.mockImplementationOnce(async () => { throw val422({ email: ['taken'] }) })
+    const form = useLukkForm({ email: 'e' })
+    const own = new AbortController()
+
+    const first = form.post('/a', { signal: own.signal })
+    await expect(form.post('/b', { signal: own.signal })).rejects.toMatchObject({ status: 422 })
+    form.data.email = 'changed'
+    finishFirst({ ok: true })
+    await first
+
+    expect(form.wasSuccessful).toBe(false)
+    expect(form.errors).toEqual({ email: 'taken' })
+    expect(form.isDirty).toBe(true) // not rebased onto the stale submit
+  })
+})

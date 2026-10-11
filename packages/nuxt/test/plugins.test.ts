@@ -800,3 +800,48 @@ describe('keeping abilities in step with a refreshed token', () => {
     expect(fetchUser).not.toHaveBeenCalled()
   })
 })
+
+describe('client plugin — Nuxt\'s reload state (`experimental.restoreState`)', () => {
+  // A chunk error or a new deploy's manifest makes Nuxt reload the page with `persistState`: the whole
+  // `payload.state` goes to sessionStorage, and with `restoreState` on it is assigned back at `app:mounted` —
+  // AFTER lukk restored the session. A stale `lukk:user` (another account, or nobody since a logout),
+  // `lukk:confirmed` (a step-up the session no longer has) or `lukk:ready` then overwrote the fresh state.
+  const store = new Map<string, string>()
+  const fakeSession = { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => { store.set(k, v) }, removeItem: (k: string) => { store.delete(k) } }
+  afterEach(() => { vi.unstubAllGlobals(); store.clear() })
+  const boot = () => { (clientPlugin as unknown as () => unknown)() }
+
+  it('drops lukk\'s session state from the saved snapshot before Nuxt restores it — keeping form drafts and the app\'s own', () => {
+    vi.stubGlobal('sessionStorage', fakeSession)
+    store.set('nuxt:reload:state', JSON.stringify({ state: {
+      '$slukk:user': { id: 'A' },
+      '$slukk:ready': true,
+      '$slukk:confirmed': true,
+      '$slukk:confirm-required': true,
+      '$slukk:restore-failed': false,
+      '$slukk:form:signup': { email: 'draft@example.com' },
+      '$scart': ['item'],
+    } }))
+
+    boot()
+
+    expect(JSON.parse(store.get('nuxt:reload:state')!)).toEqual({ state: {
+      '$slukk:form:signup': { email: 'draft@example.com' },
+      '$scart': ['item'],
+    } })
+  })
+
+  it('leaves no snapshot, a malformed one, or no sessionStorage at all alone', () => {
+    vi.stubGlobal('sessionStorage', fakeSession)
+    expect(boot).not.toThrow()
+    expect(store.has('nuxt:reload:state')).toBe(false)
+    store.set('nuxt:reload:state', '{not json')
+    expect(boot).not.toThrow()
+    expect(store.get('nuxt:reload:state')).toBe('{not json')
+    store.set('nuxt:reload:state', JSON.stringify({ other: 1 }))
+    boot()
+    expect(store.get('nuxt:reload:state')).toBe(JSON.stringify({ other: 1 }))
+    vi.stubGlobal('sessionStorage', undefined)
+    expect(boot).not.toThrow()
+  })
+})

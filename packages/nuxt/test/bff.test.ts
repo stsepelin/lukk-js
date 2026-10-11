@@ -30,7 +30,7 @@ import handler from '../src/runtime/server/bff'
 // eslint-disable-next-line import/first
 import { endSession, forgetEndedSessions, markSessionEnded, sessionEnded, useSharedEndedSessions } from '../src/runtime/server/ended-sessions'
 // eslint-disable-next-line import/first
-import { forgetRefreshJournal, refreshJournals } from '../src/runtime/server/refresh-journal'
+import { forgetRefreshJournal, refreshJournals, responsesOut } from '../src/runtime/server/refresh-journal'
 // eslint-disable-next-line import/first
 import { refreshOnce } from '../src/runtime/server/refresh'
 
@@ -689,6 +689,29 @@ describe('a session replaced or ended while a refresh for it was out', () => {
     await pending
 
     expect(refreshing.clear).not.toHaveBeenCalled()
+  })
+
+  it('revokes a retry\'s rotation when the session ended elsewhere while the retried call was out', async () => {
+    // Ended by another instance (the shared record), not by a logout here that would present the head
+    // itself: the rotation this request made is dropped, so it must be revoked here, or it trips reuse
+    // detection later.
+    const refreshing = makeSession({ access: 'A', refresh: 'rA', sid: 'session-elsewhere' } as TokenSession)
+    const retried = deferredFetch()
+    let calls = 0
+    mockFetch().fetch = vi.fn(async (url: string) => {
+      if (String(url).endsWith('/refresh')) return jsonRes({ access_token: 'A2', refresh_token: 'rA2', expires_in: 900 })
+      if (String(url).endsWith('/logout')) return jsonRes(null, 204)
+      return ++calls === 1 ? jsonRes({ message: 'Unauthenticated.' }, 401) : retried.pending
+    })
+
+    const pending = run(makeEvent({ path: '/api/_lukk/passkeys', session: refreshing }))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    markSessionEnded('session-elsewhere')
+    retried.answer(jsonRes({ passkeys: [] }))
+    await pending
+
+    expect(refreshing.update).not.toHaveBeenCalled()
+    expect(mockFetch().fetch).toHaveBeenCalledWith('https://lukk/auth/logout', expect.objectContaining({ headers: expect.objectContaining({ Authorization: 'Bearer A2' }) }))
   })
 
   it('does not write back a refresh whose RETRIED call was still out when a logout landed', async () => {
@@ -1895,5 +1918,93 @@ describe('a response the browser will not receive leaves its rotation held', () 
     await run(event)
 
     expect(await stillHeld(sid, 't0', 't1')).toBe(goAway !== null)
+  })
+})
+
+describe('a BFF response that may seal a pair holds the session\'s head until it closes', () => {
+  // A step-up re-seals the pair its request arrived with; a slow one delivering after the head had gone
+  // sealed that pair over the newer one (see `holdHead`).
+  const closable = (event: ReturnType<typeof makeEvent>) => {
+    const closing: (() => void)[] = []
+    ;(event.node.res as Record<string, unknown>).once = (name: string, fn: () => void) => { if (name === 'close') closing.push(fn) }
+    return () => closing.splice(0).forEach(fn => fn())
+  }
+  afterEach(() => responsesOut.clear())
+
+  it('counts a request on a refreshable session, until its response closes', async () => {
+    mockFetch().fetch = vi.fn(async () => jsonRes({ confirmation_token: 'c1' }))
+    const sid = `held-bff-${Math.random()}`
+    const event = makeEvent({ path: '/api/_lukk/confirm-password', method: 'POST', body: '{"password":"p"}', headers: { ...sameOrigin, 'content-type': 'application/json' }, session: makeSession({ access: 'a1', refresh: 't1', sid } as TokenSession) })
+    const close = closable(event)
+
+    await run(event)
+    expect(responsesOut.get(sid)).toBe(1)
+    close()
+    expect(responsesOut.has(sid)).toBe(false)
+  })
+
+  it('counts nothing for a request with no refresh token — it seals no pair', async () => {
+    mockFetch().fetch = vi.fn(async () => jsonRes({ message: 'Unauthenticated.' }, 401))
+    const sid = `anon-bff-${Math.random()}`
+    const event = makeEvent({ path: '/api/_lukk/user', headers: sameOrigin, session: makeSession({ access: 'a1', sid } as TokenSession) })
+    closable(event)
+
+    await run(event)
+    expect(responsesOut.has(sid)).toBe(false)
+  })
+})
+
+describe('a logout or a sign-in presents the session\'s CURRENT tokens, not the cookie\'s spent ones', () => {
+  // The cookie holds (A0 expired, R0). A 401 rotated R0 → R1, but the browser had gone — nothing was taken
+  // and the link is held. Then the user logs out (or signs in): lukk was handed R0, consumed past its grace
+  // window, with an invalid bearer — it revoked the family (wanted) AND fired RefreshTokenReused, a theft
+  // alarm for a token this server itself had rotated. With the chain's head lukk takes its bearer path.
+  const BASE = 'https://lukk/auth'
+  let reused = 0
+  const logouts: Array<{ bearer: string | undefined, refresh: unknown }> = []
+  /** A lukk whose logout mirrors EndSession: a valid bearer ends the session; otherwise the refresh token does, and a consumed one is a reuse. */
+  const fakeLukk = (signIn: () => Response) => vi.fn(async (url: string, init?: RequestInit) => {
+    const path = String(url).replace(BASE, '')
+    const bearer = new Headers(init?.headers).get('authorization')?.replace('Bearer ', '')
+    if (path === '/refresh') return jsonRes({ access_token: 'A1', refresh_token: 'R1', expires_in: 900 })
+    if (path === '/logout') {
+      const refresh = (JSON.parse(String(init?.body ?? '{}')) as { refresh_token?: string }).refresh_token
+      logouts.push({ bearer, refresh })
+      if (bearer !== 'A1' && refresh === 'R0') reused++ // consumed by the rotation: lukk's reuse detection
+      return new Response(null, { status: 204 })
+    }
+    if (path === '/login') return signIn()
+    return bearer === 'A1' ? jsonRes({ id: 1 }) : jsonRes({ message: 'Unauthenticated.' }, 401)
+  })
+  beforeEach(() => { reused = 0; logouts.length = 0 })
+
+  async function rotatedForNobody(sid: string) {
+    const gone = makeEvent({ path: '/api/_lukk/user', headers: sameOrigin, session: makeSession({ access: 'A0', refresh: 'R0', sid } as TokenSession) })
+    ;(gone.node as Record<string, unknown>).req = { aborted: true }
+    await run(gone)
+    expect(refreshJournals.get(sid)?.has('R0')).toBe(true) // held: the browser never got R1
+  }
+
+  it('a logout', async () => {
+    mockFetch().fetch = fakeLukk(() => jsonRes({}))
+    const sid = `logout-head-${Math.random()}`
+    await rotatedForNobody(sid)
+
+    await run(makeEvent({ path: '/api/_lukk/logout', method: 'POST', body: '{}', headers: sameOrigin, session: makeSession({ access: 'A0', refresh: 'R0', sid } as TokenSession) }))
+
+    expect(logouts).toEqual([{ bearer: 'A1', refresh: 'R1' }])
+    expect(reused).toBe(0)
+  })
+
+  it('a sign-in replacing the session', async () => {
+    mockFetch().fetch = fakeLukk(() => jsonRes({ access_token: 'B', refresh_token: 'RB', expires_in: 900 }))
+    const sid = `signin-head-${Math.random()}`
+    await rotatedForNobody(sid)
+
+    await run(makeEvent({ path: '/api/_lukk/login', method: 'POST', body: '{}', headers: sameOrigin, session: makeSession({ access: 'A0', refresh: 'R0', sid } as TokenSession) }))
+    await new Promise(resolve => setTimeout(resolve, 0)) // the background revoke
+
+    expect(logouts).toEqual([{ bearer: 'A1', refresh: 'R1' }])
+    expect(reused).toBe(0)
   })
 })

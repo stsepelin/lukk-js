@@ -1,8 +1,10 @@
 import type { $Fetch, FetchContext, FetchOptions, FetchRequest, FetchResponse } from 'ofetch'
+import type { LukkError } from 'lukk-core'
 // Reuse core's guard + error builder so the same-origin check and the LukkError shape
 // stay identical across the two transports (no drift on a security-critical path).
-import { carriesOrigin, isSameOrigin, lukkError, retryAfterSeconds } from 'lukk-core'
+import { carriesOrigin, isSameOrigin, lukkError, retryAfterSeconds, SESSION_CHANGED } from 'lukk-core'
 import { LUKK_SSR_HEADER } from '../shared'
+import { tokenSubject } from './token-subject'
 
 export interface LukkFetchDeps {
   /** App-API base — the same-origin proxy mount (BFF) or the API URL (direct). */
@@ -107,12 +109,24 @@ export function lukkFetchOptions(deps: LukkFetchDeps): FetchOptions {
       if (location) deps.onRedirect(location)
     },
     async onResponseError(ctx: FetchContext & { response: Response & { _data?: unknown } }) {
+      // Only where credentials went (as `onRequest` decided): a foreign target's 401 says nothing about this
+      // session, and renewing for it spent a rotation and re-sent the body to that host.
+      const url = typeof ctx.request === 'string' ? ctx.request : ctx.request.url
       const retryable = deps.canRefresh && ctx.response.status === 401
         && ctx.options.retry !== 0 && ctx.options.retry !== false
+        && targetIsOurs(deps, url, ctx.options.baseURL)
       // Refresh (single-flight); on success don't throw, so ofetch retries with the
       // fresh token. On a failed refresh, fall through to the typed error (no wasted retry).
-      if (retryable && await deps.refresh()) {
-        return
+      if (retryable) {
+        // The `Authorization` value as sent: `tokenSubject` reads the JWT's middle segment, the scheme aside.
+        const sentAs = tokenSubject(new Headers(ctx.options.headers).get('authorization'))
+        if (await deps.refresh()) {
+          // Renewed as ANOTHER account (another tab signed in; the refresh cookie is shared): the request was
+          // made for the previous one, and is not replayed as this one. The user resyncs with the refresh.
+          const now = tokenSubject(deps.getBearer())
+          if (sentAs === undefined || now === undefined || sentAs === now) return
+          throw { status: 401, message: 'The session changed to another account while this request was out; it was not sent again.', reason: SESSION_CHANGED } satisfies LukkError
+        }
       }
       const error = lukkError(ctx.response.status, ctx.response.statusText, ctx.response._data as { message?: string, errors?: Record<string, string[]> })
       // As lukk-core's own errors do: a throttle or maintenance answer says when to come back.

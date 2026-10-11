@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { carriesOrigin, createLukkClient, isSameOrigin, lukkError, REFRESHED_WITHOUT_TOKEN } from '../src/client'
+import { carriesOrigin, createLukkClient, isSameOrigin, lukkError, REFRESHED_WITHOUT_TOKEN, SESSION_CHANGED } from '../src/client'
 
 describe('lukkError', () => {
   it('shapes a Laravel error, and falls back to statusText / omits errors without a body', () => {
@@ -826,5 +826,56 @@ describe('the reason lukk names on an error', () => {
       .toEqual({ status: 423, message: 'This confirmation belongs to a different session.', reason: 'confirmation_session_mismatch' })
     expect(lukkError(423, 'Locked', { message: 'This action requires confirmation.' })).not.toHaveProperty('reason')
     expect(lukkError(423, 'Locked', { reason: 42 } as never)).not.toHaveProperty('reason')
+  })
+})
+
+describe('a 401 renewal that comes back as another account, or for a foreign target', () => {
+  const jwt = (sub: string) => `h.${Buffer.from(JSON.stringify({ sub })).toString('base64url')}.s`
+  const unauthenticated = () => json({ message: 'Unauthenticated.' }, 401)
+
+  it('does not replay a request composed for one account as another — it rejects, distinguishably', async () => {
+    // Another tab signed in as B; this tab's request was made for A. Renewed from the shared cookie, the
+    // pair is B's: retried, A's request (a transfer, a delete) ran as B.
+    let token = jwt('A')
+    const fetch = vi.fn(async () => unauthenticated())
+    const onTokens = vi.fn((pair: { access_token: string }) => { token = pair.access_token })
+    const client = createLukkClient({ baseURL: 'https://x/auth', fetch, getAccessToken: () => token, onTokens, refresh: async () => ({ access_token: jwt('B'), expires_in: 900 }) })
+
+    await expect(client.request('/account', { method: 'DELETE' })).rejects.toMatchObject({ status: 401, reason: SESSION_CHANGED, message: expect.stringContaining('another account') })
+    expect(SESSION_CHANGED).toBe('session_changed') // the documented value apps branch on
+    expect(fetch).toHaveBeenCalledOnce()
+    expect(onTokens).toHaveBeenCalledOnce() // B's session is the live one: kept
+  })
+
+  it('retries as before when the renewed token is the same account — or carries no subject to compare', async () => {
+    const noSub = `h.${Buffer.from('{}').toString('base64url')}.s`
+    for (const [before, after] of [[jwt('A'), jwt('A')], ['opaque', 'opaque-2'], [jwt('A'), 'opaque-2'], [noSub, jwt('B')]] as const) {
+      let token: string = before
+      const fetch = vi.fn().mockResolvedValueOnce(unauthenticated()).mockResolvedValueOnce(json({ ok: true }))
+      const client = createLukkClient({ baseURL: 'https://x/auth', fetch, getAccessToken: () => token, onTokens: (p) => { token = p.access_token }, refresh: async () => ({ access_token: after, expires_in: 900 }) })
+      await expect(client.request('/me')).resolves.toEqual({ ok: true })
+      expect(fetch).toHaveBeenCalledTimes(2)
+    }
+  })
+
+  it('reads a numeric subject too', async () => {
+    const numeric = (sub: number) => `h.${Buffer.from(JSON.stringify({ sub })).toString('base64url')}.s`
+    const fetch = vi.fn(async () => unauthenticated())
+    const client = createLukkClient({ baseURL: 'https://x/auth', fetch, getAccessToken: () => numeric(1), refresh: async () => ({ access_token: numeric(2), expires_in: 900 }) })
+    await expect(client.request('/me')).rejects.toMatchObject({ reason: SESSION_CHANGED })
+  })
+
+  it('never renews for a 401 from a foreign origin — no credentials went there', async () => {
+    // Renewing spent a rotation, re-sent the body to the foreign host, and on a failed renewal cleared the
+    // live token.
+    const fetch = vi.fn(async () => unauthenticated())
+    const refresh = vi.fn(async () => null)
+    const onUnauthenticated = vi.fn()
+    const client = createLukkClient({ baseURL: 'https://x/auth', fetch, getAccessToken: () => jwt('A'), refresh, onUnauthenticated })
+
+    await expect(client.request('https://elsewhere.test/hook', { method: 'POST', body: '{}' })).rejects.toMatchObject({ status: 401 })
+    expect(refresh).not.toHaveBeenCalled()
+    expect(onUnauthenticated).not.toHaveBeenCalled()
+    expect(fetch).toHaveBeenCalledOnce()
   })
 })

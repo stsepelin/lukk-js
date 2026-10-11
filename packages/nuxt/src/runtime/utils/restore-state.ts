@@ -1,5 +1,5 @@
 import type { Ref } from 'vue'
-import { CONFIRM_REQUIRED_KEY, RESTORE_FAILED_KEY } from '../keys'
+import { CONFIRM_REQUIRED_KEY, CONFIRMED_KEY, RESTORE_FAILED_KEY } from '../keys'
 import { clearPendingLogout, noteSignIn } from './pending-logout'
 import { lukkSecret } from './secrets'
 import { shallowRef, useState } from '#imports'
@@ -261,9 +261,9 @@ export function beginSession(nuxtApp: object, sentAt: number): void {
   // Stryker disable next-line ArrowFunction,BooleanLiteral: equivalent — the initial value is overwritten on the next line.
   const restoreFailed = useState<boolean>(RESTORE_FAILED_KEY, () => false)
   restoreFailed.value = false
-  // A step-up still waiting belongs to the session this one replaces, possibly another account's: cancel
-  // it, or the next confirmation would run the old action under the new account.
-  cancelPendingStepUp()
+  // A step-up — earned, or still waiting — belongs to the session this one replaces, possibly another
+  // account's (see `dropStepUp`).
+  dropStepUp(nuxtApp)
   // So does a 2FA challenge from an earlier attempt: left pending, `verifyTwoFactor` redeemed it and
   // replaced the session just begun.
   lukkSecret(nuxtApp, 'challenge').value = null
@@ -272,6 +272,21 @@ export function beginSession(nuxtApp: object, sentAt: number): void {
   clearPendingLogout(state.scope, sentAt)
   noteSignIn(state.scope, sentAt)
   state.announce?.()
+}
+
+/**
+ * The session changed (a sign-in here or in another tab, a refresh that came back as another account): a
+ * step-up belongs to the session that earned it. Its token goes (in direct mode it was attached to the new
+ * account's requests), `confirmed` goes false (the `lukk-confirmed` middleware let the new account through on
+ * the old one's step-up), and a `withConfirmation()` still waiting is cancelled — or the next confirmation
+ * would run the old action under the new account.
+ */
+export function dropStepUp(nuxtApp: object): void {
+  lukkSecret(nuxtApp, 'confirmation').value = null
+  // Stryker disable next-line ArrowFunction,BooleanLiteral: equivalent — the initial value is overwritten on the next line.
+  const confirmed = useState<boolean>(CONFIRMED_KEY, () => false)
+  confirmed.value = false
+  cancelPendingStepUp()
 }
 
 /**

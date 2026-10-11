@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { RESTORE_FAILED_KEY, USER_KEY } from '../src/runtime/keys'
+import { CONFIRMED_KEY, RESTORE_FAILED_KEY, USER_KEY } from '../src/runtime/keys'
 import { REFRESH_SETTLE_TIMEOUT, restoreState } from '../src/runtime/utils/restore-state'
 import { __test, useState } from './mocks/imports'
 
@@ -1380,5 +1380,79 @@ describe('client plugin — gaps found by mutation testing', () => {
     boot()
     await restore()
     expect(restoreState(__test.nuxtApp).refreshing).toBeNull()
+  })
+})
+
+describe('a step-up belongs to the session that earned it', () => {
+  // After signing in as B — here or in another tab — `confirmed` stayed true (the `lukk-confirmed`
+  // middleware let B through on A's step-up) and, in direct mode, A's confirmation token was still attached
+  // to B's requests.
+  const confirmedAsA = () => {
+    useLukkSecret('confirmation').value = 'step-up-of-A'
+    useState<boolean>(CONFIRMED_KEY, () => false).value = true
+  }
+  const stepUpGone = () => {
+    expect(useLukkSecret('confirmation').value).toBeNull()
+    expect(useState<boolean>(CONFIRMED_KEY, () => false).value).toBe(false)
+  }
+  class FakeChannel {
+    static last: FakeChannel | undefined
+    onmessage: ((event: MessageEvent) => void) | null = null
+    constructor() { FakeChannel.last = this }
+    postMessage() {}
+    close() {}
+  }
+
+  it.each(['direct', 'bff'] as const)('%s: a sign-in here drops it', async (mode) => {
+    userEndpoint()
+    boot(mode)
+    confirmedAsA()
+
+    await useLukkAuth().login({ email: 'b', password: 'p' })
+
+    stepUpGone()
+  })
+
+  it.each(['direct', 'bff'] as const)('%s: another tab changing the session drops it', async (mode) => {
+    vi.stubGlobal('window', { BroadcastChannel: FakeChannel })
+    userEndpoint()
+    boot(mode)
+    confirmedAsA()
+
+    FakeChannel.last!.onmessage!({ data: 'changed' } as MessageEvent)
+    await macrotask()
+
+    stepUpGone()
+  })
+
+  it('direct: a refresh that turns out to be another account drops it', async () => {
+    const jwt = (sub: string) => `h.${Buffer.from(JSON.stringify({ sub })).toString('base64url')}.s`
+    wire.client.refreshTokens!.mockResolvedValueOnce({ access_token: jwt('B'), expires_in: 900 })
+    userEndpoint()
+    boot()
+    useState(USER_KEY, () => null).value = { id: 'A' }
+    restoreState(__test.nuxtApp).subject = 'A'
+    confirmedAsA()
+
+    await (__test.nuxtApp as { $lukkRefresh: () => Promise<unknown> }).$lukkRefresh()
+    await macrotask()
+
+    stepUpGone()
+  })
+
+  it('direct: a refresh for the same account keeps it', async () => {
+    const jwt = (sub: string) => `h.${Buffer.from(JSON.stringify({ sub })).toString('base64url')}.s`
+    wire.client.refreshTokens!.mockResolvedValueOnce({ access_token: jwt('A'), expires_in: 900 })
+    userEndpoint()
+    boot()
+    useState(USER_KEY, () => null).value = { id: 'A', abilities: [] }
+    restoreState(__test.nuxtApp).subject = 'A'
+    confirmedAsA()
+
+    await (__test.nuxtApp as { $lukkRefresh: () => Promise<unknown> }).$lukkRefresh()
+    await macrotask()
+
+    expect(useLukkSecret('confirmation').value).toBe('step-up-of-A')
+    expect(useState<boolean>(CONFIRMED_KEY, () => false).value).toBe(true)
   })
 })
