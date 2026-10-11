@@ -8,6 +8,8 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import { __test } from './mocks/imports'
 import bff from '../src/runtime/server/bff'
 import apiProxy from '../src/runtime/server/api-proxy'
+import { resolveHydrationAccess, withholdIfReplaced } from '../src/runtime/server/hydrate'
+import { useSharedEndedSessions } from '../src/runtime/server/ended-sessions'
 import { forgetRefreshJournal, refreshHeads, confirmationsHeld } from '../src/runtime/server/refresh-journal'
 import { CONFIRMATIONS_HELD_LIMIT, deliverPair, dropConfirmation, holdConfirmation } from '../src/runtime/server/refresh'
 import { LUKK_BFF_PREFIX } from '../src/runtime/shared'
@@ -41,6 +43,29 @@ const lukkState = {
 }
 /** The app API: `/poll` is held until opened. */
 const pollGates = new Map<string, { arrived: Gate, release: Gate }>()
+/** A page render (`/__render`): held, once its session is hydrated, until released. */
+let rendering: { arrived: Gate, release: Gate } | undefined
+
+/**
+ * A shared store slow to answer for `sid` once: the ask after the first `skip` from now is held until
+ * answered — a real round trip, during which another request can finish.
+ */
+function slowStore(sid: string, skip: number): { asked: Promise<void>, answer: () => void } {
+  const asked = gate()
+  const answer = gate()
+  let n = 0
+  useSharedEndedSessions({
+    mark: async () => {},
+    has: async (key) => {
+      if (key === sid && n++ === skip) {
+        asked.open()
+        await answer.promise
+      }
+      return false
+    },
+  })
+  return { asked: asked.promise, answer: answer.open }
+}
 
 let lukk: Server
 let upstream: Server
@@ -120,6 +145,14 @@ beforeAll(async () => {
     await s.update({ access: jwt(now() - 10), refresh: `rt-${sid}`, sid })
     return { ok: true }
   }))
+  // A page: SSR hydration renews the session, the page renders, and the last check runs before it goes out.
+  h3.use('/__render', defineEventHandler(async (event) => {
+    await resolveHydrationAccess(event)
+    rendering?.arrived.open()
+    await rendering?.release.promise
+    await withholdIfReplaced(event)
+    return { rendered: true }
+  }))
   // As Nuxt mounts them: the auth proxy under its prefix, the app-API proxy for the rest of `/api`.
   h3.use(defineEventHandler(event => (event.path.startsWith(LUKK_BFF_PREFIX) ? bff(event) : apiProxy(event))))
   app = createServer(toNodeListener(h3))
@@ -133,6 +166,8 @@ afterEach(() => {
   lukkState.confirmTtl = 300
   lukkState.slow = gate()
   lukkState.slowArrived = gate()
+  rendering = undefined
+  useSharedEndedSessions(undefined)
   vi.restoreAllMocks()
 })
 
@@ -182,6 +217,13 @@ async function longPoll(browser: Browser, name: string): Promise<{ release: () =
   // At the API: its proactive refresh has rotated the session and re-sealed the cookie it will carry.
   await gates.arrived.promise
   return { release: async () => { gates.release.open(); return out } }
+}
+
+/** Confirm, and take the step-up's cookie. */
+async function stepUp(browser: Browser): Promise<void> {
+  const confirmed = await browser.send('POST', `${LUKK_BFF_PREFIX}/confirm-password`)
+  expect(confirmed.status).toBe(200)
+  confirmed.apply()
 }
 
 describe('a step-up confirmation and a slower response from the same session (BFF)', () => {
@@ -252,6 +294,107 @@ describe('a step-up confirmation and a slower response from the same session (BF
     expect(late.status).toBe(200)
 
     expect(await browser.request('GET', `${LUKK_BFF_PREFIX}/gated`)).toBe(200)
+  })
+
+  it('carries it onto the newest pair, when the session also rotated the one the slower response sealed', async () => {
+    const sid = `newest-pair-${Math.random()}`
+    const browser = await Browser.signedIn(sid)
+    const poll = await longPoll(browser, 'newest-pair')
+    // Renewed twice meanwhile: the long-poll's pair is spent, and the newest is two rotations on.
+    expect(await browser.request('POST', `${LUKK_BFF_PREFIX}/refresh`)).toBe(200)
+    expect(await browser.request('POST', `${LUKK_BFF_PREFIX}/refresh`)).toBe(200)
+    await stepUp(browser)
+
+    const newest = await sealed([`${COOKIE}=${browser.cookie}`])
+    const late = await poll.release()
+    expect(late.status).toBe(200)
+
+    // The newest pair, not the spent one, and the step-up with it.
+    expect(await sealed(late.setCookie)).toMatchObject({ refresh: newest!.refresh, confirmation: newest!.confirmation })
+  })
+
+  describe('a step-up that lands while a re-sealed response is still asking a slow shared store whether its session ended', () => {
+    it('survives the auth proxy\'s /refresh', async () => {
+      const sid = `store-refresh-${Math.random()}`
+      const browser = await Browser.signedIn(sid)
+      // Before the rotation, as it is journalled, after it — then the last check, after the seal.
+      const store = slowStore(sid, 3)
+      const renewal = browser.send('POST', `${LUKK_BFF_PREFIX}/refresh`)
+      await store.asked
+
+      await stepUp(browser)
+      store.answer()
+      const late = await renewal
+      late.apply()
+      expect(late.status).toBe(200)
+
+      expect(await browser.request('GET', `${LUKK_BFF_PREFIX}/gated`)).toBe(200)
+    })
+
+    it('survives the auth proxy\'s 401 renewal', async () => {
+      const sid = `store-retry-${Math.random()}`
+      const browser = await Browser.signedIn(sid)
+      const slow = browser.send('GET', `${LUKK_BFF_PREFIX}/slow`)
+      await lukkState.slowArrived.promise
+      // The retry's own check once its call is back — then the last one, after the seal.
+      const store = slowStore(sid, 1)
+      lukkState.slow.open()
+      await store.asked
+
+      await stepUp(browser)
+      store.answer()
+      const late = await slow
+      late.apply()
+      expect(late.status).toBe(200)
+
+      expect(await browser.request('GET', `${LUKK_BFF_PREFIX}/gated`)).toBe(200)
+    })
+
+    it('survives the app-API proxy\'s re-seal with the newest', async () => {
+      const sid = `store-poll-${Math.random()}`
+      const browser = await Browser.signedIn(sid)
+      const poll = await longPoll(browser, 'store')
+      // A first step-up, which the long-poll re-seals its cookie with as it lands…
+      await stepUp(browser)
+      // …and a second while it does, the only one lukk still honours.
+      lukkState.confirmations.clear()
+      // The check before the re-seal — then the last one, after it.
+      const store = slowStore(sid, 1)
+      const landing = poll.release()
+      await store.asked
+
+      await stepUp(browser)
+      store.answer()
+      const late = await landing
+      late.apply()
+      expect(late.status).toBe(200)
+
+      expect(await browser.request('GET', `${LUKK_BFF_PREFIX}/gated`)).toBe(200)
+    })
+
+    it('survives SSR hydration\'s re-seal with the newest', async () => {
+      const sid = `store-render-${Math.random()}`
+      const browser = await Browser.signedIn(sid)
+      rendering = { arrived: gate(), release: gate() }
+      const page = browser.send('GET', '/__render')
+      await rendering.arrived.promise
+      // A first step-up while the page renders, which it re-seals its cookie with before it goes out…
+      await stepUp(browser)
+      // …and a second while it does, the only one lukk still honours.
+      lukkState.confirmations.clear()
+      // The check before the re-seal — then the last one, after it.
+      const store = slowStore(sid, 1)
+      rendering.release.open()
+      await store.asked
+
+      await stepUp(browser)
+      store.answer()
+      const late = await page
+      late.apply()
+      expect(late.status).toBe(200)
+
+      expect(await browser.request('GET', `${LUKK_BFF_PREFIX}/gated`)).toBe(200)
+    })
   })
 
   it('carries nothing into a different session', async () => {

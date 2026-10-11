@@ -7,7 +7,7 @@ import { sessionEnded, sessionKey } from './ended-sessions'
 import { logoutNoted, withholdSignedOut } from './logout-note'
 import { revokeDroppedSession } from './revoke-dropped'
 import { readSealedSession, sessionCookie as sessionCookieOptions, sessionSeal } from './sealed-session'
-import { deliverPair, holdHead, refreshOnce, type TokenSession } from './refresh'
+import { deliverPair, endedOrConfirmationCarried, holdHead, refreshOnce, type TokenSession } from './refresh'
 
 /**
  * Optional BFF app-API proxy. Forwards same-origin `${apiPath}/**` to the fixed
@@ -151,11 +151,12 @@ export default defineEventHandler(async (event) => {
         // h3 writes the seal into the response's queued `Set-Cookie`, replacing our cookie of that name.
         event.node.res.setHeader('set-cookie', queued)
         await session.update(newest)
+        // Sealing takes a moment, after the last check: a sign-in or logout landing during it drops the
+        // seal, and its tokens are revoked — as on the `replaced` path. A step-up landing during it is sealed in.
+        const endedMeanwhile = await endedOrConfirmationCarried(session)
         const resealedCookies = toCookieArray(event.node.res.getHeader('set-cookie'))
         event.node.res.removeHeader('set-cookie')
-        // Sealing takes a moment, after the last check: a sign-in or logout landing during it drops the
-        // seal, and its tokens are revoked — as on the `replaced` path.
-        if (!(await ended())) return resealedCookies
+        if (!endedMeanwhile) return resealedCookies
         revokeDroppedSession(event, newest, baseURL, clientIp)
         return resealedCookies.filter(cookie => cookieName(cookie) !== sessionName)
       }

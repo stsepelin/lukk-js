@@ -28,7 +28,7 @@ vi.mock('h3', () => ({
 
 const refreshOnce = vi.fn<(s: unknown, b: string) => Promise<TokenSession | null>>()
 // `deliverPair` as the identity: these suites hand out pairs no journal knows newer versions of.
-vi.mock('../src/runtime/server/refresh', () => ({ refreshOnce: (...a: unknown[]) => refreshOnce(...(a as [unknown, string])), deliverPair: (_event: unknown, _id: unknown, pair: unknown) => pair, holdHead: () => {} }))
+vi.mock('../src/runtime/server/refresh', () => ({ refreshOnce: (...a: unknown[]) => refreshOnce(...(a as [unknown, string])), deliverPair: (_event: unknown, _id: unknown, pair: unknown) => pair, holdHead: () => {}, endedOrConfirmationCarried: async (s: never) => (await vi.importActual<typeof import('../src/runtime/server/refresh')>('../src/runtime/server/refresh')).endedOrConfirmationCarried(s) }))
 const revokeDroppedSession = vi.fn()
 vi.mock('../src/runtime/server/revoke-dropped', () => ({ revokeDroppedSession: (...a: unknown[]) => revokeDroppedSession(...a) }))
 

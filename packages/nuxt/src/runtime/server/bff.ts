@@ -8,7 +8,7 @@ import { endSession, newSessionId, sessionEnded, sessionKey, sessionReplaced, wi
 import { revokeDroppedSession } from './revoke-dropped'
 import { readSealedSessionWithId, sessionCookie, sessionSeal } from './sealed-session'
 import { warnIfSessionTooLarge } from './session-size'
-import { deliverPair, dropConfirmation, headPair, holdConfirmation, holdHead, refreshOnce, type TokenSession } from './refresh'
+import { deliverPair, dropConfirmation, endedOrConfirmationCarried, headPair, holdConfirmation, holdHead, refreshOnce, type TokenSession } from './refresh'
 
 type SessionCookieOptions = ReturnType<typeof sessionCookie>
 
@@ -241,7 +241,7 @@ export default defineEventHandler(async (event) => {
     if (!newest) return replaced()
     await s.update(newest)
     warnIfSessionTooLarge(s)
-    if (await sessionEnded(sessionKey(s))) {
+    if (await endedOrConfirmationCarried(s)) {
       withholdSessionCookie(event.node.res, sessionName)
       revokeDroppedSession(event, newest, baseURL, clientIp)
       return replaced()
@@ -325,8 +325,8 @@ export default defineEventHandler(async (event) => {
 
   // Sealing takes time too (iron is async crypto), so a sign-in or logout can still land after the check
   // in the retry's `finally` above. A session re-sealed there that one ended meanwhile must not leave with
-  // this response — the last point before it does.
-  if (rwSession && await sessionEnded(sessionKey(await rwSession))) {
+  // this response — the last point before it does. Nor without a step-up sealed for the session meanwhile.
+  if (rwSession && await (resealedTokens ? endedOrConfirmationCarried(await rwSession) : sessionEnded(sessionKey(await rwSession)))) {
     withholdSessionCookie(event.node.res, sessionName)
     revokeDroppedSession(event, resealedTokens ?? {}, baseURL, clientIp)
   }

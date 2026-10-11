@@ -9,7 +9,7 @@ import { logoutNoted } from './logout-note'
 import { revokeDroppedSession } from './revoke-dropped'
 import { readSealedSessionWithId, sessionCookie, sessionSeal } from './sealed-session'
 import { warnIfSessionTooLarge } from './session-size'
-import { deliverPair, holdHead, refreshOnce, type TokenSession } from './refresh'
+import { deliverPair, endedOrConfirmationCarried, holdHead, refreshOnce, type TokenSession } from './refresh'
 
 interface LukkServerConfig {
   sessionPassword?: string
@@ -116,10 +116,16 @@ export async function resolveHydrationAccess(event: H3Event): Promise<string | n
     remember(event, sessionKey(session), name, () => revokeDroppedSession(event, sealedPair, baseURL, visitorIp(event, clientIpHeader)), async () => {
       const newest = deliverPair(event, sessionKey(session), sealedPair, session.data.confirmation)
       // Moved past it, and the links that led on have expired: not this cookie at all.
-      if (!newest) return withholdSessionCookie(event.node.res, name)
-      if (newest === sealedPair) return
-      await session.update(newest)
-      sealedPair = newest
+      if (!newest) {
+        withholdSessionCookie(event.node.res, name)
+        return sessionEnded(sessionKey(session))
+      }
+      if (newest !== sealedPair) {
+        await session.update(newest)
+        sealedPair = newest
+      }
+      // With a step-up sealed for the session while this cookie was being sealed or checked.
+      return endedOrConfirmationCarried(session)
     })
     const fresh = await sealSession(event, { password: sessionPassword!, name })
     replaceRequestCookie(event, name, fresh)
@@ -174,21 +180,21 @@ export function hydratedSessionEnded(event: H3Event): Promise<boolean> {
 async function resealNewest(event: H3Event, hydrated: HydratedSession): Promise<void> {
   if (!hydrated.reseal || event.node.res.headersSent) return
   try {
-    await hydrated.reseal()
     // Sealing takes a moment, after the last check: a logout or sign-in landing during it must not have the
     // ended session's cookie leave with the page.
-    if (await sessionEnded(hydrated.key)) dropEnded(event, hydrated)
+    if (await hydrated.reseal()) dropEnded(event, hydrated)
   }
   catch { /* the response started meanwhile; it keeps the seal it had */ }
 }
 
 /**
  * `revoke` only when this render re-sealed the session: those rotated tokens are the ones to end. `reseal`
- * likewise: re-seal with the newest pair, should the session have rotated the one sealed here.
+ * likewise: re-seal with the newest pair, should the session have rotated the one sealed here — answering
+ * whether the session has ended since.
  */
-interface HydratedSession { key?: string, name: string, revoke?: () => void, reseal?: () => Promise<void> }
+interface HydratedSession { key?: string, name: string, revoke?: () => void, reseal?: () => Promise<boolean> }
 
-function remember(event: H3Event, key: string | undefined, name: string, revoke?: () => void, reseal?: () => Promise<void>): void {
+function remember(event: H3Event, key: string | undefined, name: string, revoke?: () => void, reseal?: () => Promise<boolean>): void {
   (event.context as { lukkHydrated?: HydratedSession }).lukkHydrated = { key, name, revoke, reseal }
 }
 

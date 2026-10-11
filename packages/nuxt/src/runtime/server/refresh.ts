@@ -278,8 +278,28 @@ export function headPair(id: string | undefined, pair: TokenSession): TokenSessi
 export function deliverPair(event: H3Event, id: string | undefined, pair: TokenSession, held: string | undefined): TokenSession | null {
   if (browserGone(event)) return null
   const newest = currentPair(id, pair)
-  const confirmation = confirmationsHeld.get(id!)?.token
+  const confirmation = heldConfirmation(id)
   return newest && confirmation !== undefined && confirmation !== held ? { ...newest, confirmation } : newest
+}
+
+/** The step-up held for session `id` (`holdConfirmation`), if any. */
+export function heldConfirmation(id: string | undefined): string | undefined {
+  return confirmationsHeld.get(id!)?.token
+}
+
+/**
+ * The last check before a cookie re-sealed after `deliverPair` leaves: has a sign-in or logout ended its
+ * session (`sessionEnded`)? If not, a step-up sealed for the session while this one was being sealed or
+ * checked — `deliverPair` read the held one before those awaits, and a shared store's answer is real I/O — is
+ * sealed in, and the session checked again: the step-up's cookie is out, and this one lands after it.
+ */
+export async function endedOrConfirmationCarried(session: { id?: string, data: TokenSession, update: (update: TokenSession) => Promise<unknown> }): Promise<boolean> {
+  for (;;) {
+    if (await sessionEnded(sessionKey(session))) return true
+    const late = heldConfirmation(sessionKey(session))
+    if (late === undefined || late === session.data.confirmation) return false
+    await session.update({ confirmation: late })
+  }
 }
 
 /** The most sessions whose confirmation is held at once (`holdConfirmation`); past it, a new one is not held. */
