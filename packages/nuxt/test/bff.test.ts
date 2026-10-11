@@ -3,7 +3,7 @@ import { __test } from './mocks/imports'
 
 // Track read-write session opens so a test can assert the read-only path never mints a cookie,
 // plus the cookie name the writer opens the session under (to verify the per-app namespace).
-const h3state = vi.hoisted(() => ({ useSessionCalls: 0, lastSessionName: undefined as string | undefined, lastSessionConfig: undefined as { name?: string, cookie?: Record<string, unknown>, sessionHeader?: boolean } | undefined }))
+const h3state = vi.hoisted(() => ({ useSessionCalls: 0, unsealCalls: 0, lastSessionName: undefined as string | undefined, lastSessionConfig: undefined as { name?: string, cookie?: Record<string, unknown>, sessionHeader?: boolean } | undefined }))
 vi.mock('h3', () => ({
   defineEventHandler: (fn: unknown) => fn,
   getRequestHeader: (event: { headers: Record<string, string> }, name: string) => event.headers[name],
@@ -11,6 +11,7 @@ vi.mock('h3', () => ({
   getCookie: (event: { __session?: unknown, __cookiePresent?: boolean }) =>
     (event.__cookiePresent === false ? undefined : (event.__session ? 'sealed' : undefined)),
   unsealSession: async (event: { __session?: { id?: string, data: unknown }, __sealTampered?: boolean, __sealNoData?: boolean }) => {
+    h3state.unsealCalls++
     if (event.__sealTampered) throw new Error('bad seal')
     if (event.__sealNoData) return {} // unsealed, but carries no `data` → defensive `?? {}`
     // With h3's id, as a real seal carries it: what a session sealed before `sid` existed is known by.
@@ -1629,9 +1630,11 @@ describe('route policy follows the URL lukk receives, not the string the browser
 
     // `baseURL` is `https://lukk/auth`: `/auth/` + 8,187 characters is 8,193.
     const event = makeEvent({ path: `/api/_lukk/${'{'.repeat(2729)}`, session })
+    h3state.unsealCalls = 0
     const body = await run(event)
 
     expect(event.status).toBe(414)
+    expect(h3state.unsealCalls).toBe(0)
     expect(body).toEqual({ message: 'URI too long.' })
     expect(fetchMock).not.toHaveBeenCalled()
     expect(event.node.res.getHeader('cache-control')).toBeUndefined()
@@ -1639,6 +1642,7 @@ describe('route policy follows the URL lukk receives, not the string the browser
     const atLimit = makeEvent({ path: `/api/_lukk/${'a'.repeat(8186)}`, session })
     await run(atLimit)
     expect(atLimit.status).not.toBe(414)
+    expect(h3state.unsealCalls).toBe(1)
   })
 
   it('forwards a path ending in a long run of slashes — Laravel trims them — rather than refusing it', async () => {
