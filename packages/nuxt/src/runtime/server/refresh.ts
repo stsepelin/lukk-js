@@ -306,7 +306,7 @@ export function holdConfirmation(id: string, token: string): void {
   }
   clearTimeout(held?.timer)
   // A delay past what a timer can hold fires at once (Node) — the confirmation is then simply not carried.
-  confirmationsHeld.set(id, { token, timer: unref(setTimeout(() => confirmationsHeld.delete(id), expires - Date.now())) })
+  confirmationsHeld.set(id, { token, timer: unref(setTimeout(() => confirmationsHeld.delete(id), Math.max(0, expires - Date.now()))) })
 }
 
 /** lukk refused `token` (a `423`): no response carries it on from here. One held since stays. */
