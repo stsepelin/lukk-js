@@ -1456,3 +1456,123 @@ describe('a step-up belongs to the session that earned it', () => {
     expect(useState<boolean>(CONFIRMED_KEY, () => false).value).toBe(true)
   })
 })
+
+describe('a user load the session switched accounts under', () => {
+  // Direct mode. The user request goes out as A; its 401 renews the shared refresh cookie — another tab
+  // signed in as B — and lukk-nuxt does not re-send it as B: it rejects with `SESSION_CHANGED`, a 401. Read
+  // as lukk's answer about the visitor, that signed the tab out (`user` null, subject forgotten), while the
+  // resync the same refresh started loaded B — unless IT failed too, and then the tab sat signed out holding
+  // B's token, with no subject left to notice the switch on the next refresh.
+  const jwt = (sub: string) => `h.${Buffer.from(JSON.stringify({ sub })).toString('base64url')}.s`
+  const sessionChanged = { status: 401, message: 'The session changed to another account while this request was out; it was not sent again.', reason: 'session_changed' }
+  const unavailable = { status: 503, message: 'Service Unavailable' }
+
+  /** Signed in as A on screen; the next refresh hands back B. `answers` are the user endpoint's, after A's own. */
+  function switchedUnder(answers: Array<() => unknown>) {
+    wire.client.refreshTokens!.mockResolvedValue({ access_token: jwt('B'), expires_in: 900 })
+    boot()
+    useLukkSecret('access').value = jwt('A')
+    useState(USER_KEY, () => null).value = { id: 'A' }
+    restoreState(__test.nuxtApp).subject = 'A'
+    api.mockImplementationOnce(async () => {
+      await (__test.nuxtApp as { $lukkRefresh: () => Promise<unknown> }).$lukkRefresh()
+      throw sessionChanged
+    })
+    for (const answer of answers) api.mockImplementationOnce(async () => answer())
+  }
+
+  it('does not sign the tab out, and loads the account the session now holds — though the resync failed', async () => {
+    // A's request, then the resync's (503), then the load's own second ask, as B.
+    switchedUnder([() => { throw unavailable }, () => ({ id: 'B' })])
+    const auth = useLukkAuth()
+
+    await auth.fetchUser()
+    await macrotask()
+
+    expect(auth.user.value).toEqual({ id: 'B' })
+    expect(restoreState(__test.nuxtApp).subject).toBe('B')
+  })
+
+  it('leaves the user as it was when nothing could be loaded — and the next refresh still sees the switch', async () => {
+    switchedUnder([() => { throw unavailable }, () => { throw unavailable }])
+    const auth = useLukkAuth()
+
+    await auth.fetchUser()
+    await macrotask()
+
+    expect(auth.user.value).toEqual({ id: 'A' }) // "couldn't tell" — as any failed load
+    expect(access()).toBe(jwt('B'))
+    expect(restoreState(__test.nuxtApp).subject).toBe('A')
+
+    api.mockImplementation(async () => ({ id: 'B' }))
+    await (__test.nuxtApp as { $lukkRefresh: () => Promise<unknown> }).$lukkRefresh()
+    await macrotask()
+    expect(auth.user.value).toEqual({ id: 'B' })
+  })
+
+  it('asks again once only: a session that keeps switching is left to the next refresh', async () => {
+    // Switching on every ask but the sixth — bounded, so a load that kept asking ends on an assertion, not a hang.
+    switchedUnder([() => { throw unavailable }, ...Array.from({ length: 4 }, () => () => { throw sessionChanged }), () => ({ id: 'C' })])
+    const auth = useLukkAuth()
+
+    await auth.fetchUser()
+
+    expect(auth.user.value).toEqual({ id: 'A' })
+    expect(api).toHaveBeenCalledTimes(3) // A's request, the resync's, one more ask
+  })
+
+  it('reads a load rejected with nothing at all as "couldn\'t tell", as before', async () => {
+    boot()
+    useState(USER_KEY, () => null).value = { id: 'A' }
+    api.mockRejectedValueOnce(null)
+    const auth = useLukkAuth()
+
+    await auth.fetchUser()
+
+    expect(auth.user.value).toEqual({ id: 'A' })
+  })
+})
+
+describe('a logout the session switched accounts under', () => {
+  // Direct mode. The logout goes out with A's (expired) token; another tab has meanwhile signed in as B, so
+  // the renewal that follows lukk's 401 comes back as B. The session the browser now holds is B's: the logout
+  // must end THAT one — read as "no session left", B stayed live upstream behind a tab showing nobody.
+  const jwt = (sub: string) => `h.${Buffer.from(JSON.stringify({ sub })).toString('base64url')}.s`
+
+  it('ends the session the tab now holds, and signs the tab out', async () => {
+    const sentWith: Array<string | null> = []
+    wire.client.logout = vi.fn(async () => {
+      sentWith.push(wire.hooks!.getAccessToken())
+      if (sentWith.length === 1) throw { status: 401, message: 'Unauthenticated.' }
+    })
+    wire.client.refreshTokens = vi.fn(async () => ({ access_token: jwt('B'), expires_in: 900 }))
+    userEndpoint()
+    boot()
+    useLukkSecret('access').value = jwt('A')
+    useState(USER_KEY, () => null).value = { id: 'A' }
+    restoreState(__test.nuxtApp).subject = 'A'
+    const auth = useLukkAuth()
+
+    await auth.logout()
+
+    expect(sentWith).toEqual([jwt('A'), jwt('B')])
+    expect(auth.user.value).toBeNull()
+    expect(access()).toBeNull()
+  })
+
+  it('stops after the one renewal: a second 401 is the answer', async () => {
+    wire.client.logout = vi.fn(async () => { throw { status: 401, message: 'Unauthenticated.' } })
+    wire.client.refreshTokens = vi.fn(async () => ({ access_token: jwt('B'), expires_in: 900 }))
+    userEndpoint()
+    boot()
+    useLukkSecret('access').value = jwt('A')
+    useState(USER_KEY, () => null).value = { id: 'A' }
+    const auth = useLukkAuth()
+
+    await expect(auth.logout()).rejects.toMatchObject({ status: 401 })
+
+    expect(wire.client.logout).toHaveBeenCalledTimes(2)
+    expect(auth.user.value).toBeNull()
+    expect(access()).toBeNull()
+  })
+})

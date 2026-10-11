@@ -1,6 +1,7 @@
 import type { ComputedRef, Ref } from 'vue'
 import { computed, useNuxtApp, useState, watch } from '#imports'
 import { CONFIRM_REQUIRED_KEY, CONFIRMED_KEY } from '../keys'
+import type { LukkModeClient } from '../shared'
 import { useLukkSecret } from '../utils/secrets'
 
 /**
@@ -19,7 +20,7 @@ export interface LukkConfirmation {
    * confirm with a user-verifying passkey there, or sign in again with the second factor.
    */
   confirmPassword: (password: string) => Promise<void>
-  record: (result: { confirmation_token?: string }) => void
+  record: (result: { confirmation_token?: string } | { ok: true }) => void
   clear: () => void
   withConfirmation: <T>(action: () => Promise<T>) => Promise<T>
   cancel: () => void
@@ -42,7 +43,7 @@ export interface LukkConfirmation {
  */
 export function useLukkConfirmation(): LukkConfirmation {
   const nuxtApp = useNuxtApp()
-  const { $lukk } = nuxtApp
+  const $lukk: LukkModeClient = nuxtApp.$lukk
   const token = useLukkSecret('confirmation')
   const confirmedFlag = useState<boolean>(CONFIRMED_KEY, () => false)
   const confirmed = computed(() => confirmedFlag.value)
@@ -96,14 +97,16 @@ export function useLukkConfirmation(): LukkConfirmation {
 
   /**
    * Record a confirmation result: store the token when present (direct mode) and
-   * flip `confirmed`. Shared with the passkey step-up path.
+   * flip `confirmed`. Shared with the passkey step-up path. In bff mode the proxy keeps the token and the
+   * result is its acknowledgement, `{ ok: true }`.
    */
-  function record(result: { confirmation_token?: string }): void {
+  function record(result: { confirmation_token?: string } | { ok: true }): void {
+    const { confirmation_token: issued } = result as { confirmation_token?: string }
     // Client-only, both halves: a step-up is earned by a request the browser made, and a `true` serialised
     // into `__NUXT_DATA__` would claim one for whoever the render is later handed to.
     // Stryker disable next-line ConditionalExpression: the mutation run compiles the client, where this is `true` already; the server half is pinned in test/server-env/confirmation.test.ts.
     if (import.meta.client) {
-      if (result.confirmation_token) token.value = result.confirmation_token
+      if (issued) token.value = issued
       confirmedFlag.value = true
       stepUp.earned = {}
     }

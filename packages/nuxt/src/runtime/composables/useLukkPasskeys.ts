@@ -1,5 +1,6 @@
 import { credentialToJSON, type LoginResult, type PasskeyLoginOptions, type PasskeySummary, toCreationOptions, toRequestOptions } from 'lukk-core'
 import { useNuxtApp } from '#imports'
+import type { LukkModeClient } from '../shared'
 import { SIGN_IN, type SignInWith } from '../utils/sign-in'
 import { type BffSignInResult, useLukkAuth } from './useLukkAuth'
 import { useLukkConfirmation } from './useLukkConfirmation'
@@ -31,7 +32,7 @@ function present(credential: PublicKeyCredential | null): PublicKeyCredential {
  */
 export function useLukkPasskeys(): LukkPasskeys {
   const nuxtApp = useNuxtApp()
-  const { $lukk } = nuxtApp
+  const $lukk: LukkModeClient = nuxtApp.$lukk
 
   /** Register a new passkey (requires a logged-in, step-up-confirmed user). */
   async function register(name?: string): Promise<void> {

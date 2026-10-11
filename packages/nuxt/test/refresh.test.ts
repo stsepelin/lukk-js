@@ -1,3 +1,6 @@
+import { once } from 'node:events'
+import { createServer, request, type IncomingMessage, type ServerResponse } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { currentPair, holdHead, refreshOnce, RESPONSES_OUT_LIMIT } from '../src/runtime/server/refresh'
 import { endSession, forgetEndedSessions, markSessionEnded, useSharedEndedSessions } from '../src/runtime/server/ended-sessions'
@@ -1333,6 +1336,71 @@ describe('holdHead — the head outlives every response that may still seal a pa
     expect(refreshHeads.get(sid)?.token).toBe('t1')
     await vi.advanceTimersByTimeAsync(1)
     expect(refreshHeads.has(sid)).toBe(false)
+  })
+
+  /**
+   * A REAL Node response that has already closed by the time a handler gets to `holdHead` — every caller
+   * reaches it after an await (unsealing the cookie, opening the session), and the browser may be gone by
+   * then: the client aborted, or the response was already sent. Its `close` has fired, and never fires again.
+   */
+  async function closedResponse(how: 'aborted' | 'finished'): Promise<{ node: { req: IncomingMessage, res: ServerResponse } }> {
+    let handled!: (event: { node: { req: IncomingMessage, res: ServerResponse } }) => void
+    const closed = new Promise<{ node: { req: IncomingMessage, res: ServerResponse } }>((resolve) => { handled = resolve })
+    const server = createServer((req, res) => {
+      res.once('close', () => handled({ node: { req, res } }))
+      if (how === 'finished') res.end('done')
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const client = request({ port: (server.address() as AddressInfo).port, host: '127.0.0.1', agent: false })
+    client.on('error', () => {})
+    client.on('response', response => response.resume())
+    client.end()
+    if (how === 'aborted') setTimeout(() => client.destroy(), 20)
+    const event = await closed
+    server.close()
+    return event
+  }
+
+  it.each(['aborted', 'finished'] as const)('counts nothing for a response that has already closed (%s) — and holds the head as its close would', async (how) => {
+    // Counted, its `close` never came: the session stayed "out" for good — its head never deleted, and the
+    // count standing against `RESPONSES_OUT_LIMIT` for every session it happened to.
+    const event = await closedResponse(how)
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    const sid = `closed-${how}-${Math.random()}`
+    await rotate(sid, 't0', 't1')
+    await vi.advanceTimersByTimeAsync(9 * 60_000)
+
+    holdHead(event as never, sid)
+
+    expect(responsesOut.has(sid)).toBe(false)
+    // As a response closing now: the head lasts the hold from here, not from the rotation.
+    await vi.advanceTimersByTimeAsync(10 * 60_000 - 1)
+    expect(refreshHeads.get(sid)?.token).toBe('t1')
+    await vi.advanceTimersByTimeAsync(1)
+    expect(refreshHeads.has(sid)).toBe(false)
+  })
+
+  it.each([
+    ['sent', { closed: true }, {}],
+    ['finished, its close still to come', { writableFinished: true }, {}],
+    ['its browser gone', { destroyed: true }, {}],
+    ['its request aborted', {}, { aborted: true }],
+  ])('counts nothing for a response that can seal nothing more: %s', (_, state, req) => {
+    const res = { once: vi.fn(), ...state }
+    holdHead({ node: { req, res } } as never, 'done')
+    expect(responsesOut.has('done')).toBe(false)
+    expect(res.once).not.toHaveBeenCalled()
+  })
+
+  it('a closed response leaves the count of one still out alone', async () => {
+    const event = await closedResponse('aborted')
+    const open = response()
+    holdHead(open.event, 'one-out')
+    holdHead(event as never, 'one-out')
+    expect(responsesOut.get('one-out')).toBe(1)
+    open.close()
+    expect(responsesOut.has('one-out')).toBe(false)
   })
 
   it('is bounded: past the limit a new session is not held, and that is warned about once', () => {

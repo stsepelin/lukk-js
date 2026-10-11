@@ -295,3 +295,10 @@ export type LukkBffClient = Omit<LukkClient, 'login' | 'loginWithPasskey' | 'reg
   confirmPassword: (...args: Parameters<LukkClient['confirmPassword']>) => Promise<{ ok: true }>
   confirmPasskey: (...args: Parameters<LukkClient['confirmPasskey']>) => Promise<{ ok: true }>
 }
+
+/**
+ * `useNuxtApp().$lukk` as the module's own runtime must read it: one build serves both modes, so it is the
+ * raw client in direct mode or {@link LukkBffClient} in bff mode, and the code handles either answer. Typed as
+ * the one the app's mode declares, it type-checked under direct mode only — and failed under bff.
+ */
+export type LukkModeClient = LukkClient | LukkBffClient

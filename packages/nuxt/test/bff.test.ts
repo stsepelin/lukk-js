@@ -10,10 +10,11 @@ vi.mock('h3', () => ({
   // A cookie is "present" unless the test opts out (`cookiePresent: false` → an anonymous request).
   getCookie: (event: { __session?: unknown, __cookiePresent?: boolean }) =>
     (event.__cookiePresent === false ? undefined : (event.__session ? 'sealed' : undefined)),
-  unsealSession: async (event: { __session?: { data: unknown }, __sealTampered?: boolean, __sealNoData?: boolean }) => {
+  unsealSession: async (event: { __session?: { id?: string, data: unknown }, __sealTampered?: boolean, __sealNoData?: boolean }) => {
     if (event.__sealTampered) throw new Error('bad seal')
     if (event.__sealNoData) return {} // unsealed, but carries no `data` → defensive `?? {}`
-    return event.__session ? { data: event.__session.data } : {}
+    // With h3's id, as a real seal carries it: what a session sealed before `sid` existed is known by.
+    return event.__session ? { id: event.__session.id, data: event.__session.data } : {}
   },
   readRawBody: async (event: { body?: string }) => event.body,
   getRequestIP: (event: { ip?: string }) => event.ip,
@@ -1048,7 +1049,7 @@ describe('the /refresh subpath is served, not proxied', () => {
     expect(ev2.status).toBe(401)
     expect(rejected.data).toEqual({})
     // Only a wait that ran out says when to come back; a throttle's own timing is lukk's to give.
-    expect((ev1 as { __res?: Record<string, string> }).__res?.['retry-after']).toBeUndefined()
+    expect(Object.keys((ev1 as { __res?: Record<string, unknown> }).__res ?? {})).not.toContain('retry-after') // not even blank: Node refuses an undefined header value
   })
 
   it('answers a refresh lukk is slow to rotate with a retryable 503 and Retry-After, keeping the session', async () => {
@@ -1064,7 +1065,7 @@ describe('the /refresh subpath is served, not proxied', () => {
 
     expect(await result).toEqual({ message: 'Unauthenticated.' })
     expect(event.status).toBe(503)
-    expect((event as { __res?: Record<string, string> }).__res?.['retry-after']).toBe('5')
+    expect(String((event as { __res?: Record<string, unknown> }).__res?.['retry-after'])).toBe('5')
     expect(slow.clear).not.toHaveBeenCalled()
     vi.useRealTimers()
   })
@@ -1943,6 +1944,18 @@ describe('a BFF response that may seal a pair holds the session\'s head until it
     expect(responsesOut.has(sid)).toBe(false)
   })
 
+  it('counts a session sealed before `sid` existed under h3\'s id — the key its journal and head are under', async () => {
+    mockFetch().fetch = vi.fn(async () => jsonRes({ confirmation_token: 'c1' }))
+    const id = `held-legacy-${Math.random()}`
+    const event = makeEvent({ path: '/api/_lukk/confirm-password', method: 'POST', body: '{"password":"p"}', headers: { ...sameOrigin, 'content-type': 'application/json' }, session: makeSession({ access: 'a1', refresh: 't1' }, id) })
+    const close = closable(event)
+
+    await run(event)
+    expect(responsesOut.get(id)).toBe(1)
+    close()
+    expect(responsesOut.has(id)).toBe(false)
+  })
+
   it('counts nothing for a request with no refresh token — it seals no pair', async () => {
     mockFetch().fetch = vi.fn(async () => jsonRes({ message: 'Unauthenticated.' }, 401))
     const sid = `anon-bff-${Math.random()}`
@@ -2002,6 +2015,38 @@ describe('a logout or a sign-in presents the session\'s CURRENT tokens, not the 
     await rotatedForNobody(sid)
 
     await run(makeEvent({ path: '/api/_lukk/login', method: 'POST', body: '{}', headers: sameOrigin, session: makeSession({ access: 'A0', refresh: 'R0', sid } as TokenSession) }))
+    await new Promise(resolve => setTimeout(resolve, 0)) // the background revoke
+
+    expect(logouts).toEqual([{ bearer: 'A1', refresh: 'R1' }])
+    expect(reused).toBe(0)
+  })
+
+  // A session sealed before `sid` existed — every one from before the upgrade — is journalled under h3's id
+  // (`sessionKey`). Looked up by `sid` alone, it had no head: the logout presented the spent R0 again.
+  async function legacyRotatedForNobody(id: string) {
+    const gone = makeEvent({ path: '/api/_lukk/user', headers: sameOrigin, session: makeSession({ access: 'A0', refresh: 'R0' }, id) })
+    ;(gone.node as Record<string, unknown>).req = { aborted: true }
+    await run(gone)
+    expect(refreshJournals.get(id)?.has('R0')).toBe(true)
+  }
+
+  it('a logout, on a session sealed before `sid` existed', async () => {
+    mockFetch().fetch = fakeLukk(() => jsonRes({}))
+    const id = `logout-legacy-${Math.random()}`
+    await legacyRotatedForNobody(id)
+
+    await run(makeEvent({ path: '/api/_lukk/logout', method: 'POST', body: '{}', headers: sameOrigin, session: makeSession({ access: 'A0', refresh: 'R0' }, id) }))
+
+    expect(logouts).toEqual([{ bearer: 'A1', refresh: 'R1' }])
+    expect(reused).toBe(0)
+  })
+
+  it('a sign-in replacing a session sealed before `sid` existed', async () => {
+    mockFetch().fetch = fakeLukk(() => jsonRes({ access_token: 'B', refresh_token: 'RB', expires_in: 900 }))
+    const id = `signin-legacy-${Math.random()}`
+    await legacyRotatedForNobody(id)
+
+    await run(makeEvent({ path: '/api/_lukk/login', method: 'POST', body: '{}', headers: sameOrigin, session: makeSession({ access: 'A0', refresh: 'R0' }, id) }))
     await new Promise(resolve => setTimeout(resolve, 0)) // the background revoke
 
     expect(logouts).toEqual([{ bearer: 'A1', refresh: 'R1' }])

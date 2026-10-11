@@ -195,9 +195,17 @@ describe('api-proxy integration (real h3 + upstream)', () => {
         const res = await fetch(`${proxyURL}${path}`, { method: 'POST', body: '{}' })
         expect(res.status, path).toBe(404)
       }
+      // Laravel served from the project root (SCRIPT_NAME `/public/index.php`): `/public/index.php/auth` is `/auth`.
+      cfg.baseURL = `${cfg.apiTarget as string}/public/index.php/auth`
+      for (const path of ['/api/auth/login', '/api/public/index.php/auth/login']) {
+        const res = await fetch(`${proxyURL}${path}`, { method: 'POST', body: '{}' })
+        expect(res.status, path).toBe(404)
+      }
       // A `.php` segment is never dropped with what it hides: an encoded separator, query, fragment or `..`.
+      // And Symfony strips a script in a subdirectory with everything before it, or — where only its basename
+      // appears — as many characters as its path has (`/public/index.php` is 17: `/xx/index.php/abc` goes).
       cfg.baseURL = `${cfg.apiTarget as string}/auth`
-      for (const path of ['/api/index.php/auth/login', '/api/auth%2Flogin%3F.php', '/api/auth%2Flogin%23.php', '/api/auth%252Flogin%253F.php', '/api/x%2F..%2Fauth%2Flogin%3F.php', '/api/..%2Fx.php', '/api/index.php%2Fauth/login', '/api/index%252ephp/auth/login', '/api/index.php%252Fauth/login', '/api/index.php%250D/auth/login', '/api/index.php%2509/auth/refresh', '/api/index.ph%2509p/auth/passkeys/login', '/api/index.phpauth/login', '/api/index.php%61uth/confirm-password', '/api/index.phpauth/refresh']) {
+      for (const path of ['/api/index.php/auth/login', '/api/auth%2Flogin%3F.php', '/api/auth%2Flogin%23.php', '/api/auth%252Flogin%253F.php', '/api/x%2F..%2Fauth%2Flogin%3F.php', '/api/..%2Fx.php', '/api/index.php%2Fauth/login', '/api/index%252ephp/auth/login', '/api/index.php%252Fauth/login', '/api/index.php%250D/auth/login', '/api/index.php%2509/auth/refresh', '/api/index.ph%2509p/auth/passkeys/login', '/api/index.phpauth/login', '/api/index.php%61uth/confirm-password', '/api/index.phpauth/refresh', '/api/public/index.php/auth/login', '/api/x/public/index.php/auth/login', '/api/public/index.phpauth/login', '/api/xx/index.php/abc/auth/login', '/api/index.php/a.phpx/auth/refresh']) {
         const res = await fetch(`${proxyURL}${path}`, { method: 'POST', body: '{}' })
         expect(res.status, path).toBe(404)
       }

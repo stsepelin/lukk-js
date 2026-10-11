@@ -1,6 +1,6 @@
-import { isRegistrationPending, isTwoFactorChallenge, type LoginInput, type LoginResult, type LukkError, type LukkUser, type RegisterInput, type RegisterResult, shapeUser, userShapeWarning } from 'lukk-core'
+import { isRegistrationPending, isTwoFactorChallenge, type LoginInput, type LoginResult, type LukkError, type LukkUser, type RegisterInput, type RegisterResult, SESSION_CHANGED, shapeUser, userShapeWarning } from 'lukk-core'
 import type { ComputedRef, Ref } from 'vue'
-import type { BffSignInResult } from '../shared'
+import type { BffSignInResult, LukkModeClient } from '../shared'
 import { computed, useNuxtApp, useRuntimeConfig, useState } from '#imports'
 import { CONFIRMED_KEY, READY_KEY, RESTORE_FAILED_KEY, USER_KEY } from '../keys'
 import { useLukkSecret } from '../utils/secrets'
@@ -54,7 +54,7 @@ export interface LukkAuth {
  */
 export function useLukkAuth(): LukkAuth {
   const nuxtApp = useNuxtApp()
-  const { $lukk } = nuxtApp
+  const $lukk: LukkModeClient = nuxtApp.$lukk
   // Restore bookkeeping that `clearNuxtState()` cannot erase — see utils/restore-state.
   const state = restoreState(nuxtApp)
   const cfg = useRuntimeConfig().public.lukk as PublicLukk
@@ -153,7 +153,7 @@ export function useLukkAuth(): LukkAuth {
    * (`useLukkPasskeys().login()` reaches it through {@link SIGN_IN}). One path, so a sign-in superseded
    * by a logout always ends its own session rather than joining the logout that went out before it.
    */
-  async function signInWith(send: () => Promise<LoginResult>): Promise<LoginResult | BffSignInResult> {
+  async function signInWith(send: () => Promise<LoginResult | BffSignInResult>): Promise<LoginResult | BffSignInResult> {
     const { result, current } = await signIn(nuxtApp, send, r => !isTwoFactorChallenge(r))
     if (!current) return endSupersededSignIn(result, !isTwoFactorChallenge(result))
     if (isTwoFactorChallenge(result)) {
@@ -175,7 +175,7 @@ export function useLukkAuth(): LukkAuth {
    * `{ registered, requires_verification }` shape — route the user on accordingly.
    */
   async function register(input: RegisterInput): Promise<RegisterResult | BffSignInResult> {
-    const startsSession = (r: RegisterResult) => !isRegistrationPending(r) && !isTwoFactorChallenge(r)
+    const startsSession = (r: RegisterResult | BffSignInResult) => !isRegistrationPending(r) && !isTwoFactorChallenge(r)
     const { result, current } = await signIn(nuxtApp, () => $lukk.register(input), startsSession)
     if (!current) return endSupersededSignIn(result, startsSession(result))
     if (isRegistrationPending(result)) {
@@ -205,7 +205,7 @@ export function useLukkAuth(): LukkAuth {
     const challengeToken = challenge.value
     let current: boolean
     try {
-      ({ current } = await signIn(nuxtApp, () => $lukk.twoFactorChallenge({ challenge_token: challengeToken, ...input }), () => true))
+      ({ current } = await signIn<unknown>(nuxtApp, () => $lukk.twoFactorChallenge({ challenge_token: challengeToken, ...input }), () => true))
     }
     catch (error) {
       // lukk refused the CHALLENGE itself (expired, already used, issued before the password changed) —
@@ -457,7 +457,7 @@ export function useLukkAuth(): LukkAuth {
    * user endpoint said you are signed out" from "the user endpoint failed". Only that distinction is
    * ever read, so it is the whole answer. `fetchUser` keeps its `Promise<void>` signature.
    */
-  async function loadUser(isCurrent: () => boolean): Promise<boolean> {
+  async function loadUser(isCurrent: () => boolean, askedAgain = false): Promise<boolean> {
     if (!cfg.userEndpoint) return false
     try {
       // userEndpoint is a full path; `baseURL: ''` keeps it as-is (in server-BFF the
@@ -478,6 +478,12 @@ export function useLukkAuth(): LukkAuth {
       return false
     }
     catch (e) {
+      // The session changed to another account while the request was out (another tab signed in), and it
+      // was not sent again as that one: a 401, but no answer about this visitor. Read as one, it signed the
+      // tab out — and forgot the subject, so should the resync the same refresh started fail too, nothing
+      // ever noticed the switch again. Asked again, now as the account the session holds; once only — a
+      // session still switching under it is "couldn't tell", and the next refresh's resync sees it.
+      if ((e as LukkError | null)?.reason === SESSION_CHANGED) return askedAgain || loadUser(isCurrent, true)
       // Only an auth failure means "logged out". A transient 5xx/network error
       // must not flip `loggedIn` and bounce a logged-in user to /login.
       if (!isAuthRejection(e)) return true

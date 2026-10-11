@@ -357,9 +357,14 @@ let holdLimitWarned = false
  * `RESPONSES_OUT_LIMIT` sessions a new one is not counted (warned once), and its head lasts its usual time.
  */
 export function holdHead(event: H3Event, id: string | undefined): void {
-  const res = event.node.res as { once?: (name: string, listener: () => void) => unknown }
+  const res = event.node.res as { once?: (name: string, listener: () => void) => unknown, closed?: boolean, writableFinished?: boolean }
   // A response that cannot say when it closes is not counted: it would hold the head for good.
   if (!id || !res.once) return
+  // Nor one that can seal nothing more: sent, or its browser gone. Every caller gets here after an await, and
+  // a response that closed meanwhile has had its `close` — which never comes again, so counted, the session
+  // stayed out for good: its head never went, and the count stood against the limit below. It is closing as
+  // far as the head is concerned, NOW: the head lasts the hold from here, as from any last close.
+  if (res.closed || res.writableFinished || browserGone(event)) return released(id)
   if (!responsesOut.has(id) && responsesOut.size >= RESPONSES_OUT_LIMIT) {
     if (!holdLimitWarned) console.warn(`[lukk-nuxt] More than ${RESPONSES_OUT_LIMIT} sessions have a response out at once; the newest are not held against a late delivery.`)
     holdLimitWarned = true
@@ -370,10 +375,16 @@ export function holdHead(event: H3Event, id: string | undefined): void {
     const left = responsesOut.get(id)! - 1
     if (left) return void responsesOut.set(id, left)
     responsesOut.delete(id)
-    // The last one: the head lasts the hold from now, not from a rotation that may be long past.
-    const head = refreshHeads.get(id)
-    if (head) armHead(id, head.token)
+    released(id)
   })
+}
+
+/** A response for session `id` has closed — the last one out, or one never counted: its head lasts the hold from now. */
+function released(id: string): void {
+  // While another is still out this is harmless — the hold's timer keeps a head whose session has one out.
+  // The last one: the head lasts the hold from now, not from a rotation that may be long past.
+  const head = refreshHeads.get(id)
+  if (head) armHead(id, head.token)
 }
 
 /** A request adopted through `link`: on its first taking it ends at `until` outright, after that no later. */

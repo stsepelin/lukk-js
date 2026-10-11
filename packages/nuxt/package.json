@@ -35,7 +35,7 @@
     "build": "nuxt-module-build build && node scripts/fix-type-exports.mjs",
     "dev": "nuxi dev playground",
     "dev:prepare": "nuxt-module-build build --stub && nuxi prepare playground",
-    "typecheck": "nuxi typecheck playground",
+    "typecheck": "LUKK_PLAYGROUND_MODE=bff nuxi typecheck playground && nuxi typecheck playground",
     "test": "vitest run --coverage",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "test:mutation": "stryker run"

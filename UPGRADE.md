@@ -285,12 +285,19 @@ replacing its hook, and keep authenticated calls on the API's origin.
   it, so `/api/index.phpauth/login` is refused too (also after a decoding hop, and with the tab, LF and CR
   such a hop strips), in the path and in `baseURL` alike (Laravel without URL
   rewriting, `baseURL` at `https://host/index.php/auth`); the path is also judged as written, so such a
-  segment never hides an encoded `/`, `?`, `#` or `..`. It cannot see lukk's extra guard mounts
+  segment never hides an encoded `/`, `?`, `#` or `..`. A script in a subdirectory is read the way Symfony
+  strips it — with everything before it (`/public/index.php/auth/login`, `/x/public/index.php/auth/login`),
+  and, where the path names a script without starting with its path, as Symfony's last resort cuts it: by
+  the script path's LENGTH, whatever those characters are (`/xx/index.php/abc/auth/login` is `/auth/login`
+  to an app whose script is `/public/index.php`). This side cannot know that length, so **a path that names
+  a `.php` anywhere and holds lukk's last base segment (`auth`, followed by `/`, `?`, `#` or the end)
+  anywhere is refused** — `/api/oauth/callback.php` included. Paths without `.php` are judged as before.
+  A `baseURL` that names its script in a subdirectory (`https://host/public/index.php/auth`) is read as the
+  app routes it, so `/api/auth/login` is refused there too. It cannot see lukk's extra guard mounts
   (`lukk.guards.*.path`, e.g. `admin/auth`) on the same host: keep them off `api.target`'s host, or out of
-  its reach. Nor can it see how your server maps URLs to the PHP script (`SCRIPT_NAME`): where the front
-  controller's directory is not part of the public URLs — shared hosting whose `.htaccess` rewrites into
-  `public/index.php`, so `/public/auth/login` routes as `/auth/login`, or Symfony trimming any URI that
-  contains `index.php` — no path check contains it. The only robust layout is an `api.target` (host or
+  its reach. Nor can it see the front controller's directory where no `.php` names it: shared hosting whose
+  `.htaccess` rewrites into `public/index.php` routes `/public/auth/login` as `/auth/login`, and no path
+  check without the deploy's `SCRIPT_NAME` contains that. The only robust layout is an `api.target` (host or
   prefix) that does not serve lukk's routes at all: lukk on its own host, or under a prefix the app API is
   not reachable through.
 - **The app-API proxy no longer renews the session for a page render's own requests** — `useLukkFetch`,

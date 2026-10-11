@@ -8,4 +8,4 @@ import type { BffSignInResult } from '../composables/useLukkAuth'
  */
 export const SIGN_IN = Symbol('lukk.signIn')
 
-export type SignInWith = (send: () => Promise<LoginResult>) => Promise<LoginResult | BffSignInResult>
+export type SignInWith = (send: () => Promise<LoginResult | BffSignInResult>) => Promise<LoginResult | BffSignInResult>

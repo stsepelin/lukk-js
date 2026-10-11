@@ -6,7 +6,7 @@ import { LUKK_BFF_PREFIX, LUKK_SSR_HEADER, confirmationHeaderName, logoutCookieN
 import { fetchUpstream, isForeignOrigin, isForeignSubresource, rejectUnresolvedTarget, reportProxyFailure, resolveTarget, routeWithin, viaHeader, visitorIp } from './proxy-utils'
 import { endSession, newSessionId, sessionEnded, sessionKey, sessionReplaced, withholdSessionCookie } from './ended-sessions'
 import { revokeDroppedSession } from './revoke-dropped'
-import { readSealedSession, sessionCookie, sessionSeal } from './sealed-session'
+import { readSealedSessionWithId, sessionCookie, sessionSeal } from './sealed-session'
 import { warnIfSessionTooLarge } from './session-size'
 import { deliverPair, headPair, holdHead, refreshOnce, type TokenSession } from './refresh'
 
@@ -70,10 +70,14 @@ export default defineEventHandler(async (event) => {
   // frequency write paths re-unseal once (a deliberate trade: no empty-cookie mint on the hot read
   // path is worth a second iron-open when auth state actually changes).
   const hasCookie = !!getCookie(event, sessionName)
-  const sealed = await readSealedSession(event, sessionPassword, sessionName)
+  const read = await readSealedSessionWithId(event, sessionPassword, sessionName)
+  const sealed = read.data
+  // The key the session's journal and head are under — the one `refreshOnce` files its rotations by: its
+  // `sid`, or h3's id for a session sealed before `sid` existed. By `sid` alone, such a session had neither.
+  const key = sessionKey(read)
   // This response may seal a pair for the session — renewed here, or the one it arrived with (a step-up):
   // the session's head outlives it however long it takes (see `holdHead`).
-  if (sealed.refresh) holdHead(event, sealed.sid)
+  if (sealed.refresh) holdHead(event, key)
   let rwSession: ReturnType<typeof openSession> | null = null
   const session = () => (rwSession ??= openSession(event, sessionPassword, sessionName, cookieOptions, sessionMaxAge))
 
@@ -120,6 +124,8 @@ export default defineEventHandler(async (event) => {
     setResponseStatus(event, rawBody)
     return { message: rawBody === 413 ? 'Request body too large.' : 'Length required.' }
   }
+  // Narrowed here, for `callLukk` below: a function declaration is hoisted, so it sees `rawBody` unnarrowed.
+  const requestBody = rawBody
 
   // A logout also presents the session's refresh token. lukk releases that accept one end the session
   // with it even when the access token has expired and a refresh is throttled or failing — and without
@@ -127,7 +133,7 @@ export default defineEventHandler(async (event) => {
   const endsSession = route === '/logout'
   // The session's current tokens, should a rotation the browser never received have spent the cookie's (see
   // `headPair`): what a logout presents, and what a replacing sign-in revokes.
-  const current = headPair(sealed.sid, sealed)
+  const current = headPair(key, sealed)
   let logoutRefresh = current.refresh
 
   function callLukk(access: string | undefined): Promise<Upstream> {
@@ -148,7 +154,7 @@ export default defineEventHandler(async (event) => {
     // Never follow an upstream 3xx: a cross-origin redirect would re-emit the custom
     // X-Lukk-Confirmation header (undici keeps custom headers across redirects) and, on a
     // 307/308, the request body to the redirect host (CWE-918/200). Handled below.
-    const body = endsSession ? JSON.stringify(logoutRefresh ? { refresh_token: logoutRefresh } : {}) : rawBody
+    const body = endsSession ? JSON.stringify(logoutRefresh ? { refresh_token: logoutRefresh } : {}) : requestBody
     // The body is read inside the deadline, not after it: a lukk that answers with headers and then
     // stalls would otherwise hold this request for as long as the runtime's socket timeout allows.
     // lukk unreachable, the connection dropped, or the deadline passed: answer 502 like any other
@@ -215,7 +221,7 @@ export default defineEventHandler(async (event) => {
     if (!pair) {
       if (!retryable) await clearSession(event, s, sessionName, cookieOptions)
       // The rotation is still out: come back shortly, and the retry joins it (see `REFRESH_WAIT_MS`).
-      if (retryAfter) setResponseHeader(event, 'retry-after', String(retryAfter))
+      if (retryAfter) setResponseHeader(event, 'retry-after', retryAfter)
       setResponseStatus(event, retryable ? 503 : 401)
       return { message: 'Unauthenticated.' }
     }

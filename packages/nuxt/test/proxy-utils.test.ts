@@ -184,13 +184,78 @@ describe('reachesLukk', () => {
     expect(reachesLukk(target, base)).toBe(true)
   })
 
+  it.each([
+    // SCRIPT_NAME `/public/index.php` (Laravel served from the project root, `public/` not the docroot): Symfony
+    // strips the whole script path as a prefix, and anything ending in it.
+    ['https://h.test/public/index.php/auth/login', 'https://h.test/auth'],
+    ['https://h.test/x/public/index.php/auth/login', 'https://h.test/auth'],
+    ['https://h.test/public/index.phpauth/login', 'https://h.test/auth'],
+    ['https://h.test/a/b/public/index.php/auth/refresh', 'https://h.test/auth'],
+  ])('sees a front controller in a subdirectory, stripped with everything before it: %s', (target, base) => {
+    // Dropping only the script's own segment read these as `/public/auth/login` and `/x/public/auth/login`, and
+    // passed them — while Symfony's `getBaseUrl` takes the whole `/x/public/index.php` off and routes `/auth/login`.
+    expect(reachesLukk(target, base)).toBe(true)
+  })
+
+  it.each([
+    // `/public/index.php` is 17 characters: a REQUEST_URI that names the script's basename anywhere but does not
+    // start with its path loses its first 17 characters, whatever they are.
+    ['https://h.test/index.php/a.phpx/auth/login', 'https://h.test/auth'],
+    ['https://h.test/xx/index.php/abc/auth/login', 'https://h.test/auth'],
+    ['https://h.test/index.phpa.phpx/auth', 'https://h.test/auth'],
+    // `/x/index.php` is 12: the cut lands inside a segment, and `xauth` becomes `/auth`.
+    ['https://h.test/index.php/xauth/login', 'https://h.test/auth'],
+    ['https://h.test/index.phpaxauth/login', 'https://h.test/auth'],
+    // `/app/index.php` (14) with lukk at `/app/auth`, which the app routes as `/auth/…`.
+    ['https://h.test/zzz/index.php/auth/login', 'https://h.test/app/auth'],
+  ])('sees Symfony cut the script\'s LENGTH off a path that only mentions it: %s', (target, base) => {
+    // `getBaseUrl`'s last resort: the basename appears in the path, the script path does not lead it, so the
+    // base is the script path as configured and `getPathInfo` drops that many characters — every suffix of a
+    // path naming a `.php` is a route some deploy reads it as.
+    expect(reachesLukk(target, base)).toBe(true)
+  })
+
+  it.each([
+    ['https://h.test/xx/index.php/abc/auth%3Fx', 'https://h.test/auth'],
+    ['https://h.test/xx/index.php/abc/auth%23x', 'https://h.test/auth'],
+    ['https://h.test/xx/index.php/abc/auth%5Clogin', 'https://h.test/auth'],
+    ['https://h.test/xx/index.php/abc/a%09uth/login', 'https://h.test/auth'],
+    ['https://h.test/xx/index.php/abc/auth%2F..%3Fx', 'https://h.test/auth'],
+    ['https://h.test/xx/index.php/abc/auth/login', 'https://h.test/%61uth'],
+    ['https://h.test/xx/index.php/abc/AUTH/login', 'https://h.test/auth'],
+    ['https://h.test/xx/index.php/abc/auth/login', 'https://h.test/auth/'],
+  ])('cuts where a decoding hop puts lukk\'s segment, whatever ends it: %s', (target, base) => {
+    // Once decoded, `auth?x`, `auth#x` and `auth\login` end the segment at a query, a fragment and a separator
+    // a re-parsing hop reads as `/`, and `a\tuth` loses its tab: each is `/auth…` after Symfony's cut.
+    expect(reachesLukk(target, base)).toBe(true)
+  })
+
+  it('cuts only where lukk\'s segment starts, and only in a path that names a script', () => {
+    // A cut that splits a segment can make a dot segment of it (`a..` → `..`), but Symfony hands the router
+    // `/..%2Fx` as written: refusing that would refuse every such path for a route that cannot be lukk's.
+    expect(reachesLukk('https://api.test/index.php/a..%2Fx', 'https://api.test/auth')).toBe(false)
+    expect(reachesLukk('https://api.test/docs/auth/login', 'https://api.test/auth')).toBe(false)
+    expect(reachesLukk('https://api.test/index.php/authx/y', 'https://api.test/auth')).toBe(false)
+    // A base with a trailing slash still ends in `auth`, not in an empty segment that every path holds.
+    expect(reachesLukk('https://api.test/index.php/users', 'https://api.test/auth/')).toBe(false)
+    // Only the segment the base ENDS in: `/app/users` is the app's, wherever it is mounted.
+    expect(reachesLukk('https://h.test/index.php/app/users', 'https://h.test/app/auth')).toBe(false)
+  })
+
+  it('sees a base that names a front controller in a subdirectory: the app routes it without the prefix', () => {
+    // `baseURL` at `https://h/public/index.php/auth` (no rewriting, `public/` under the docroot): lukk's routes
+    // are `/auth/…` to the app, and a bare `/auth/login` — no basename, so no base — reaches them too.
+    expect(reachesLukk('https://h.test/auth/login', 'https://h.test/public/index.php/auth')).toBe(true)
+    expect(reachesLukk('https://h.test/users', 'https://h.test/public/index.php/auth')).toBe(false)
+  })
+
   it('lets an app\'s own routes behind a front controller, and .php names elsewhere, through', () => {
     expect(reachesLukk('https://api.test/index.php/users', 'https://api.test/auth')).toBe(false)
     expect(reachesLukk('https://api.test/files/report.php', 'https://api.test/auth')).toBe(false)
     expect(reachesLukk('https://api.test/index.php', 'https://api.test/auth')).toBe(false)
     expect(reachesLukk('https://api.test/report.phpx/data', 'https://api.test/auth')).toBe(false) // read as `/x/data`
-    // Symfony strips ONE script: past it, a segment that merely contains `.php` is path, not a script.
-    expect(reachesLukk('https://api.test/index.php/a.phpx/auth/login', 'https://api.test/auth')).toBe(false)
+    expect(reachesLukk('https://api.test/index.php/authors/login', 'https://api.test/auth')).toBe(false)
+    expect(reachesLukk('https://api.test/public/index.php/users', 'https://api.test/auth')).toBe(false)
     expect(reachesLukk('https://api.test/blog/php-tips', 'https://api.test/auth')).toBe(false)
     expect(reachesLukk('https://api.test/docs/auth.php', 'https://api.test/auth')).toBe(false)
     expect(reachesLukk('https://api.test/auth/login', 'https://api.test/app.phpx/auth')).toBe(false) // nor in baseURL

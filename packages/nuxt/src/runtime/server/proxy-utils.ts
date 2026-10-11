@@ -113,8 +113,16 @@ export function reachesLukk(target: string, base: string): boolean {
   // `/index.php%2Fauth/login` into `/index.php/auth/login` and `/index%252ephp/…` into `/index%2ephp/…`,
   // which Symfony reads as the script. (Each round's readings come from that round's string; the next round
   // decodes what was actually there.)
+  //
+  // And where the script's path does not lead the request, Symfony has a last resort: if the script's basename
+  // appears anywhere in the path, `getPathInfo` drops as many characters as the script path has, whatever they
+  // are — with SCRIPT_NAME `/public/index.php`, `/xx/index.php/abc/auth/login` is `/auth/login`. The length is
+  // the deploy's, so every suffix of a path naming a `.php` is a route some deploy reads it as — a ROUTE, under
+  // lukk's wherever the app is mounted once it starts with the segment the base ends in (`cutsToLukk`).
   const { origin: baseOrigin, pathname: basePath } = new URL(base)
-  const bases = scriptReadings(basePath).map(path => `${baseOrigin}${path}`)
+  const baseReadings = [...scriptReadings(basePath), ...scriptPrefixes(basePath)]
+  const bases = baseReadings.map(path => `${baseOrigin}${path}`)
+  const names = lastSegments(baseReadings)
   const { origin, pathname } = new URL(target)
   let path = pathname
   // Stryker disable next-line EqualityOperator: equivalent — a script only a fifth decoding reveals sits in a path still decoding after four rounds, which `reaches` refuses on the first round's reading of the path itself. (`round--` never ends: that timeout is a synchronous loop, the detection.)
@@ -122,6 +130,7 @@ export function reachesLukk(target: string, base: string): boolean {
     for (const reading of scriptReadings(path)) {
       if (bases.some(lukk => reaches(`${origin}${reading}`, lukk))) return true
     }
+    if (cutsToLukk(path, names)) return true
     path = decodeAscii(path)
   }
   return false
@@ -148,6 +157,56 @@ function scriptReadings(path: string): string[] {
     }
   })
   return readings.map(reading => reading.join('/').replace(/[?#]/g, encodeURIComponent))
+}
+
+/**
+ * How the app routes a base that names its front controller: for each `.php`, what follows it, everything before
+ * it gone — Symfony strips the script's whole path as a prefix (`/public/index.php/auth` is `/auth` to the app,
+ * and so is a bare `/auth`, which names no script at all). Split as `scriptReadings` splits; a parsed base holds
+ * no tab, LF or CR to strip.
+ *
+ * The base only: what a target's equivalents could reach, `cutsToLukk` refuses.
+ */
+function scriptPrefixes(path: string): string[] {
+  const segments = path.split(/[/\\]/)
+  return segments.flatMap((segment, at) => [...segment.matchAll(/\.php/gi)].map(({ index }) => {
+    const rest = segment.slice(index + 4)
+    return ['', ...(rest ? [rest] : []), ...segments.slice(at + 1)].join('/').replace(/[?#]/g, encodeURIComponent)
+  }))
+}
+
+/**
+ * Whether Symfony's length cut could make one of lukk's routes of `path` (one round's string): the path names a
+ * `.php` at all, and the segment lukk's base ends in (`names`) starts somewhere in it, whole — ended by a
+ * separator (`\` too, to a re-parsing hop), a `?` or `#` that cuts it, or the end. Cut there, a `/` put in
+ * front, it is `/auth…` to the app: lukk's, wherever the app is mounted, since lukk's own prefix ends the base.
+ * Taken from the string as it stands (control characters aside, as in `scriptReadings`), because the cut counts
+ * the characters Symfony was HANDED, escapes and all.
+ *
+ * Read on the string, rather than by judging every suffix the way `reaches` judges a path: that is quadratic in
+ * the path — seconds of CPU for one request a few kilobytes long — and decides nothing more. What only DECODES
+ * to the segment, or to what ends it, is literal in a later round's string (`reachesLukk` asks on each), and
+ * what is encoded past the last round leaves the path still decoding there, which `reaches` refuses on the
+ * path itself; a dot segment collapsing in front of the segment leaves the suffix that starts with it. And a
+ * suffix starting anywhere else is not lukk's: Symfony hands what it cut straight to the router, which matches
+ * it as written — `/index.php/a..%2Fx` cut to `/..%2Fx` is no traversal there.
+ */
+function cutsToLukk(path: string, names: string[]): boolean {
+  const cleaned = path.replace(/[\t\n\r]/g, '').toLowerCase()
+  if (!cleaned.includes('.php')) return false
+  // ASCII only — a pathname, and what `decodeAscii` makes of one — so a code point is a character here.
+  return Array.from(cleaned, (_, at) => at)
+    .some(at => names.some(name => cleaned.startsWith(name, at) && /^[/\\?#]?$/.test(cleaned.charAt(at + name.length))))
+}
+
+/**
+ * The segment each reading of the base ends in, lowercased as `reaches` compares — as written and decoded once,
+ * as `routedPath` reads a base. None for a reading at the root: lukk there owns every path or none, which the
+ * readings themselves decide on the origin.
+ */
+function lastSegments(readings: string[]): string[] {
+  const names = readings.flatMap(reading => reading.split('/').filter(Boolean).slice(-1)).map(name => name.toLowerCase())
+  return [...new Set(names.flatMap(name => [name, decodeAscii(name)]))]
 }
 
 /** `reachesLukk` for one reading of the path — the front controller aside. */
