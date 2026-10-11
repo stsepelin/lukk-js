@@ -47,10 +47,21 @@ export const refreshHeads: Map<string, { token: string, timer: ReturnType<typeof
  */
 export const responsesOut: Map<string, number> = ((globalThis as { __lukkResponsesOut?: Map<string, number> }).__lukkResponsesOut ??= new Map())
 
-/** Drop a session's journal and its head, and every timer they hold. */
+/**
+ * Per session id: the step-up confirmation the auth proxy last sealed for it, until the confirmation's own
+ * expiry (`holdConfirmation`). A response sealed BEFORE it — an app-API long-poll, a slow renewal — lands
+ * after it and would overwrite the cookie without it; at its last moment it carries this one instead (see
+ * `deliverPair`). lukk binds a confirmation to the session's refresh family, which rotation keeps, so it
+ * holds across every pair of the session — and never into another one, which has another id.
+ */
+export const confirmationsHeld: Map<string, { token: string, timer: ReturnType<typeof setTimeout> }> = ((globalThis as { __lukkConfirmationsHeld?: Map<string, { token: string, timer: ReturnType<typeof setTimeout> }> }).__lukkConfirmationsHeld ??= new Map())
+
+/** Drop a session's journal, its head and its held confirmation, and every timer they hold. */
 export function forgetRefreshJournal(key: string): void {
   clearTimeout(refreshHeads.get(key)?.timer)
   refreshHeads.delete(key)
+  clearTimeout(confirmationsHeld.get(key)?.timer)
+  confirmationsHeld.delete(key)
   const journal = refreshJournals.get(key)
   if (!journal) return
   for (const link of journal.values()) clearTimeout(link.timer)

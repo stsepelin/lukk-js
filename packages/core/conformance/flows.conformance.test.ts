@@ -396,12 +396,13 @@ describe(`lukk conformance (algo=${ALGORITHM}, cookie_mode=${COOKIE_MODE}, feat=
       const stepped = { headers: { ...authed(token).headers, 'X-Lukk-Confirmation': confirmationToken } }
       const exported = await (await fetch(`${ROOT}/auth/account/export`, stepped)).json() as AccountExport
 
-      // `lockouts` arrives with lukk > 0.6.0 — the client type marks it optional for older servers,
-      // and the conformance fixture is built from lukk's main, so here it must be present.
-      expect(Object.keys(exported).sort()).toEqual(['account', 'generated_at', 'lockouts', 'passkeys', 'sessions', 'two_factor'])
+      // `lockouts`, `password_reset`, each session's `amr`/`authenticated_at` and `two_factor.pending`/
+      // `recovery_codes_remaining` arrive with lukk > 0.6.0 — the client type marks them optional for older
+      // servers, and the conformance fixture is built from lukk's main, so here they must be present.
+      expect(Object.keys(exported).sort()).toEqual(['account', 'generated_at', 'lockouts', 'passkeys', 'password_reset', 'sessions', 'two_factor'])
       expect(Object.keys(exported.sessions[0]!).sort())
-        .toEqual(['created_at', 'expires_at', 'last_rotated_at', 'revoked_at', 'session'])
-      expect(Object.keys(exported.two_factor).sort()).toEqual(['confirmed_at', 'enabled'])
+        .toEqual(['amr', 'authenticated_at', 'created_at', 'expires_at', 'last_rotated_at', 'revoked_at', 'session'])
+      expect(Object.keys(exported.two_factor).sort()).toEqual(['confirmed_at', 'enabled', 'pending', 'recovery_codes_remaining'])
       // Each passkey entry's shape. lukk 0.7 states every field erasure destroys, its times ISO strings like
       // the rest of the file; lukk 0.6.0 sent three fields, `last_used_at` as unix seconds (the client type
       // marks the new ones optional for it). Told apart by `created_at`, which 0.7 always sends.
