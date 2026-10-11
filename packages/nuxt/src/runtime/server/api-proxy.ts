@@ -141,8 +141,9 @@ export default defineEventHandler(async (event) => {
       rotatedRefresh = pair.refresh
       resealed = ended
       resealNewest = async (queued) => {
-        // At the last moment before the cookie leaves — and not at all for a browser that has gone.
-        const newest = deliverPair(event, sessionKey(session), pair)
+        // At the last moment before the cookie leaves — and not at all for a browser that has gone. With a
+        // step-up sealed for the session since (`deliverPair`): this cookie lands after it.
+        const newest = deliverPair(event, sessionKey(session), pair, session.data.confirmation)
         if (newest === pair) return queued
         // Moved past it, and the links that led on have expired: not this cookie at all — the browser keeps
         // the newer one it holds.

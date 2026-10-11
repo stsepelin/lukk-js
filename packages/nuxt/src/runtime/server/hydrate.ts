@@ -114,7 +114,7 @@ export async function resolveHydrationAccess(event: H3Event): Promise<string | n
     // second compares — and revokes — what the first sealed.
     let sealedPair = pair
     remember(event, sessionKey(session), name, () => revokeDroppedSession(event, sealedPair, baseURL, visitorIp(event, clientIpHeader)), async () => {
-      const newest = deliverPair(event, sessionKey(session), sealedPair)
+      const newest = deliverPair(event, sessionKey(session), sealedPair, session.data.confirmation)
       // Moved past it, and the links that led on have expired: not this cookie at all.
       if (!newest) return withholdSessionCookie(event.node.res, name)
       if (newest === sealedPair) return

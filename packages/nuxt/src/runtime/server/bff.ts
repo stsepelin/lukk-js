@@ -8,7 +8,7 @@ import { endSession, newSessionId, sessionEnded, sessionKey, sessionReplaced, wi
 import { revokeDroppedSession } from './revoke-dropped'
 import { readSealedSessionWithId, sessionCookie, sessionSeal } from './sealed-session'
 import { warnIfSessionTooLarge } from './session-size'
-import { deliverPair, headPair, holdHead, refreshOnce, type TokenSession } from './refresh'
+import { deliverPair, dropConfirmation, headPair, holdConfirmation, holdHead, refreshOnce, type TokenSession } from './refresh'
 
 type SessionCookieOptions = ReturnType<typeof sessionCookie>
 
@@ -237,7 +237,7 @@ export default defineEventHandler(async (event) => {
 
     // The newest pair — the session may have rotated this one during the checks above (a shared store's
     // answer is real I/O) — or, should it have moved past it altogether, none: the browser holds the newer.
-    const newest = deliverPair(event, sessionKey(s), pair)
+    const newest = deliverPair(event, sessionKey(s), pair, s.data.confirmation)
     if (!newest) return replaced()
     await s.update(newest)
     warnIfSessionTooLarge(s)
@@ -282,7 +282,7 @@ export default defineEventHandler(async (event) => {
             // at all when the session has moved past it: the browser keeps the newer cookie it holds. (A
             // backstop here: the call is bounded by the 15 s upstream deadline, and a link lasts at least
             // 30 s once delivered — only a journal overflowing meanwhile gets that far.)
-            const newest = deliverPair(event, sessionKey(s), pair)
+            const newest = deliverPair(event, sessionKey(s), pair, s.data.confirmation)
             if (newest) {
               await s.update(newest)
               warnIfSessionTooLarge(s)
@@ -310,6 +310,8 @@ export default defineEventHandler(async (event) => {
   }
 
   const { res, text } = upstream
+  // lukk refused the step-up this request presented: a response still out must not carry it back.
+  if (res.status === 423) dropConfirmation(key, sealed.confirmation)
 
   // A trusted JSON upstream shouldn't 3xx; with redirect:'manual' one surfaces as an
   // opaque response (status 0) — reject it rather than leak an empty/odd status downstream.
@@ -375,11 +377,14 @@ export default defineEventHandler(async (event) => {
     // retries a 409 on a step-up, so the user is asked to confirm again — and that confirmation is earned on
     // the newer cookie. Only the status is read by the client; the message is for the user.
     const arrived = { access: s.data.access, refresh: s.data.refresh }
-    const newest = arrived.refresh ? deliverPair(event, sessionKey(s), arrived) : arrived
+    const newest = arrived.refresh ? deliverPair(event, sessionKey(s), arrived, s.data.confirmation) : arrived
     if (!newest) {
       setResponseStatus(event, 409)
       return { message: 'Your session was renewed meanwhile. Please confirm again.' }
     }
+    // Held for the responses still out that were sealed before it, which land after it (`deliverPair`). Before
+    // the seal, with no await since the check above: a logout landing during it lets it go with the session.
+    holdConfirmation(sessionKey(s)!, data.confirmation_token)
     await s.update(newest === arrived ? { confirmation: data.confirmation_token } : { ...newest, confirmation: data.confirmation_token })
     warnIfSessionTooLarge(s)
     return { ok: true }
