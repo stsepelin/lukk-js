@@ -2,7 +2,7 @@ import { defineEventHandler, getRequestHeader, proxyRequest, setResponseStatus, 
 import { useRuntimeConfig } from '#imports'
 import { LUKK_BFF_PREFIX, LUKK_SSR_HEADER, confirmationHeaderName, isResolvableBase, isSessionCookieName, sessionCookieName, signedOutCookieName } from '../shared'
 import { accessExpired } from './access-token'
-import { hopByHopHeaders, isForeignOrigin, isForeignSubresource, reachesLukk, reportProxyFailure, rejectUnresolvedTarget, resolveTarget, SPOOFABLE_FORWARDING, viaHeader, visitorIp } from './proxy-utils'
+import { hopByHopHeaders, isForeignOrigin, isForeignSubresource, pathTooLong, reachesLukk, reportProxyFailure, rejectUnresolvedTarget, resolveTarget, SPOOFABLE_FORWARDING, viaHeader, visitorIp } from './proxy-utils'
 import { sessionEnded, sessionKey } from './ended-sessions'
 import { logoutNoted, withholdSignedOut } from './logout-note'
 import { revokeDroppedSession } from './revoke-dropped'
@@ -17,9 +17,6 @@ import { deliverPair, holdHead, refreshOnce, type TokenSession } from './refresh
  * Security (SSRF/CSRF containment, header stripping) is documented in
  * docs/transport-modes.md.
  */
-/** The longest request path (as sent, query aside) this proxy judges and forwards — see the check below. */
-const MAX_PATH_LENGTH = 8 * 1024
-
 /** RFC 9110 §7.6.1 connection-specific response fields, which end at this hop. */
 const HOP_BY_HOP_RESPONSE = new Set(['connection', 'keep-alive', 'proxy-authenticate', 'proxy-connection', 'trailer', 'transfer-encoding', 'upgrade'])
 
@@ -65,15 +62,6 @@ export default defineEventHandler(async (event) => {
   const query = queryAt === -1 ? '' : raw.slice(queryAt)
   const path = event.path.slice(0, event.path.length - query.length)
 
-  // Bounded before anything reads it: `reachesLukk` judges the path on several rounds of decoding, in time linear
-  // in its length — linear, but tens of milliseconds at Node's 16 KiB header limit, for a request no session gates.
-  // Measured as SENT, escapes and all, since that is what the judging works through. 8 KiB is the request line nginx
-  // (`large_client_header_buffers`) and Apache (`LimitRequestLine`) accept by default: no app route lies past it.
-  if (raw.length - query.length > MAX_PATH_LENGTH) {
-    setResponseStatus(event, 414)
-    return { message: 'URI too long.' }
-  }
-
   // The lukk BFF routes belong to the other proxy.
   if (path === LUKK_BFF_PREFIX || path.startsWith(`${LUKK_BFF_PREFIX}/`)) {
     setResponseStatus(event, 404)
@@ -91,6 +79,15 @@ export default defineEventHandler(async (event) => {
   const subpath = path.slice(apiPath.length) || '/'
   const base = resolveTarget(apiTarget, subpath)
   if (!base) return rejectUnresolvedTarget(event, apiTarget, 'lukk `api.target`', subpath)
+
+  // Bounded before it is judged: `reachesLukk` reads the path on several rounds of decoding, in time linear in its
+  // length, on a request no session gates — up to ~90 ms of CPU for the worst paths at the limit (four scripts
+  // still decoding, the rest `"` or `{`). Measured on the upstream URL, which is what it judges: a `{` the request
+  // carried is `%7B` there, so measured as sent, 8 KiB of them was 24 KiB judged (140–220 ms). See `MAX_PATH_LENGTH`.
+  if (pathTooLong(base)) {
+    setResponseStatus(event, 414)
+    return { message: 'URI too long.' }
+  }
 
   // Never lukk's own routes. They answer with credentials — a token pair from `/login`, a step-up
   // token from `/confirm-password` — and this proxy streams bodies through untouched, so in the

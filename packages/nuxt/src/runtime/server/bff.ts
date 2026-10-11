@@ -3,7 +3,7 @@ import { isTokenPair } from 'lukk-core'
 import { defineEventHandler, deleteCookie, getCookie, getRequestHeader, readRawBody, setResponseHeader, setResponseStatus, useSession } from 'h3'
 import { useRuntimeConfig } from '#imports'
 import { LUKK_BFF_PREFIX, LUKK_SSR_HEADER, confirmationHeaderName, logoutCookieName, sessionCookieName, signedOutCookieName } from '../shared'
-import { fetchUpstream, isForeignOrigin, isForeignSubresource, rejectUnresolvedTarget, reportProxyFailure, resolveTarget, routeWithin, viaHeader, visitorIp } from './proxy-utils'
+import { fetchUpstream, isForeignOrigin, isForeignSubresource, pathTooLong, rejectUnresolvedTarget, reportProxyFailure, resolveTarget, routeWithin, unroutable, viaHeader, visitorIp } from './proxy-utils'
 import { endSession, newSessionId, sessionEnded, sessionKey, sessionReplaced, withholdSessionCookie } from './ended-sessions'
 import { revokeDroppedSession } from './revoke-dropped'
 import { readSealedSessionWithId, sessionCookie, sessionSeal } from './sealed-session'
@@ -64,6 +64,17 @@ export default defineEventHandler(async (event) => {
     return { message: 'Cross-origin request rejected.' }
   }
 
+  // Resolve + contain the upstream URL to same-origin-under-base (defeats traversal / authority-smuggling).
+  const path = event.path.slice(LUKK_BFF_PREFIX.length).split('?')[0]
+  // Stryker disable next-line StringLiteral: equivalent — `resolveTarget` resolves '' and '/' to the same URL, and neither is a subpath branched on below. Kept so the log names a path.
+  const subpath = path || '/'
+  const target = resolveTarget(baseURL, subpath)
+  // Bounded before the session is read or the path judged, as the app-API proxy bounds its own (`pathTooLong`).
+  if (target && pathTooLong(target)) {
+    setResponseStatus(event, 414)
+    return { message: 'URI too long.' }
+  }
+
   // Read the sealed session READ-ONLY first, so an anonymous / failed-login / expired-or-tampered
   // request never mints an empty session cookie. The read-write session is opened lazily, only when
   // a request actually stores or clears tokens (login, refresh, confirmation, logout) — those low-
@@ -81,11 +92,6 @@ export default defineEventHandler(async (event) => {
   let rwSession: ReturnType<typeof openSession> | null = null
   const session = () => (rwSession ??= openSession(event, sessionPassword, sessionName, cookieOptions, sessionMaxAge))
 
-  // Resolve + contain the upstream URL to same-origin-under-base (defeats traversal / authority-smuggling).
-  const path = event.path.slice(LUKK_BFF_PREFIX.length).split('?')[0]
-  // Stryker disable next-line StringLiteral: equivalent — `resolveTarget` resolves '' and '/' to the same URL, and neither is a subpath branched on below. Kept so the log names a path.
-  const subpath = path || '/'
-  const target = resolveTarget(baseURL, subpath)
   if (!target) return rejectUnresolvedTarget(event, baseURL, 'lukk `baseURL`', subpath)
   // Every route rule below is decided on THIS — the route lukk's router will match for `target` — never
   // on `subpath`. The upstream URL collapses dot segments and Laravel trims a trailing slash, so
@@ -99,7 +105,7 @@ export default defineEventHandler(async (event) => {
   // (trailing slashes are fine: Laravel trims them), but a slash-merging or decoding hop in front of it might turn one into a
   // real route. Deciding policy on the cleaned path while forwarding the raw one injected the sealed
   // refresh token into a request lukk never received; refusing them keeps the two the same URL.
-  if (/\/{2,}[^/]|%2f|%5c|%25/i.test(new URL(target).pathname)) {
+  if (unroutable(new URL(target).pathname)) {
     setResponseStatus(event, 404)
     return { message: 'Not found.' }
   }

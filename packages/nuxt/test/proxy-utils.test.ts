@@ -6,7 +6,7 @@ vi.mock('h3', () => ({
 }))
 
 // eslint-disable-next-line import/first
-import { fetchUpstream, hopByHopHeaders, isForeignOrigin, isForeignSubresource, reachesLukk, rejectUnresolvedTarget, reportProxyFailure, resolveTarget, routeWithin, SPOOFABLE_FORWARDING, viaHeader, visitorIp } from '../src/runtime/server/proxy-utils'
+import { fetchUpstream, hopByHopHeaders, isForeignOrigin, isForeignSubresource, MAX_PATH_LENGTH, pathTooLong, reachesLukk, rejectUnresolvedTarget, reportProxyFailure, resolveTarget, routeWithin, SPOOFABLE_FORWARDING, unroutable, viaHeader, visitorIp } from '../src/runtime/server/proxy-utils'
 
 const ev = () => ({ status: 200 } as { status: number })
 
@@ -89,9 +89,10 @@ describe('routeWithin', () => {
 
   it('trims a run of trailing slashes, and judges a long run that does not end the path fast', () => {
     expect(routeWithin('https://h.test/auth/login///', 'https://h.test/auth//')).toBe('/login')
+    // 64 KB: 6.7 s quadratic, a few ms linear.
     const started = performance.now()
-    expect(routeWithin(`https://h.test/auth/${'/'.repeat(16 * 1024)}x`, 'https://h.test/auth')).toBe('/x')
-    expect(performance.now() - started).toBeLessThan(50)
+    expect(routeWithin(`https://h.test/auth/${'/'.repeat(64 * 1024)}x`, 'https://h.test/auth')).toBe('/x')
+    expect(performance.now() - started).toBeLessThan(500)
   })
 
   it('trims the base the same way', () => {
@@ -107,6 +108,48 @@ describe('routeWithin', () => {
   it('places everything under a root base', () => {
     expect(routeWithin('https://l.test/login', 'https://l.test')).toBe('/login')
     expect(routeWithin('https://l.test/', 'https://l.test/')).toBe('/')
+  })
+})
+
+describe('unroutable', () => {
+  it.each(['/auth//login', '/auth/x//refresh', '/auth/refresh%2F', '/auth/x%5c..', '/auth/logout%252f', '/auth/%2f'])('refuses %s, a path lukk routes nothing at', (path) => {
+    expect(unroutable(path)).toBe(true)
+  })
+
+  it.each(['/auth/login', '/auth/login/', '/auth/login///', '/auth', '/auth/a%20b'])('lets %s through — trailing slashes are trimmed by Laravel', (path) => {
+    expect(unroutable(path)).toBe(false)
+  })
+
+  it('answers as the original pattern did on every short path of slashes, letters and escapes', () => {
+    // `/\/{2,}[^/]|%2f|%5c|%25/i` — the same language, judged from the start of each run of slashes only.
+    const original = /\/{2,}[^/]|%2f|%5c|%25/i
+    const pieces = ['/', 'a', '%2f', '%5C', '%25', '%2', 'f']
+    const paths = ['']
+    for (let length = 0; length < 5; length++) {
+      for (const path of paths.splice(0)) paths.push(...pieces.map(piece => path + piece))
+      for (const path of paths) expect(unroutable(path)).toBe(original.test(path))
+    }
+  })
+
+  it('reads a long run of slashes ending the path in time linear in it', () => {
+    // From every slash of the run, the original pattern scanned the rest of it for something after: 2 s at 32 KB,
+    // 8 s at 64 KB, through the BFF auth proxy on an unauthenticated GET. Under a millisecond now.
+    const started = performance.now()
+    expect(unroutable(`/auth/x${'/'.repeat(64 * 1024)}`)).toBe(false)
+    expect(performance.now() - started).toBeLessThan(500)
+  })
+})
+
+describe('pathTooLong', () => {
+  it('measures the path as the upstream URL serialises it — what both proxies judge', () => {
+    expect(MAX_PATH_LENGTH).toBe(8 * 1024)
+    expect(pathTooLong(`https://h.test/${'a'.repeat(MAX_PATH_LENGTH - 1)}`)).toBe(false)
+    expect(pathTooLong(`https://h.test/${'a'.repeat(MAX_PATH_LENGTH)}`)).toBe(true)
+    // A `{` is three characters once serialised (`%7B`): 2,731 of them are past the limit, though few as sent.
+    expect(pathTooLong(`https://h.test/${'{'.repeat(2730)}`)).toBe(false)
+    expect(pathTooLong(`https://h.test/${'{'.repeat(2731)}`)).toBe(true)
+    // The query is not judged, so not measured.
+    expect(pathTooLong(`https://h.test/x?${'a'.repeat(MAX_PATH_LENGTH)}`)).toBe(false)
   })
 })
 
@@ -367,18 +410,41 @@ describe('reachesLukk', () => {
     expect(reachesLukk('https://api.test/x%25252541', base)).toBe(true)
   })
 
+  describe('the readings of each `.php`', () => {
+    it('reads a base naming its script in a subdirectory without the script, as the app routes it there', () => {
+      // `baseURL` `/app/index.php/auth` without URL rewriting: the app is `/app`, and lukk is reachable at `/app/auth`
+      // too — Symfony's own `Request` routes `/app/auth/refresh` to lukk's refresh. Only the base's reading with the
+      // script segment dropped names that; the prefix reading (`/auth`) does not.
+      expect(reachesLukk('https://h.test/app/auth/refresh', 'https://h.test/app/index.php/auth')).toBe(true)
+      // Every script segment of the base dropped, however many are written…
+      expect(reachesLukk('https://h.test/app/auth/login', 'https://h.test/app/a.php/b.php/auth')).toBe(true)
+      // …but only a segment ENDING in `.php` is a script: `b.phpx` is a directory, read with its `x` (below).
+      expect(reachesLukk('https://h.test/app/auth/login', 'https://h.test/app/a.php/b.phpx/auth')).toBe(false)
+      expect(reachesLukk('https://h.test/app/x/auth/login', 'https://h.test/app/a.phpx/auth')).toBe(true)
+    })
+
+    it.each(['/x.php%2e%2F/login', '/x.ph%09p%252e%252F/login'])('refuses %s: what follows a script, read as the path, reveals a dot segment', (path) => {
+      // With the script cut where `.php` ends, `%2e%2F` is a segment of its own that decodes to `.` — refused as any
+      // decoding-revealed dot segment is. (The second only names its script once a round decodes the `%09` that a
+      // re-parsing hop strips.)
+      expect(reachesLukk(`https://api.test${path}`, 'https://api.test/auth')).toBe(true)
+    })
+  })
+
   describe('a long path, or one naming many scripts', () => {
     const repeat = (shape: string, length: number) => `/${shape.repeat(Math.ceil(length / shape.length)).slice(0, length)}`
     const shapes = ['a.php%3F', '.php/', '.php', '.php%2F', '.php%5C', '.php%252F', '.php%25252F', '.php%09/', '.ph%09p/']
     const bases = ['https://api.test/auth', 'https://api.test/public/index.php/api/v1/auth']
 
-    it.each(bases.flatMap(base => shapes.map(shape => [shape, base])))('refuses 16 KB of %s against %s, and fast', (shape, base) => {
+    it.each(bases.flatMap(base => shapes.map(shape => [shape, base])))('refuses 64 KB of %s against %s, and fast', (shape, base) => {
       // One reading per `.php`, each judged in full on every decoding round, made the cost quadratic in the path:
       // an unauthenticated `GET /api/` + `a.php%3F` repeated to 16 KB cost seconds of CPU before any session was read.
-      const target = `https://api.test${repeat(shape, 16 * 1024)}`
+      // At 64 KB the quadratic version took 5 s for the cheapest of these shapes, and 2 minutes or more for the
+      // rest; refused unjudged, each takes under 25 ms — the budget sits 10x from either.
+      const target = `https://api.test${repeat(shape, 64 * 1024)}`
       const started = performance.now()
       expect(reachesLukk(target, base)).toBe(true)
-      expect(performance.now() - started).toBeLessThan(50)
+      expect(performance.now() - started).toBeLessThan(250)
     })
 
     it.each([
@@ -400,19 +466,19 @@ describe('reachesLukk', () => {
     it.each(['', '.php%25252F'.repeat(4), 'a.php%3F'.repeat(4)])('judges a long run of slashes that does not end the path fast, after %s', (head) => {
       // Trimming trailing slashes with `/\/+$/` rescanned the run from each slash in it: quadratic, 3.4 s for
       // `GET /api/` + 16 K slashes + `x`, with or without a script named in front.
-      // Linear now, and judged here at the 8 KiB the app-API proxy lets through.
-      for (const run of ['/'.repeat(8 * 1024), '%2F'.repeat(8 * 1024 / 3)]) {
+      // At 64 KB — far past what either proxy lets through, so the two costs lie far apart: the quadratic version
+      // took 12 s for 32 KB of `/` and 2 s for 32 KB of `%2F` (four times that here); linear, the worst of these
+      // takes under 200 ms.
+      for (const run of ['/'.repeat(64 * 1024), '%2F'.repeat(64 * 1024 / 3)]) {
         const started = performance.now()
         expect(reachesLukk(`https://api.test/${head}${run}x`, 'https://api.test/auth')).toBe(false)
-        // Was 0.85 s (`/` run, no script) to seconds; tens of ms now, so the budget only has to tell the two apart.
-        expect(performance.now() - started).toBeLessThan(150)
+        expect(performance.now() - started).toBeLessThan(1000)
       }
     })
 
-    it('leaves a long path naming no script as it was, and judges it fast', () => {
-      const started = performance.now()
-      expect(reachesLukk(`https://api.test/users/${'a/'.repeat(8 * 1024)}x.php`, 'https://api.test/auth')).toBe(false)
-      expect(performance.now() - started).toBeLessThan(50)
+    it('leaves a long path naming one script, and not lukk, as it was', () => {
+      // (No timing here: one script was never the quadratic case, and a budget it cannot miss by 10x is noise.)
+      expect(reachesLukk(`https://api.test/users/${'a/'.repeat(4 * 1024)}x.php`, 'https://api.test/auth')).toBe(false)
     })
   })
 })

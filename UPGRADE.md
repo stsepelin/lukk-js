@@ -293,8 +293,7 @@ replacing its hook, and keep authenticated calls on the API's origin.
   a `.php` anywhere and holds lukk's last base segment (`auth`, followed by `/`, `\`, `?`, `#` or the end)
   anywhere is refused** — `/api/oauth/callback.php` included. So is **a path naming more than four `.php`**
   (in any decoding round), whatever it holds: each is a reading judged in full, so their number is bounded
-  rather than the cost being quadratic in the path. Paths without `.php` are judged as before. A request
-  path longer than **8 KiB** as sent (query aside) is answered `414` — nginx's and Apache's default request-line limit.
+  rather than the cost being quadratic in the path. Paths without `.php` are judged as before.
   A `baseURL` that names its script in a subdirectory (`https://host/public/index.php/auth`) is read as the
   app routes it, so `/api/auth/login` is refused there too. It cannot see lukk's extra guard mounts
   (`lukk.guards.*.path`, e.g. `admin/auth`) on the same host: keep them off `api.target`'s host, or out of
@@ -303,6 +302,8 @@ replacing its hook, and keep authenticated calls on the API's origin.
   check without the deploy's `SCRIPT_NAME` contains that. The only robust layout is an `api.target` (host or
   prefix) that does not serve lukk's routes at all: lukk on its own host, or under a prefix the app API is
   not reachable through.
+- **Both proxies answer `414`** for a path longer than **8 KiB** as the upstream URL serialises it (query
+  aside; a `{` or `"` counts three, as `%7B`/`%22`) — nginx's and Apache's default request-line limit.
 - **The app-API proxy no longer renews the session for a page render's own requests** — `useLukkFetch`,
   and Nuxt's own `useFetch('/api/…')`, `useRequestFetch()` and `event.$fetch` alike: the page request is
   marked (`x-lukk-ssr`, set by a BFF server plugin; removed before a request reaches your API). The BFF

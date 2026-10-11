@@ -1620,6 +1620,37 @@ describe('route policy follows the URL lukk receives, not the string the browser
     expect(body).toEqual({ ok: true, expires_in: 900 })
   })
 
+  it('answers 414 for a path past 8 KiB as the upstream URL serialises it, before the session is read', async () => {
+    // The route checks below are linear in the path, but nothing bounded it: an unauthenticated GET could hand over
+    // whatever Node's header limit allows. The same limit as the app-API proxy, measured the same way.
+    const session = makeSession({ access: 'A', refresh: 'rA' })
+    const fetchMock = vi.fn(async () => jsonRes({}))
+    mockFetch().fetch = fetchMock
+
+    // `baseURL` is `https://lukk/auth`: `/auth/` + 8,187 characters is 8,193.
+    const event = makeEvent({ path: `/api/_lukk/${'{'.repeat(2729)}`, session })
+    const body = await run(event)
+
+    expect(event.status).toBe(414)
+    expect(body).toEqual({ message: 'URI too long.' })
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(event.node.res.getHeader('cache-control')).toBeUndefined()
+
+    const atLimit = makeEvent({ path: `/api/_lukk/${'a'.repeat(8186)}`, session })
+    await run(atLimit)
+    expect(atLimit.status).not.toBe(414)
+  })
+
+  it('forwards a path ending in a long run of slashes — Laravel trims them — rather than refusing it', async () => {
+    // The empty-segment check reads a trailing run as no segment at all. (Its cost, quadratic in the run until now,
+    // is pinned on `unroutable` itself, at a length this handler no longer lets through.)
+    const session = makeSession({ access: 'A', refresh: 'rA' })
+    mockFetch().fetch = vi.fn(async () => jsonRes({}))
+    const event = makeEvent({ path: `/api/_lukk/x/${'/'.repeat(8000)}`, session })
+    await run(event)
+    expect(event.status).toBe(200)
+  })
+
   it.each(['/api/_lukk//logout', '/api/_lukk/x//refresh', '/api/_lukk/refresh%2F%2F', '/api/_lukk/refresh/%2F', '/api/_lukk/x%2F..%2Frefresh', '/api/_lukk/x%5C..%5Crefresh', '/api/_lukk/logout%252f', '/api/_lukk/refresh%255C'])('refuses %s, a path lukk has no route for but a slash-merging hop might', async (path) => {
     // Policy and forwarding must agree on one URL. Collapsed for the rules but forwarded raw, `//logout`
     // had the sealed refresh token injected and POSTed to a path lukk does not route — to whatever does,

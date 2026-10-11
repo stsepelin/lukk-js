@@ -47,6 +47,32 @@ export function resolveTarget(base: string, subpath: string): string | null {
 }
 
 /**
+ * The longest upstream path either proxy judges and forwards — measured as the upstream URL serialises it, since
+ * that is what the route checks work through: a `{` or `"` the request carried is `%7B` or `%22` there, three
+ * times as long. 8 KiB is the request line nginx (`large_client_header_buffers`) and Apache (`LimitRequestLine`)
+ * accept by default, so no app route lies past it; and the checks are linear in the path, so the limit bounds them.
+ */
+export const MAX_PATH_LENGTH = 8 * 1024
+
+/** Whether `target`'s path is past `MAX_PATH_LENGTH` — answered `414` by both proxies, before anything is judged. */
+export function pathTooLong(target: string): boolean {
+  return new URL(target).pathname.length > MAX_PATH_LENGTH
+}
+
+/**
+ * Whether lukk routes nothing at `pathname` as written, though a hop in front of it might make a route of it: an
+ * empty segment (a slash-merging hop), an encoded slash or backslash (a decoding one), or an encoded `%` (one that
+ * decodes twice). Trailing slashes are fine — Laravel trims them. The BFF auth proxy refuses such a path rather
+ * than decide its policy on one URL and forward another.
+ *
+ * A run of slashes is matched from where it STARTS (the lookbehind) — the same paths as `/\/{2,}[^/]/`, which
+ * tried a match from every slash of a run and rescanned the rest of it: quadratic on a trailing run, 2 s at 32 KB.
+ */
+export function unroutable(pathname: string): boolean {
+  return /(?<!\/)\/{2,}[^/]|%2f|%5c|%25/i.test(pathname)
+}
+
+/**
  * The path a Laravel router matches for `pathname`, the way `UriValidator` derives it: trailing
  * slashes trimmed from the raw path, THEN percent-decoded once (`rawurldecode`). So `/auth/`,
  * `/auth%2Flogin` and `/aut%68` are `/auth`, `/auth/login` and `/auth` to lukk, whatever they look
@@ -168,6 +194,11 @@ const MAX_SCRIPTS = 4
  * ends there (`index.php` is dropped), `auth` for `index.phpauth`, as Symfony routes it — and every other
  * segment ending in `.php` dropped too, however many scripts are written. A `?` or `#` the string holds is kept encoded, so
  * that `reaches` reads it both ways.
+ *
+ * For a TARGET, `cutsToLukk` already refuses every one of these readings that would land under lukk — each names
+ * the base's last segment, ended, somewhere in the path — so what they add there is the dot-segment refusal: what
+ * follows a script (`/x.php%2e%2F/login`) decodes to a segment of its own. For the BASE they are the routes
+ * themselves: `/app/index.php/auth` is `/app/auth` to the app as well.
  */
 function scriptReadings(path: string): string[] {
   const segments = path.replace(/[\t\n\r]/g, '').split(/[/\\]/)

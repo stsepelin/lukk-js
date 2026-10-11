@@ -878,26 +878,33 @@ describe('app-API proxy', () => {
     expect(proxyRequest).not.toHaveBeenCalled()
   })
 
-  it('answers 414 for a request path past 8 KiB, before judging it — and passes one at the limit', async () => {
+  it('answers 414 for a path past 8 KiB AS JUDGED — serialised into the upstream URL — and passes one at the limit', async () => {
     // Every request path is read against lukk's routes on several rounds of decoding, in time linear in its length;
     // past what nginx and Apache accept by default (an 8 KiB request line) there is no app route to reach anyway.
-    const long = `/api/${'a'.repeat(8 * 1024 - '/api/'.length + 1)}`
-    const e = ev({ path: long, url: `${long}?q=1` })
+    // `api.target` here has no path, so the upstream path is the request's after `/api`.
+    const long = `/api/${'a'.repeat(8 * 1024)}`
+    const e = ev({ path: `${long}?q=1` })
     const body = await run(e)
     expect(e.status).toBe(414)
     expect(body).toEqual({ message: 'URI too long.' })
     expect(proxyRequest).not.toHaveBeenCalled()
 
-    // Measured on the path as SENT, escapes and all — that is what the judging works through.
-    const encoded = `/api/${'%61'.repeat(2731)}`
-    const sent = ev({ path: `/api/${'a'.repeat(2731)}`, url: encoded })
-    await run(sent)
-    expect(sent.status).toBe(414)
+    // Measured as the upstream URL serialises it, which is what the judging works through: a `{` (h3 hands it over
+    // decoded) is `%7B` there, so 2,731 of them — 2.7 KB as decoded — are past the limit. Measured as sent, a path
+    // of those slipped through at three times the length, and 140–220 ms of CPU.
+    const braces = ev({ path: `/api/${'{'.repeat(2731)}` })
+    await run(braces)
+    expect(braces.status).toBe(414)
 
-    const atLimit = ev({ path: long.slice(0, -1), url: `${long.slice(0, -1)}?${'q'.repeat(100)}` })
+    // And an escape that decodes to one character counts as one: 8 KiB of `%61` is 2.7 KB judged.
+    const escaped = ev({ path: `/api/${'a'.repeat(2731)}`, url: `/api/${'%61'.repeat(2731)}` })
+    await run(escaped)
+    expect(escaped.status).toBe(200)
+
+    const atLimit = ev({ path: `${long.slice(0, -1)}?${'q'.repeat(100)}` })
     await run(atLimit)
     expect(atLimit.status).toBe(200)
-    expect(proxyRequest).toHaveBeenCalledOnce()
+    expect(proxyRequest).toHaveBeenCalledTimes(2)
   })
 
   it('rejects a path outside the mount', async () => {
