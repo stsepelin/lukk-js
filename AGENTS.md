@@ -4,6 +4,11 @@ Guidance for AI coding assistants. Two audiences: teams **using** lukk-js in an 
 
 Docs: <https://stsepelin.github.io/lukk-docs> — a unified site covering both lukk (PHP) and lukk-js, machine-readable at [`/llms.txt`](https://stsepelin.github.io/lukk-docs/llms.txt) and [`/llms-full.txt`](https://stsepelin.github.io/lukk-docs/llms-full.txt). Docs source lives in the [lukk-docs](https://github.com/stsepelin/lukk-docs) repo.
 
+
+## Reviews
+
+**Every review of this repository, including pull-request bots, applies [`REVIEW.md`](./REVIEW.md).** Check the change against the specification table in its §4, and cite the clause each finding rests on. Use its severity bar (§2). Don't report its deliberate deviations (§6) as defects.
+
 ## Using lukk-js in an app
 
 lukk-js is the first-party client for [lukk](https://github.com/stsepelin/lukk) (Laravel JWT auth): `lukk-core` (framework-agnostic) + `lukk-nuxt` (Nuxt 3/4 module). It exists so you **don't hand-roll** token attachment, refresh, or error plumbing.
