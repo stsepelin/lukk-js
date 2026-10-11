@@ -1,7 +1,7 @@
 import type { $Fetch } from 'ofetch'
 import { createFetch, Headers as OFetchHeaders } from 'ofetch'
 import { describe, expect, it, vi } from 'vitest'
-import { createLukkFetch, type LukkFetchDeps } from '../src/runtime/utils/create-lukk-fetch'
+import { createLukkFetch, createRequestFetch, type LukkFetchDeps, type RequestFetch } from '../src/runtime/utils/create-lukk-fetch'
 
 /**
  * The credential decision, driven through REAL ofetch.
@@ -41,7 +41,7 @@ function drive(overrides: Partial<LukkFetchDeps> = {}, respond = () => new Respo
     ...overrides,
   })
 
-  return { api, seen }
+  return { api, seen, fetchImpl }
 }
 
 describe('createLukkFetch through real ofetch', () => {
@@ -232,5 +232,61 @@ describe('createLukkFetch through real ofetch — errors, the step-up token, an 
     const server = drive({ origin: 'https://api.example.com', isServer: true })
     await server.api('/me', { baseURL: '' })
     expect(server.seen[0]!.headers.get('authorization')).toBeNull()
+  })
+})
+
+describe('the SSR instance\'s headers, as the browser\'s ofetch instance merges them', () => {
+  // The browser gets a real ofetch instance; the server a `$Fetch` of our own over Nuxt's request-aware fetch.
+  // A call's `headers` used to REPLACE the instance's (`api.create({ headers: { 'x-tenant': 'a' } })` lost
+  // `x-tenant` on any call passing its own) — during SSR only, since ofetch merges them. Both are driven
+  // here through the same real ofetch and compared on what reaches `fetch`.
+  type Init = HeadersInit | undefined
+  const bff = { baseURL: '/api', getBearer: () => null }
+
+  async function both(scope: (api: $Fetch) => $Fetch, call: Init) {
+    const browser = drive(bff)
+    await scope(browser.api)('/me', call === undefined ? {} : { headers: call })
+    // Nuxt's request-aware fetch is a plain ofetch: the auth options come from `createRequestFetch` alone.
+    const server = drive()
+    const deps = { ...bff, isServer: true, canRefresh: false, getCookieHeader: () => undefined, getConfirmation: () => null, confirmationHeader: 'X-Lukk-Confirmation', refresh: vi.fn(), onRedirect: vi.fn(), fetchImpl: server.fetchImpl }
+    const ssr = createRequestFetch(server.fetchImpl as unknown as RequestFetch, deps)
+    await scope(ssr)('/me', call === undefined ? {} : { headers: call })
+    const strip = (headers: Headers) => Object.fromEntries([...headers].filter(([name]) => name !== 'x-lukk-ssr'))
+    return { browser: strip(browser.seen[0]!.headers), server: strip(server.seen[0]!.headers) }
+  }
+
+  const defaults: [string, Init][] = [
+    ['a record', { 'x-tenant': 'a', 'X-Over': 'default' }],
+    ['a Headers', new Headers({ 'x-tenant': 'a', 'x-over': 'default' })],
+    ['tuples', [['x-tenant', 'a'], ['X-OVER', 'default']]],
+    ['none', undefined],
+  ]
+  const calls: [string, Init][] = [
+    ['a record', { 'x-trace': 'b', 'x-over': 'call' }],
+    ['a Headers', new Headers({ 'x-trace': 'b', 'X-Over': 'call' })],
+    ['tuples', [['x-trace', 'b'], ['x-over', 'first'], ['x-over', 'call']]],
+    ['none', undefined],
+  ]
+
+  for (const [defaultForm, instance] of defaults) {
+    for (const [callForm, call] of calls) {
+      it(`merges ${callForm} on the call over ${defaultForm} on the instance, case-insensitively, the call winning`, async () => {
+        const { browser, server } = await both(api => api.create(instance === undefined ? {} : { headers: instance }), call)
+        expect(server).toEqual(browser)
+        if (instance !== undefined) expect(server['x-tenant']).toBe('a')
+        if (call !== undefined) expect(server['x-trace']).toBe('b')
+      })
+    }
+  }
+
+  it('lets a nested .create() replace the headers it names, and inherit them when it names none — as ofetch does', async () => {
+    // ofetch spreads a nested `create`'s defaults over the instance's: a `headers` there REPLACES the outer one.
+    // The server instance does what the browser's does, whichever way that is.
+    const replaced = await both(api => api.create({ headers: { 'x-tenant': 'a' } }).create({ headers: { 'x-nested': 'c' } }), { 'x-trace': 'b' })
+    expect(replaced.server).toEqual(replaced.browser)
+    expect(replaced.server['x-nested']).toBe('c')
+    const inherited = await both(api => api.create({ headers: { 'x-tenant': 'a' } }).create({ retry: 0 }), { 'x-trace': 'b' })
+    expect(inherited.server).toEqual(inherited.browser)
+    expect(inherited.server['x-tenant']).toBe('a')
   })
 })

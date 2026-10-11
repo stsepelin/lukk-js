@@ -3,7 +3,7 @@ import { isTokenPair } from 'lukk-core'
 import { defineEventHandler, deleteCookie, getCookie, getRequestHeader, readRawBody, setResponseHeader, setResponseStatus, useSession } from 'h3'
 import { useRuntimeConfig } from '#imports'
 import { LUKK_BFF_PREFIX, LUKK_SSR_HEADER, confirmationHeaderName, logoutCookieName, sessionCookieName, signedOutCookieName } from '../shared'
-import { fetchUpstream, isForeignOrigin, isForeignSubresource, pathTooLong, rejectUnresolvedTarget, reportProxyFailure, resolveTarget, routeWithin, unroutable, viaHeader, visitorIp } from './proxy-utils'
+import { fetchUpstream, isForeignOrigin, isForeignSubresource, pathTooLong, rejectUnresolvedTarget, reportProxyFailure, requestPath, resolveTarget, routeWithin, unroutable, viaHeader, visitorIp } from './proxy-utils'
 import { endSession, newSessionId, sessionEnded, sessionKey, sessionReplaced, withholdSessionCookie } from './ended-sessions'
 import { revokeDroppedSession } from './revoke-dropped'
 import { readSealedSessionWithId, sessionCookie, sessionSeal } from './sealed-session'
@@ -65,7 +65,10 @@ export default defineEventHandler(async (event) => {
   }
 
   // Resolve + contain the upstream URL to same-origin-under-base (defeats traversal / authority-smuggling).
-  const path = event.path.slice(LUKK_BFF_PREFIX.length).split('?')[0]
+  // The path ends where the RAW request target's query starts (`requestPath`): `event.path` is decoded, and split at
+  // its first `?`, `/logout%3Fx` was forwarded — and judged by every rule below — as lukk's `/logout`. The query
+  // itself is never forwarded: no lukk route reached through here reads one.
+  const path = requestPath(event).path.slice(LUKK_BFF_PREFIX.length)
   // Stryker disable next-line StringLiteral: equivalent — `resolveTarget` resolves '' and '/' to the same URL, and neither is a subpath branched on below. Kept so the log names a path.
   const subpath = path || '/'
   const target = resolveTarget(baseURL, subpath)

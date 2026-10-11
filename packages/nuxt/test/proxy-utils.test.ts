@@ -6,7 +6,7 @@ vi.mock('h3', () => ({
 }))
 
 // eslint-disable-next-line import/first
-import { fetchUpstream, hopByHopHeaders, isForeignOrigin, isForeignSubresource, MAX_PATH_LENGTH, pathTooLong, reachesLukk, rejectUnresolvedTarget, reportProxyFailure, resolveTarget, routeWithin, SPOOFABLE_FORWARDING, unroutable, viaHeader, visitorIp } from '../src/runtime/server/proxy-utils'
+import { fetchUpstream, hopByHopHeaders, isForeignOrigin, isForeignSubresource, MAX_PATH_LENGTH, pathTooLong, reachesLukk, rejectUnresolvedTarget, reportProxyFailure, requestPath, resolveTarget, routeWithin, SPOOFABLE_FORWARDING, unroutable, viaHeader, visitorIp } from '../src/runtime/server/proxy-utils'
 
 const ev = () => ({ status: 200 } as { status: number })
 
@@ -137,6 +137,21 @@ describe('unroutable', () => {
     const started = performance.now()
     expect(unroutable(`/auth/x${'/'.repeat(64 * 1024)}`)).toBe(false)
     expect(performance.now() - started).toBeLessThan(500)
+  })
+})
+
+describe('requestPath', () => {
+  const event = (path: string, url?: string) => ({ path, node: { req: url === undefined ? {} : { url } } }) as unknown as Parameters<typeof requestPath>[0]
+
+  it('splits at the RAW target\'s `?` — a decoded `%3F` in the path stays path data', () => {
+    // h3 decodes the path half of `event.path` and appends the query as sent.
+    expect(requestPath(event('/api/_lukk/logout?x', '/api/_lukk/logout%3Fx'))).toEqual({ path: '/api/_lukk/logout?x', query: '' })
+    expect(requestPath(event('/api/a?b?c=1', '/api/a%3Fb?c=1'))).toEqual({ path: '/api/a?b', query: '?c=1' })
+  })
+
+  it('falls back to `event.path` without a raw target, and without a Node request at all', () => {
+    expect(requestPath(event('/api/a?c=1'))).toEqual({ path: '/api/a', query: '?c=1' })
+    expect(requestPath({ path: '/api/a?c=1', node: {} } as unknown as Parameters<typeof requestPath>[0])).toEqual({ path: '/api/a', query: '?c=1' })
   })
 })
 

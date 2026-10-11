@@ -47,6 +47,20 @@ export function resolveTarget(base: string, subpath: string): string | null {
 }
 
 /**
+ * The request's path and query, split where the RAW request target splits them. h3 percent-decodes the path half of
+ * `event.path` (leaving the query as sent), so an encoded `?` in a path segment (`/a%3Fb`) arrives there as a real
+ * one — splitting `event.path` on it moved part of the path into an invented query: the BFF read `/logout%3Fx` as
+ * lukk's `/logout`. h3 appends the query verbatim, so the decoded path is whatever precedes it. (`node.req.url` is
+ * always set by h3 on Node; the fallback keeps a runtime or a request without one behaving as it did.)
+ */
+export function requestPath(event: H3Event): { path: string, query: string } {
+  const raw = event.node.req?.url ?? event.path
+  const queryAt = raw.indexOf('?')
+  const query = queryAt === -1 ? '' : raw.slice(queryAt)
+  return { path: event.path.slice(0, event.path.length - query.length), query }
+}
+
+/**
  * The longest upstream path either proxy judges and forwards — measured as the upstream URL serialises it, since
  * that is what the route checks work through: a `{` or `"` the request carried is `%7B` or `%22` there, three
  * times as long. 8 KiB is the request line nginx (`large_client_header_buffers`) and Apache (`LimitRequestLine`)

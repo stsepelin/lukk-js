@@ -200,6 +200,23 @@ function targetIsOurs(deps: LukkFetchDeps, url: string, baseURL: unknown): boole
   return (isSameOrigin(deps.baseURL, url) || known(appOrigin, url)) && perCallOk
 }
 
+/**
+ * A call's headers over the instance's, as ofetch merges them (`mergeHeaders` in ofetch 1.x and 2.x): by name,
+ * case-insensitively, the call's value winning — in any of the three `HeadersInit` forms. Spread as options, the
+ * call's `headers` REPLACED the instance's (`api.create({ headers: { 'x-tenant': 'a' } })` lost `x-tenant` on a call
+ * passing its own), on the server only: the browser's instance is a real ofetch.
+ */
+function mergeHeaders(defaults: HeadersInit | undefined, input: HeadersInit | undefined): Headers {
+  // ofetch's own two paths: with no defaults the input is taken whole (repeated tuples combined); over defaults
+  // each of its entries is SET, so the last of a repeated name wins.
+  if (!defaults) return new Headers(input)
+  const headers = new Headers(defaults)
+  if (input) {
+    for (const [name, value] of (Symbol.iterator in input ? input : new Headers(input)) as Iterable<[string, string]>) headers.set(name, value)
+  }
+  return headers
+}
+
 /** Minimal callable shape of Nuxt's request-aware fetch that we drive. */
 export type RequestFetch = (request: FetchRequest, opts?: FetchOptions) => Promise<unknown>
 
@@ -228,7 +245,7 @@ export function createRequestFetch(requestFetch: RequestFetch, deps: LukkFetchDe
     // Always a plain object. To the app's own API it is marked as the render's (see `LUKK_SSR_HEADER`), so the
     // app-API proxy never renews for it; to anything else, neither the cookie nor the marker (which the page
     // request carries, and the transport copies) goes along.
-    const headers = { ...Object.fromEntries(new Headers(merged.headers)), ...(ours ? { [LUKK_SSR_HEADER]: '1' } : { cookie: '', [LUKK_SSR_HEADER]: '' }) }
+    const headers = { ...Object.fromEntries(mergeHeaders(defaults.headers, opts.headers)), ...(ours ? { [LUKK_SSR_HEADER]: '1' } : { cookie: '', [LUKK_SSR_HEADER]: '' }) }
     // `redirect` sits AFTER the caller's opts, mirroring `lukk-core`'s ordering: a caller passing
     // `redirect: 'follow'` would otherwise re-enable chasing a 3xx, and this fetch attaches the
     // sealed session cookie on the server.

@@ -105,6 +105,26 @@ describe('auth proxy over real h3', () => {
     expect(JSON.parse(res.body)).toEqual({ echoed: 0 })
   })
 
+  it('keeps an encoded `?` in the path as path data — `logout%3Fx` is not lukk\'s logout (real h3 decoding)', async () => {
+    // h3 decodes `event.path` before the handler runs, so `%3F` arrives as a bare `?`. Splitting that on `?` cut the
+    // path at it: upstream received `/auth/logout`, which ended the session, for a path lukk itself would 404.
+    received = {}
+    const res = await send('POST', '/api/_lukk/logout%3Fx', ['{}'], { 'content-type': 'application/json', 'content-length': '2' })
+    expect(res.status).toBe(200)
+    expect(received.url).toBe('/auth/logout%3Fx')
+    // The real query is still never forwarded, and the encoded `?` before it stays path data.
+    await send('GET', '/api/_lukk/user%3Fa?b=1', [])
+    expect(received.url).toBe('/auth/user%3Fa')
+  })
+
+  it('judges the whole path past an encoded `?` — the empty-segment refusal and the 414 cap see what is forwarded', async () => {
+    received = {}
+    // Cut at the decoded `?`, both were judged as `/x` and forwarded.
+    expect((await send('GET', '/api/_lukk/x%3F//refresh', [])).status).toBe(404)
+    expect((await send('GET', `/api/_lukk/x%3F${'a'.repeat(9 * 1024)}`, [])).status).toBe(414)
+    expect(received).toEqual({})
+  })
+
   it('mints a seal that stops unsealing once its lifetime is up (real iron)', async () => {
     const cfg = __test.runtimeConfig.lukk as Record<string, unknown>
     cfg.sessionMaxAge = 60

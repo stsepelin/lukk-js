@@ -119,6 +119,9 @@ now `'pwd' | 'otp' | 'pop' | 'user' | 'mfa'`; anything comparing against `'webau
   the app-API proxy now too, and a navigation into an `<iframe>`, `<frame>`, `<embed>` or `<object>` no
   longer counts as one. A link the visitor follows still works.
 - `/api/_lukk/refresh` answers anything but `POST` with **405** and `Allow: POST`.
+- The BFF auth proxy reads an encoded `?` in the path (`%3F`) as part of the path, as the app-API proxy
+  already did: `/api/_lukk/logout%3Fx` is forwarded as `/auth/logout%3Fx` (which lukk does not route), no
+  longer as `/auth/logout`.
 - App-API proxy responses carry `X-Content-Type-Options: nosniff`, and every response that is neither
   JSON nor a PDF also carries `Content-Security-Policy: sandbox` (added to the upstream's own policy), so
   an HTML or SVG document from your API renders without script and outside the app's origin. Serve such
@@ -321,6 +324,10 @@ replacing its hook, and keep authenticated calls on the API's origin.
   dependency; `LUKK_BFF_PREFIX` and `LUKK_SESSION_COOKIE` import as values again.
 - **The app-API proxy** drops the upstream's `Access-Control-*` and hop-by-hop response headers, and removes
   the browser's `Origin` from the request it forwards.
+- **`useLukkFetch().create({ headers })` during SSR** merges a call's own `headers` over the instance's, as
+  ofetch does in the browser (by name, case-insensitively, the call winning). It used to drop the instance's
+  headers on any call that passed its own, on the server only. A nested `.create({ headers })` still
+  replaces the outer instance's headers — that is ofetch's behaviour too.
 
 ### Every composable now declares its return type
 

@@ -2,7 +2,7 @@ import { defineEventHandler, getRequestHeader, proxyRequest, setResponseStatus, 
 import { useRuntimeConfig } from '#imports'
 import { LUKK_BFF_PREFIX, LUKK_SSR_HEADER, confirmationHeaderName, isResolvableBase, isSessionCookieName, sessionCookieName, signedOutCookieName } from '../shared'
 import { accessExpired } from './access-token'
-import { hopByHopHeaders, isForeignOrigin, isForeignSubresource, pathTooLong, reachesLukk, reportProxyFailure, rejectUnresolvedTarget, resolveTarget, SPOOFABLE_FORWARDING, viaHeader, visitorIp } from './proxy-utils'
+import { hopByHopHeaders, isForeignOrigin, isForeignSubresource, pathTooLong, reachesLukk, reportProxyFailure, rejectUnresolvedTarget, requestPath, resolveTarget, SPOOFABLE_FORWARDING, viaHeader, visitorIp } from './proxy-utils'
 import { sessionEnded, sessionKey } from './ended-sessions'
 import { logoutNoted, withholdSignedOut } from './logout-note'
 import { revokeDroppedSession } from './revoke-dropped'
@@ -52,15 +52,8 @@ export default defineEventHandler(async (event) => {
     return { message: 'Cross-origin request rejected.' }
   }
 
-  // The query comes from the RAW request target. h3 percent-decodes the path half of `event.path`
-  // (leaving the query as sent), so an encoded `?` in a path segment (`/a%3Fb`) arrives there as a
-  // real one — splitting `event.path` on it moved part of the path into an invented query. h3 appends
-  // the query verbatim, so the decoded path is whatever precedes it. (`node.req.url` is always set
-  // by h3; the fallback only keeps a request without one behaving as it did.)
-  const raw = event.node.req.url ?? event.path
-  const queryAt = raw.indexOf('?')
-  const query = queryAt === -1 ? '' : raw.slice(queryAt)
-  const path = event.path.slice(0, event.path.length - query.length)
+  // The query comes from the RAW request target — see `requestPath`.
+  const { path, query } = requestPath(event)
 
   // The lukk BFF routes belong to the other proxy.
   if (path === LUKK_BFF_PREFIX || path.startsWith(`${LUKK_BFF_PREFIX}/`)) {
