@@ -24,7 +24,7 @@ default is safe.
 
 ---
 
-## Upgrading to `lukk-nuxt` 0.12.0 / `lukk-core` 0.12.0 (unreleased)
+## Upgrading to `lukk-nuxt` 0.12.0 / `lukk-core` 0.12.0
 
 Everything before this release was additive. This one is not. No runtime API was renamed or removed,
 but behaviour changed in ways an app can notice even without typechecking:
