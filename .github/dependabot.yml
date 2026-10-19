@@ -23,6 +23,8 @@ updates:
       # (29 killed) on vitest 3 and 13.79% on vitest 5, running 0.13 tests per mutant instead of 2.63.
       # With `thresholds.break = 100` that fails every mutation run while proving nothing. Drop this once
       # @stryker-mutator/vitest-runner declares vitest 5 support, and re-measure before trusting a score.
+      # vitest 4 (4.1.12) is no shortcut: it clears the tinypool and @vitest/mocker advisories, but its v8
+      # coverage remapping drops lukk-nuxt under the 100% gate (functions 99.15%) — a port of its own.
       - dependency-name: vitest
         update-types: [version-update:semver-major]
       - dependency-name: '@vitest/coverage-v8'
