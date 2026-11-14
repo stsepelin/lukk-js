@@ -879,3 +879,253 @@ describe('a 401 renewal that comes back as another account, or for a foreign tar
     expect(fetch).toHaveBeenCalledOnce()
   })
 })
+
+describe('the 2026-11 audit', () => {
+  const jwt = (sub: string, n = 0) => `h.${Buffer.from(JSON.stringify({ sub, n })).toString('base64url')}.s`
+  const unauthenticated = () => json({ message: 'Unauthenticated.' }, 401)
+
+  it('joins the path the same-origin guard judged, so a leading tab cannot smuggle an authority', async () => {
+    // `\t/evil.com/x` starts with a tab: the slash strip saw no leading slash, the join made `/\t/evil.com/x`,
+    // and the URL parser then removed the tab — `//evil.com/x`, with the bearer attached, because the guard
+    // had judged the canonical string (`/evil.com/x`, relative) and the join the raw one.
+    for (const base of ['', '/']) {
+      for (const path of ['\t/evil.com/x', '\n/evil.com/x', '\r\\evil.com/x', ' //evil.com/x', '/\t/evil.com/x']) {
+        const fetch = vi.fn(async () => json({}))
+        const client = createLukkClient({ baseURL: base, fetch, getAccessToken: () => 'SECRET' })
+
+        await client.request(path)
+
+        const url = String(fetch.mock.calls[0]![0])
+        expect(url).toBe('/evil.com/x')
+        expect(new URL(url, 'https://app.example').origin).toBe('https://app.example')
+      }
+    }
+  })
+
+  it('sets a JSON Content-Type for a string body only — FormData and URLSearchParams name their own', async () => {
+    const fetch = vi.fn(async () => json({}))
+    const client = createLukkClient({ baseURL: 'https://x/auth', fetch })
+
+    await client.request('/a', { method: 'POST', body: new FormData() })
+    await client.request('/b', { method: 'POST', body: new URLSearchParams({ a: '1' }) })
+    await client.request('/c', { method: 'POST', body: '{}' })
+
+    const types = fetch.mock.calls.map(call => (call[1] as RequestInit & { headers: Headers }).headers.get('Content-Type'))
+    expect(types).toEqual([null, null, 'application/json'])
+  })
+
+  it('calls onUnauthenticated once for a burst of requests behind one failed refresh', async () => {
+    const fetch = vi.fn(async () => unauthenticated())
+    const refresh = vi.fn(async () => { await new Promise(r => setTimeout(r, 5)); return null })
+    const onUnauthenticated = vi.fn()
+    const client = createLukkClient({ baseURL: 'https://x/auth', fetch, getAccessToken: () => 'old', refresh, onUnauthenticated })
+
+    const results = await Promise.allSettled([1, 2, 3, 4, 5].map(n => client.request(`/r${n}`)))
+
+    expect(results.every(r => r.status === 'rejected')).toBe(true)
+    expect(refresh).toHaveBeenCalledOnce()
+    expect(onUnauthenticated).toHaveBeenCalledOnce()
+  })
+
+  it('calls onTokens once for a burst of requests behind one successful refresh', async () => {
+    let token = jwt('A')
+    const fetch = vi.fn(async (_url: string, init?: RequestInit) =>
+      (init!.headers as Headers).get('Authorization') === `Bearer ${jwt('A', 1)}` ? json({ ok: true }) : unauthenticated())
+    const refresh = vi.fn(async () => { await new Promise(r => setTimeout(r, 5)); return { access_token: jwt('A', 1), expires_in: 900 } })
+    const onTokens = vi.fn((pair: { access_token: string }) => { token = pair.access_token })
+    const client = createLukkClient({ baseURL: 'https://x/auth', fetch, getAccessToken: () => token, refresh, onTokens })
+
+    await expect(Promise.all([1, 2, 3].map(n => client.request(`/r${n}`)))).resolves.toEqual([{ ok: true }, { ok: true }, { ok: true }])
+    expect(refresh).toHaveBeenCalledOnce()
+    expect(onTokens).toHaveBeenCalledOnce()
+  })
+
+  it('does not rotate again for a 401 that lands after the token was already renewed', async () => {
+    // Two requests leave with the expired token. The first one's 401 renews; the second one's 401 arrives
+    // after that. The token it would refresh for is already fresh: it retries with it.
+    let token = jwt('A')
+    let release!: () => void
+    const held = new Promise<void>((resolve) => { release = resolve })
+    const fetch = vi.fn(async (url: string, init?: RequestInit) => {
+      if ((init!.headers as Headers).get('Authorization') === `Bearer ${jwt('A', 1)}`) return json({ ok: String(url) })
+      if (String(url).endsWith('/slow')) await held
+      return unauthenticated()
+    })
+    const refresh = vi.fn(async () => ({ access_token: jwt('A', 1), expires_in: 900 }))
+    const client = createLukkClient({ baseURL: 'https://x/auth', fetch, getAccessToken: () => token, refresh, onTokens: (pair) => { token = pair.access_token } })
+
+    const slow = client.request('/slow')
+    await expect(client.request('/fast')).resolves.toEqual({ ok: 'https://x/auth/fast' })
+    release()
+
+    await expect(slow).resolves.toEqual({ ok: 'https://x/auth/slow' })
+    expect(refresh).toHaveBeenCalledOnce()
+  })
+
+  it('does not replay that late request when the token it finds is another account\'s', async () => {
+    let token = jwt('A')
+    const fetch = vi.fn(async () => { token = jwt('B'); return unauthenticated() })
+    const refresh = vi.fn(async () => null)
+    const client = createLukkClient({ baseURL: 'https://x/auth', fetch, getAccessToken: () => token, refresh })
+
+    await expect(client.request('/account', { method: 'DELETE' })).rejects.toMatchObject({ status: 401, reason: SESSION_CHANGED })
+    expect(fetch).toHaveBeenCalledOnce()
+    expect(refresh).not.toHaveBeenCalled()
+  })
+
+  it('still refreshes when the token is unchanged, or gone', async () => {
+    for (const after of ['old', null, undefined, ''] as const) {
+      let token: string | null | undefined = 'old'
+      const fetch = vi.fn(async () => { token = after; return unauthenticated() })
+      const refresh = vi.fn(async () => null)
+      const client = createLukkClient({ baseURL: 'https://x/auth', fetch, getAccessToken: () => token, refresh })
+
+      await expect(client.request('/me')).rejects.toMatchObject({ status: 401 })
+      expect(refresh).toHaveBeenCalledOnce()
+    }
+  })
+
+  it('restore() answers null for a 2xx that is not a token pair, and stores nothing', async () => {
+    for (const body of [{}, { access_token: 5 }, 'str', [], undefined]) {
+      const onTokens = vi.fn()
+      const client = createLukkClient({ baseURL: 'https://x/auth', fetch: vi.fn(async () => json(body)), onTokens })
+
+      await expect(client.restore()).resolves.toBeNull()
+      expect(onTokens).not.toHaveBeenCalled()
+    }
+  })
+
+  it('never hands back an empty message, or a message or error bag that is not one', () => {
+    expect(lukkError(502, '', null)).toEqual({ status: 502, message: 'HTTP 502' })
+    expect(lukkError(502, '', { message: '' })).toEqual({ status: 502, message: 'HTTP 502' })
+    expect(lukkError(500, 'Server Error', { message: { a: 1 }, errors: 'x' } as never)).toEqual({ status: 500, message: 'Server Error' })
+    // An array (JSON:API, GraphQL) is passed on as it came; a string or a number is not an error bag.
+    expect(lukkError(422, 'X', { message: 'Invalid', errors: [{ detail: 'a' }] } as never)).toEqual({ status: 422, message: 'Invalid', errors: [{ detail: 'a' }] })
+    expect(lukkError(422, 'X', { message: 'Invalid', errors: 7 } as never)).toEqual({ status: 422, message: 'Invalid' })
+    expect(lukkError(422, 'X', { message: 'Invalid', errors: null } as never)).toEqual({ status: 422, message: 'Invalid' })
+  })
+
+  it('reads Retry-After up to nine digits, and nothing longer as a number', async () => {
+    const answer = (value: string) => createLukkClient({
+      baseURL: 'https://x/auth',
+      fetch: vi.fn(async () => new Response('{}', { status: 429, headers: { 'retry-after': value } })),
+    }).request('/login').catch(error => error.retryAfter)
+
+    await expect(answer('999999999')).resolves.toBe(999999999)
+    await expect(answer('1000000000')).resolves.toBeUndefined()
+    await expect(answer('9'.repeat(400))).resolves.toBeUndefined()
+  })
+})
+
+describe('the 2026-11 audit: a late 401 retried with the renewed token', () => {
+  it('takes that shortcut once: if the renewed token is refused too, it renews as any request would', async () => {
+    // A request that outlived an access-token lifetime: the token it finds changed has expired as well.
+    // Left at the retry's 401, a live session's request failed with a refresh still to be had.
+    let token = 'old'
+    const sent: (string | null)[] = []
+    const fetch = vi.fn(async (_url: string, init?: RequestInit) => {
+      const bearer = (init!.headers as Headers).get('Authorization')
+      sent.push(bearer)
+      if (bearer === 'Bearer old') token = 'renewed-meanwhile'
+      return bearer === 'Bearer fresh' ? json({ ok: true }) : json({ message: 'Unauthenticated.' }, 401)
+    })
+    const refresh = vi.fn(async () => ({ access_token: 'fresh', expires_in: 900 }))
+    const client = createLukkClient({ baseURL: 'https://x/auth', fetch, getAccessToken: () => token, onTokens: (pair) => { token = pair.access_token }, refresh })
+
+    await expect(client.request('/me')).resolves.toEqual({ ok: true })
+
+    expect(sent).toEqual(['Bearer old', 'Bearer renewed-meanwhile', 'Bearer fresh'])
+    expect(refresh).toHaveBeenCalledOnce()
+  })
+
+  it('never takes it twice, however often the token changes under a request that keeps being refused', async () => {
+    let n = 0
+    const fetch = vi.fn(async () => { n++; return json({ message: 'Unauthenticated.' }, 401) })
+    const refresh = vi.fn(async () => null)
+    const onUnauthenticated = vi.fn()
+    const client = createLukkClient({ baseURL: 'https://x/auth', fetch, getAccessToken: () => `token-${n}`, refresh, onUnauthenticated })
+
+    await expect(client.request('/me')).rejects.toMatchObject({ status: 401 })
+
+    expect(fetch).toHaveBeenCalledTimes(2)
+    expect(refresh).toHaveBeenCalledOnce()
+    expect(onUnauthenticated).toHaveBeenCalledOnce()
+  })
+
+  it('leaves a backslash in the query or fragment as it was written — only the path\'s are slashes', async () => {
+    const fetch = vi.fn(async () => json({}))
+    const client = createLukkClient({ baseURL: 'https://x/auth', fetch })
+
+    await client.request('/search?q=a\\b&path=C:\\dir#frag\\x')
+    await client.request('\\a\\b#c\\d')
+    await client.request('/plain\\path')
+    await client.request('?q=a\\b')
+    await client.request('/tail\\')
+
+    expect(fetch.mock.calls.map(call => String(call[0]))).toEqual([
+      'https://x/auth/search?q=a\\b&path=C:\\dir#frag\\x',
+      'https://x/auth/a/b#c\\d',
+      'https://x/auth/plain/path',
+      'https://x/auth/?q=a\\b',
+      'https://x/auth/tail/',
+    ])
+  })
+})
+
+describe('the 2026-11 audit: hooks that make requests of their own', () => {
+  it('does not hang when onTokens loads the user and that request needs a renewal too', async () => {
+    // Awaited inside the refresh single-flight, `onTokens` waited on a request whose 401 joined that same
+    // flight — which was waiting for `onTokens` to return. Neither ever settled.
+    let token = 'old'
+    let renewals = 0
+    const fetch = vi.fn(async (url: string, init?: RequestInit) => {
+      const bearer = (init!.headers as Headers).get('Authorization')
+      // The profile is refused once with the first renewed token, then served.
+      if (String(url).endsWith('/profile')) return bearer === 'Bearer t2' ? json({ name: 'Ada' }) : json({ message: 'Unauthenticated.' }, 401)
+      return bearer === 'Bearer old' ? json({ message: 'Unauthenticated.' }, 401) : json({ ok: true })
+    })
+    const profiles: unknown[] = []
+    const client = createLukkClient({
+      baseURL: 'https://x/auth',
+      fetch,
+      getAccessToken: () => token,
+      refresh: async () => ({ access_token: `t${++renewals}`, expires_in: 900 }),
+      onTokens: async (pair) => {
+        token = pair.access_token
+        if (pair.access_token === 't1') profiles.push(await client.request('/profile'))
+      },
+    })
+
+    const outcome = await Promise.race([
+      client.request('/me'),
+      new Promise(resolve => setTimeout(() => resolve('hung'), 500)),
+    ])
+
+    expect(outcome).toEqual({ ok: true })
+    expect(profiles).toEqual([{ name: 'Ada' }])
+    expect(renewals).toBe(2)
+  })
+
+  it('still tells the binding once per renewal, and every waiter after it was told', async () => {
+    let token = 'old'
+    const order: string[] = []
+    const fetch = vi.fn(async (_url: string, init?: RequestInit) =>
+      (init!.headers as Headers).get('Authorization') === 'Bearer new' ? json({ ok: true }) : json({ message: 'Unauthenticated.' }, 401))
+    const client = createLukkClient({
+      baseURL: 'https://x/auth',
+      fetch,
+      getAccessToken: () => token,
+      refresh: async () => ({ access_token: 'new', expires_in: 900 }),
+      onTokens: async (pair) => {
+        await new Promise(resolve => setTimeout(resolve, 5))
+        token = pair.access_token
+        order.push('told')
+      },
+    })
+
+    await Promise.all([1, 2, 3].map(n => client.request(`/r${n}`).then(() => order.push(`done ${n}`))))
+
+    expect(order.filter(entry => entry === 'told')).toHaveLength(1)
+    expect(order[0]).toBe('told')
+  })
+})

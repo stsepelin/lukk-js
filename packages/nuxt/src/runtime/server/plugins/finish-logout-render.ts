@@ -1,5 +1,6 @@
 import type { H3Event } from 'h3'
-import { setResponseHeader } from 'h3'
+import { getResponseHeader, setResponseHeader } from 'h3'
+import { varyWithCookie } from '../proxy-utils'
 import { withholdSignedOutCookie } from '../logout-note'
 import { defineNitroPlugin } from '#imports'
 
@@ -41,5 +42,5 @@ export default defineNitroPlugin((nitroApp) => {
 function perVisitor(event: H3Event): void {
   if (!(event.context as { lukkPerVisitor?: boolean }).lukkPerVisitor || event.node.res.headersSent) return
   setResponseHeader(event, 'cache-control', 'no-store')
-  setResponseHeader(event, 'vary', 'cookie')
+  setResponseHeader(event, 'vary', varyWithCookie(getResponseHeader(event, 'vary')))
 }

@@ -1,6 +1,7 @@
 import { credentialToJSON, type LoginResult, type PasskeyLoginOptions, type PasskeySummary, toCreationOptions, toRequestOptions } from 'lukk-core'
 import { useNuxtApp } from '#imports'
 import type { LukkModeClient } from '../shared'
+import { stepUpSession } from '../utils/restore-state'
 import { SIGN_IN, type SignInWith } from '../utils/sign-in'
 import { type BffSignInResult, useLukkAuth } from './useLukkAuth'
 import { useLukkConfirmation } from './useLukkConfirmation'
@@ -14,6 +15,7 @@ export interface LukkPasskeys {
   login: () => Promise<LoginResult | BffSignInResult>
   confirm: () => Promise<void>
   list: () => Promise<{ passkeys: PasskeySummary[] }>
+  /** Remove a passkey. Removing one also signs the account out everywhere else (lukk after 0.7.0). */
   remove: (id: string) => Promise<void>
 }
 
@@ -58,9 +60,12 @@ export function useLukkPasskeys(): LukkPasskeys {
   async function confirm(): Promise<void> {
     const confirmation = useLukkConfirmation()
 
+    // Recorded only for the session it was earned in — see `confirmPassword`.
+    const stillThisSession = stepUpSession(useNuxtApp())
     try {
       const assertion = await assert(stepUpOptions)
-      confirmation.record(await $lukk.confirmPasskey(assertion.ceremony_id, assertion.credential))
+      const result = await $lukk.confirmPasskey(assertion.ceremony_id, assertion.credential)
+      if (stillThisSession()) confirmation.record(result)
     }
     catch (error) {
       // Same as the password path: a 403 is "this token may never earn a confirmation", so the

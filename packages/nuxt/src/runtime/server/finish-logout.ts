@@ -1,8 +1,9 @@
 import type { H3Event } from 'h3'
-import { appendResponseHeader, defineEventHandler, deleteCookie, getCookie, getRequestHeader, setCookie, setResponseHeader } from 'h3'
+import { appendResponseHeader, defineEventHandler, deleteCookie, getCookie, getRequestHeader, getResponseHeader, setCookie, setResponseHeader } from 'h3'
 import { useRuntimeConfig } from '#imports'
 import { LUKK_BFF_PREFIX, logoutCookieName, sessionCookieName, signedOutCookieName, underAppBase } from '../shared'
 import { sessionEnded, sessionKey, sessionReplaced } from './ended-sessions'
+import { varyWithCookie } from './proxy-utils'
 import type { EndedHere } from './logout-note'
 import { readSealedSessionWithId } from './sealed-session'
 
@@ -58,7 +59,7 @@ export default defineEventHandler(async (event) => {
   // paths too.
   ;(event.context as { lukkPerVisitor?: boolean }).lukkPerVisitor = true
   setResponseHeader(event, 'cache-control', 'no-store')
-  setResponseHeader(event, 'vary', 'cookie')
+  setResponseHeader(event, 'vary', varyWithCookie(getResponseHeader(event, 'vary')))
 
   const session = sessionCookieName(secure, cookieNamespace)
   const sealed = getCookie(event, session)

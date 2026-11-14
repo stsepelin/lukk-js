@@ -1,6 +1,7 @@
 import type { H3Event } from 'h3'
+import { isTokenPair } from 'lukk-core'
 import { isSessionEnded, sessionEnded, sessionKey } from './ended-sessions'
-import { confirmationsHeld, forgetRefreshJournal, type Link, refreshHeads, refreshJournals, responsesOut } from './refresh-journal'
+import { confirmationsHeld, entombed, entombHead, forgetRefreshJournal, type Link, refreshHeads, refreshJournals, responsesOut } from './refresh-journal'
 import { jwtExpiry } from './access-token'
 import { reportUnusableBase, resolveTarget, UPSTREAM_TIMEOUT_MS } from './proxy-utils'
 
@@ -240,6 +241,8 @@ function chainFrom(journal: Map<string, Link>, token: string): [string, Link][] 
  * window close while the browser still held the consumed token, and its next refresh was revoked.
  */
 export function currentPair(id: string | undefined, pair: TokenSession): TokenSession | null {
+  // The session ended while this response was out: nothing is current, whatever a journal might say.
+  if (entombed(id)) return null
   const journal = refreshJournals.get(id!)
   const head = refreshHeads.get(id!)
   const newest = journal?.has(pair.refresh!)
@@ -393,7 +396,10 @@ function record(id: string, consumed: string, result: RefreshResult, flight: Fli
   }
   // And not for a session another instance ended: the shared store answers asynchronously.
   void sessionEnded(id).then((ended) => {
-    if (ended) forgetRefreshJournal(id)
+    if (!ended) return
+    forgetRefreshJournal(id)
+    // And, as where it ended on this instance, a response still out here must not write it back.
+    entombHead(id)
   })
 }
 
@@ -500,7 +506,10 @@ function fly(id: string, token: string, baseURL: string, clientIp: string): Flig
   // Registered after the countdown above, so it runs before any caller is handed the result.
   settled.then((result) => {
     if (result.pair) {
-      if (!isSessionEnded(id)) record(id, token, result, flight)
+      // Nor for one whose tombstone still stands: the record that it ended lasts ten minutes, and a
+      // rotation that lands after that would otherwise arm a live head over it — and the response the
+      // tombstone is there for would seal the ended session's pair after all.
+      if (!isSessionEnded(id) && !entombed(id)) record(id, token, result, flight)
     }
     else if (!result.retryable) {
       forgetRefreshJournal(id)
@@ -583,12 +592,17 @@ async function rawRefresh(refreshToken: string, baseURL: string, clientIp: strin
     return { pair: null, retryable: res.status !== 401 && res.status !== 403 }
   }
 
-  let pair: { access_token: string, refresh_token?: string, expires_in?: number }
+  let pair: unknown
   // A body that breaks off mid-read, or is not JSON: an outage, not a verdict — and not a throw, which
   // rejected every caller sharing this flight (the BFF's /refresh answered 500). Whether lukk rotated is
-  // unknown; a retry replays inside its grace window.
-  try { pair = await res.json() as typeof pair }
-  catch { return { pair: null, retryable: true } }
+  // unknown; a retry replays inside its grace window. Left undefined here, and judged just below.
+  try { pair = await res.json() }
+  catch { /* not a pair */ }
+
+  // A 2xx that is not a token pair — `{}`, `null`, an array, an `access_token` that is not a string — is
+  // not a rotation either. Taken as one, it sealed a session with no access token and journalled a link
+  // to nothing; `null` threw. An answer lukk does not give: treated as the outage it must be.
+  if (!isTokenPair(pair)) return { pair: null, retryable: true }
 
   // No fallback to the token just sent: lukk has consumed it. Kept, the next refresh would replay it
   // past the grace window and reuse detection would revoke the family as stolen. Without a new one the

@@ -57,7 +57,9 @@ const ENVELOPE_KEYS = ['meta', 'links'] as const
 export function shapeUser(raw: unknown, key: string | false = 'data'): LukkUser | null {
   if (!isPlainObject(raw)) return null
   if ('errors' in raw) return null // an error envelope is never a user → logged-out
-  if (key !== false && key in raw && !ENVELOPE_KEYS.some(k => k in raw)) {
+  // Not when the object carries an `id` of its own: that is a user with a `data` attribute (settings,
+  // a profile blob), and unwrapping it handed back the blob — a user with no id and no verification state.
+  if (key !== false && key in raw && !('id' in raw) && !ENVELOPE_KEYS.some(k => k in raw)) {
     const inner = raw[key]
     if (inner === null) return null // e.g. `{ data: null }` → not authenticated
     if (isPlainObject(inner)) return inner as LukkUser

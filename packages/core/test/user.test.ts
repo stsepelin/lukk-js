@@ -110,3 +110,15 @@ describe('userShapeWarning', () => {
     // Telling a developer the shape is wrong without naming the fix just relocates the puzzle.
     expect(userShapeWarning({ data: { name: 'Ada' } } as never)).toContain('withoutWrapping'))
 })
+
+describe('shapeUser and a user with a `data` attribute of its own', () => {
+  it('keeps the user: an object with an id is not a wrapper', () => {
+    // Unwrapped, this handed back `{ theme: 'dark' }` — a user with no id and no verification state.
+    const user = { id: 5, email: 'a@b', email_verified_at: 'x', data: { theme: 'dark' } }
+    expect(shapeUser(user)).toBe(user)
+  })
+
+  it('still unwraps a wrapper, whose id is inside', () => {
+    expect(shapeUser({ data: { id: 5, name: 'Ada' } })).toEqual({ id: 5, name: 'Ada' })
+  })
+})

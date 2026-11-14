@@ -25,6 +25,8 @@ export interface RestoreState {
    * account over the new one's token, and one that landed after `logout()` signed the user back in.
    */
   epoch: number
+  /** Replaced whenever a step-up is dropped (`dropStepUp`): one earned before it must not be recorded after. */
+  stepUpDropped: object | null
   /** Bumped by `logout()` only — so a sign-in can tell "logged out meanwhile" from "another sign-in". */
   logouts: number
   /** The refresh in flight, if any. Written by the client plugin's single-flight. */
@@ -86,7 +88,7 @@ export const TAB_LOCK_WAIT_MS = 3_000
 
 export function restoreState(nuxtApp: object): RestoreState {
   const app = nuxtApp as { _lukkRestore?: RestoreState }
-  return (app._lukkRestore ??= { started: false, restored: shallowRef(false), epoch: 0, logouts: 0, refreshing: null, handover: null, ending: null, lockUsers: 0 })
+  return (app._lukkRestore ??= { started: false, restored: shallowRef(false), epoch: 0, stepUpDropped: null, logouts: 0, refreshing: null, handover: null, ending: null, lockUsers: 0 })
 }
 
 /**
@@ -135,14 +137,23 @@ export function signIn<T>(nuxtApp: object, send: () => Promise<T>, startsSession
 }
 
 async function handOver<T>(nuxtApp: object, send: () => Promise<T>, startsSession: (result: T) => boolean): Promise<{ result: T, current: boolean }> {
-  await settleRefresh(nuxtApp)
-
   const state = restoreState(nuxtApp)
-  // And for a logout still running: its cleanup — and the cleared cookie its response carries — would
-  // otherwise land after this sign-in succeeded, leaving the visitor signed out and the new session
-  // alive upstream with nothing pointing at it. The whole logout, not only its request on the wire.
-  await settle(state.ending)
-  await settle(state.handover)
+  // A refresh on the wire; a logout still running (its cleanup — and the cleared cookie its response
+  // carries — would otherwise land after this sign-in succeeded, leaving the visitor signed out and the
+  // new session alive upstream with nothing pointing at it: the whole logout, not only its request); and
+  // a sign-in before this one.
+  //
+  // Asked again after every wait, because each is an await and another of them may have started during
+  // it: a refresh that was itself waiting on a failed sign-in resumes in the same tick as the sign-in
+  // queued behind that one, and both went out together. Each is waited for ONCE — a capped wait that ran
+  // out leaves its promise standing — so this ends.
+  const waited = new Set<Promise<unknown>>()
+  for (;;) {
+    const pending = [state.refreshing, state.ending, state.handover].find(p => p != null && !waited.has(p))
+    if (!pending) break
+    waited.add(pending)
+    await settle(pending)
+  }
   const logouts = state.logouts
 
   let issued = false
@@ -282,11 +293,24 @@ export function beginSession(nuxtApp: object, sentAt: number): void {
  * would run the old action under the new account.
  */
 export function dropStepUp(nuxtApp: object): void {
+  restoreState(nuxtApp).stepUpDropped = {}
   lukkSecret(nuxtApp, 'confirmation').value = null
   // Stryker disable next-line ArrowFunction,BooleanLiteral: equivalent — the initial value is overwritten on the next line.
   const confirmed = useState<boolean>(CONFIRMED_KEY, () => false)
   confirmed.value = false
   cancelPendingStepUp()
+}
+
+/**
+ * The session a step-up is being earned FOR. Taken before the confirming request; the function it returns
+ * says, when the answer arrives, whether that is still this session: not after a logout or sign-in (the
+ * generation moved), nor after a step-up was dropped for any other reason — a renewal that came back as
+ * another account moves no generation. An answer for a session that is no longer this one is not recorded.
+ */
+export function stepUpSession(nuxtApp: object): () => boolean {
+  const state = restoreState(nuxtApp)
+  const { epoch, stepUpDropped } = state
+  return () => epoch === state.epoch && stepUpDropped === state.stepUpDropped
 }
 
 /**

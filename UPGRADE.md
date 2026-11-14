@@ -24,6 +24,67 @@ default is safe.
 
 ---
 
+## Upgrading to the next patch release from 0.12.0
+
+Fixes from the 2026-11 audit. Nothing was renamed or removed; these are the ones an app can notice.
+
+### `mode` must be `'bff'` or `'direct'` — the build fails otherwise
+
+**Low impact.** Any other value (`'BFF'`, a typo) used to register no proxy and report nothing, so
+sign-in simply did not work. Fix the value.
+
+### `onTokens` and `onUnauthenticated` fire once per refresh (`lukk-core`)
+
+**Low impact.** Five requests waiting on one refresh used to call the hook five times. Only a raw
+`lukk-core` binding whose hook counts its calls is affected; lukk-nuxt's are plain assignments.
+
+### `request()` sets a JSON `Content-Type` for a string body only (`lukk-core`)
+
+**Low impact.** A `FormData` or `URLSearchParams` body now keeps the type the platform gives it. If you
+passed some other non-string body and relied on the header, set it yourself.
+
+### Another tab's sign-in can now show `restoreFailed` instead of the previous user (`lukk-nuxt`)
+
+**Low impact.** When another tab changes the session and this tab cannot reload the user (the endpoint
+is down), `user` becomes `null` and `restoreFailed` is `true` — rather than the previous account staying
+on screen while requests run as the new one. Handle it as you already do after a failed restore:
+offer a retry that calls `initSession()`.
+
+### A session secret in `runtimeConfig.lukk.sessionPassword` is checked at build (`lukk-nuxt`, BFF)
+
+**Low impact.** A secret shorter than 32 characters set there used to pass the build and fail every
+login at runtime; it now fails the build. `NUXT_LUKK_SESSION_PASSWORD` still takes precedence, so a
+placeholder in the config beside a real secret in the environment is fine.
+
+### `useLukkFetch('name:action')` no longer carries the bearer to the app's own origin (`lukk-nuxt`, direct mode)
+
+**Low impact.** A path with no leading slash whose first segment looks like a scheme to ofetch
+(`user_profiles:batchGet`) is not joined onto `api.target`; the browser resolves it against the page.
+It used to get the bearer anyway. Write such paths with a leading slash (`/user_profiles:batchGet`),
+which is joined and authenticated as before.
+
+### `shapeUser` keeps an object that has an `id` (`lukk-core`, `user.key`)
+
+**Low impact.** A user resource with a `data` attribute of its own is no longer mistaken for a wrapper.
+The reverse case — an envelope that carries its own top-level `id` beside the wrapped user — is no
+longer unwrapped; return the user without the envelope, or shape it yourself.
+
+### `GET /api/_lukk/logout` answers `405` (`lukk-nuxt`, BFF)
+
+**Low impact.** It answered `502`. Logout was always a `POST`.
+
+### A production build warns about plain `http://` (`lukk-nuxt`)
+
+**Low impact.** `baseURL` or `api.target` on `http://` to a host other than this machine logs a warning
+at build. Nothing fails; ignore it if the network between the two encrypts the traffic itself.
+
+### Removing a passkey or a confirmed second factor signs out other devices (lukk after 0.7.0)
+
+**Low impact.** A server change (see lukk's
+[UPGRADE.md](https://github.com/stsepelin/lukk/blob/main/UPGRADE.md)): the device that removed it stays
+signed in, the others get a `401` on their next refresh and are signed out cleanly. No client change is
+needed; tell users if that is news to them.
+
 ## Upgrading to `lukk-nuxt` 0.12.0 / `lukk-core` 0.12.0
 
 Everything before this release was additive. This one is not. No runtime API was renamed or removed,

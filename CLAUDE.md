@@ -57,6 +57,15 @@ server surface, `lukk-core`, and the Nuxt module/SSR boundary. **No Critical or 
 finding is fixed; the reasoning is in the `fix:` commits and the changesets. Two user-facing
 trade-offs are in the docs' Known limitations.
 
+A second ran **2026-11-14** — the same three passes, plus a contract check against lukk's
+`fix/audit-2026-11`. **No Blocker; three Majors, all fixed** (see `.changeset/audit-2026-11.md`): a
+response slower than the ten-minute ended-session record wrote that session's cookie back (now a
+tombstone head, `entombHead`); `joinURL` joined the raw path while `isSameOrigin` judged the canonical
+one, so `'\t/evil.com'` with an empty base carried credentials off-origin; and another tab's account
+switch left the previous user on screen when the reload failed (`followSession`). Re-checked and still
+sound: path handling is linear (25 shapes at 64 KB), `reachesLukk` has no escape (25.9 M fuzzed
+targets), hop-by-hop removal, the per-process maps' bounds, and the journal's delivery model.
+
 Verified sound at that time — **don't re-derive these; a regression should read as a *change***:
 the access token cannot reach the SSR payload (four `ACCESS_KEY` writes, all `import.meta.client`
 gated, no server path); SSRF containment in `resolveTarget` (fuzzed over 6 base shapes × 50 hostile

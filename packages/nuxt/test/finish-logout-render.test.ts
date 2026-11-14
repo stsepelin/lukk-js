@@ -69,7 +69,18 @@ describe('finish-logout late check (BFF)', () => {
     await call(hooks, 'beforeResponse', page.event)
 
     expect(page.headers.get('cache-control')).toBe('no-store')
-    expect(page.headers.get('vary')).toBe('cookie')
+    expect(page.headers.get('vary')).toBe('Cookie')
+  })
+
+  it('beforeResponse adds Cookie to what the page already varies on, rather than replacing it', async () => {
+    const hooks = install()
+    const page = pageEvent(undefined)
+    ;(page.event.context as { lukkPerVisitor?: boolean }).lukkPerVisitor = true
+    page.headers.set('vary', 'Accept-Language')
+
+    await call(hooks, 'beforeResponse', page.event)
+
+    expect(page.headers.get('vary')).toBe('Accept-Language, Cookie')
   })
 
   it('beforeResponse leaves the caching headers alone for a request that ended no logout, or once they are out', async () => {

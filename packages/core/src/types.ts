@@ -193,9 +193,12 @@ export interface LukkError {
    */
   reason?: string
   /**
-   * The server's `Retry-After`, in seconds, where it gave one as a number. The lukk-nuxt BFF answers a
-   * refresh lukk is slow to rotate with `503` and `Retry-After`: retrying then joins the rotation still in
-   * flight, or adopts it once it has landed, rather than leaving the session for the user's next action.
+   * The server's `Retry-After`, in seconds, where it gave one as a number (up to nine digits): how long
+   * a throttle (`429`) or a timed lockout (`423`) asks the client to wait. The lukk-nuxt BFF relays lukk's,
+   * and answers a refresh lukk is slow to rotate with `503` and its own: retrying then joins the rotation
+   * still in flight, or adopts it once it has landed, rather than leaving the session for the user's next
+   * action. Cross-origin (direct mode on another origin), a browser only exposes the header if the API's
+   * CORS config lists it: `exposed_headers: ['Retry-After']`.
    */
   retryAfter?: number
 }

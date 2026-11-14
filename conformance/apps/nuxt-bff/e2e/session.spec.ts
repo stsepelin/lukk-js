@@ -273,7 +273,8 @@ test('a forged logout note cannot be stored on a cached page and replayed to oth
   const forged = await page.request.get('/cached?v=forged', {
     headers: { cookie: '__Host-lukk-logout=1; __Host-lukk-session=not-a-real-seal' },
   })
-  expect(forged.headers()['vary']).toContain('cookie')
+  // A field name in `Vary` is case-insensitive (RFC 9110 §5.1); the proxy now writes `Cookie`.
+  expect(forged.headers()['vary']?.toLowerCase()).toContain('cookie')
   expect(forged.headers()['set-cookie'] ?? '').not.toContain('lukk-signed-out')
 
   // A signed-in visitor asking for the same page keeps their session — whatever the cached copy renders.

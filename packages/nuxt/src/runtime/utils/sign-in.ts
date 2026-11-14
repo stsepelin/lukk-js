@@ -8,4 +8,11 @@ import type { BffSignInResult } from '../composables/useLukkAuth'
  */
 export const SIGN_IN = Symbol('lukk.signIn')
 
+/**
+ * Reload the user for a session another tab says has CHANGED. Carried the same way, for the client plugin.
+ */
+export const FOLLOW_SESSION = Symbol('lukk.followSession')
+
+export type FollowSession = () => Promise<void>
+
 export type SignInWith = (send: () => Promise<LoginResult | BffSignInResult>) => Promise<LoginResult | BffSignInResult>

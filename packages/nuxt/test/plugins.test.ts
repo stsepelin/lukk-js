@@ -191,6 +191,22 @@ describe('client plugin — a refresh the server asks to retry', () => {
     expect(captured.client!.refreshTokens).toHaveBeenCalledOnce()
   })
 
+  it('waits for a sign-in that never answers once, for the cap — then goes on rather than waiting again', async () => {
+    // The handover stays published while its request is out. A request that never settles must not hold
+    // every refresh behind it for good: each handover is waited for once.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const provide = setup()
+    restoreState(__test.nuxtApp).handover = new Promise(() => {})
+
+    const outcome = provide.lukkRestore()
+    await vi.advanceTimersByTimeAsync(9_999)
+    expect(captured.client!.refreshTokens).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+
+    expect(captured.client!.refreshTokens).toHaveBeenCalledOnce()
+    expect(await outcome).toMatchObject({ pair: expect.anything() })
+  })
+
   it('stands down when a sign-in began a new session while it waited', async () => {
     // A sign-in waits on a refresh in flight only so long (REFRESH_SETTLE_TIMEOUT); one that stopped
     // waiting can land while the refresh is still answering, or sitting out its Retry-After. The retry

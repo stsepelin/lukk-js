@@ -4,7 +4,7 @@ import type { BffSignInResult, LukkModeClient } from '../shared'
 import { computed, useNuxtApp, useRuntimeConfig, useState } from '#imports'
 import { CONFIRMED_KEY, READY_KEY, RESTORE_FAILED_KEY, USER_KEY } from '../keys'
 import { useLukkSecret } from '../utils/secrets'
-import { SIGN_IN } from '../utils/sign-in'
+import { FOLLOW_SESSION, SIGN_IN } from '../utils/sign-in'
 import { isAuthRejection, underAppBase } from '../shared'
 import { clearPendingLogout, notePendingLogout, signedInSince } from '../utils/pending-logout'
 import { acrossTabs, cancelPendingStepUp, restoreState, settleRefresh, signIn } from '../utils/restore-state'
@@ -453,6 +453,28 @@ export function useLukkAuth(): LukkAuth {
   }
 
   /**
+   * `fetchUser` for a session ANOTHER TAB says has changed hands — it signed in, or out and in again.
+   *
+   * `fetchUser` keeps the user on screen when the endpoint cannot be reached, which is right while the
+   * session is the same one: a blip must not sign anyone out. Here it is not the same one. Kept, this tab
+   * went on showing account A while every request it made ran as B, and nothing asked again until a
+   * reload. So an answer that could not be had is "couldn't tell": no user, and `restoreFailed` — the
+   * state `lukk-auth` already leaves a page on, and `initSession()` retries from. Nothing is cleared that
+   * holds the session.
+   *
+   * Not used for a switch this tab finds on its own renewal (`resyncUser`): there the token's subject is
+   * known, the stale one is kept, and the next renewal sees the mismatch again and asks again.
+   */
+  async function followSession(): Promise<void> {
+    const epoch = state.epoch
+    const isCurrent = () => epoch === state.epoch
+    if (!(await loadUser(isCurrent)) || !isCurrent()) return
+    user.value = null
+    state.subject = undefined
+    restoreFailedFlag.value = true
+  }
+
+  /**
    * `fetchUser`, reporting whether the user endpoint could NOT be reached — so a restore can tell "the
    * user endpoint said you are signed out" from "the user endpoint failed". Only that distinction is
    * ever read, so it is the whole answer. `fetchUser` keeps its `Promise<void>` signature.
@@ -564,5 +586,6 @@ export function useLukkAuth(): LukkAuth {
   const auth: LukkAuth = { user, loggedIn, ready, whenReady, restoreFailed, pendingTwoFactor, register, login, verifyTwoFactor, verifyRecoveryCode, logout, revokeOtherSessions, fetchUser, initSession }
   // Symbol-keyed and non-enumerable: internal to lukk-nuxt, absent from `LukkAuth` and from spreads.
   Object.defineProperty(auth, SIGN_IN, { value: signInWith })
+  Object.defineProperty(auth, FOLLOW_SESSION, { value: followSession })
   return auth
 }

@@ -602,6 +602,19 @@ const HOP_BY_HOP: readonly string[] = [
  */
 const UNSETTABLE: ReadonlySet<string> = new Set(['connection', 'keep-alive', 'upgrade', 'transfer-encoding'])
 
+/** An HTTP field name: one RFC 9110 §5.6.2 token, nothing else. */
+const FIELD_NAME = /^[!#$%&'*+\-.^_`|~0-9a-z]+$/
+
+/**
+ * A `Vary` value that also names `Cookie`: added to what is already varied on, never written over it
+ * (RFC 9111 §4.1) — a response that varied on `Origin` or `Accept-Language` still has to.
+ */
+export function varyWithCookie(current: unknown): string {
+  const vary = String(current ?? '')
+  if (/(?:^|,)\s*(?:cookie|\*)\s*(?:,|$)/i.test(vary)) return vary
+  return vary ? `${vary}, Cookie` : 'Cookie'
+}
+
 /**
  * The hop-by-hop headers to blank for THIS request: the fixed set above, plus every field named in
  * the request's own `Connection` header.
@@ -619,10 +632,13 @@ const UNSETTABLE: ReadonlySet<string> = new Set(['connection', 'keep-alive', 'up
 // one production call site always passes a list. Killing it would mean writing Stryker's own
 // placeholder string into a test, which pins nothing about this function.
 export function hopByHopHeaders(event: H3Event, keep: readonly string[] = []): Record<string, string> {
+  // Only what can BE a header name. `Connection: a b` names no field, and handing it on as one made the
+  // forwarding `Headers` throw — an unhandled 500 with a stack in the log, for a request anyone can send.
+  // Stryker disable next-line StringLiteral: equivalent — the fallback for a request with no `Connection` is split and filtered like any value, and no replacement string is a field name (`FIELD_NAME` refuses the space in Stryker's).
   const named = (getRequestHeader(event, 'connection') ?? '')
     .split(',')
     .map(name => name.trim().toLowerCase())
-    .filter(Boolean)
+    .filter(name => FIELD_NAME.test(name))
 
   const protectedNames = new Set(keep.map(name => name.toLowerCase()))
   const blanked: Record<string, string> = {}

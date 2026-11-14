@@ -23,6 +23,7 @@ vi.mock('h3', () => ({
   setResponseHeader: (event: { headers: Record<string, string>, __res?: Record<string, string> }, name: string, value: string) => {
     (event.__res ??= {})[name] = value
   },
+  getResponseHeader: (event: { __res?: Record<string, string> }, name: string) => event.__res?.[name],
   useSession: async (event: { __session: unknown }, config: { name?: string, cookie?: Record<string, unknown>, sessionHeader?: boolean }) => { h3state.useSessionCalls++; h3state.lastSessionName = config?.name; h3state.lastSessionConfig = config; return event.__session },
   deleteCookie: (event: { __deleted?: { name: string, options: unknown }[] }, name: string, options: unknown) => { (event.__deleted ??= []).push({ name, options }) },
 }))
@@ -1323,7 +1324,7 @@ describe('cache directives', () => {
     await run(event)
 
     expect(event.__res?.['cache-control']).toBe('private, no-store')
-    expect(event.__res?.vary).toBe('cookie')
+    expect(event.__res?.vary).toBe('Cookie')
   })
 })
 
@@ -2086,5 +2087,72 @@ describe('a logout or a sign-in presents the session\'s CURRENT tokens, not the 
 
     expect(logouts).toEqual([{ bearer: 'A1', refresh: 'R1' }])
     expect(reused).toBe(0)
+  })
+})
+
+describe('the 2026-11 audit', () => {
+  it('relays lukk\'s Retry-After on a throttle or a timed lockout, as the number of seconds it names', async () => {
+    // RFC 9110 §10.2.3. Dropped, `LukkError.retryAfter` was never set in BFF mode while direct mode had it.
+    for (const [status, header, relayed] of [[429, '42', 42], [423, '300', 300], [429, 'Wed, 21 Oct 2026 07:28:00 GMT', undefined], [429, '-1', undefined], [429, null, undefined]] as const) {
+      mockFetch().fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ message: 'Too many attempts.' }), { status, headers: header === null ? {} : { 'retry-after': header } }))
+      const event = makeEvent({ path: '/api/_lukk/login', method: 'POST', body: '{}', headers: sameOrigin, session: makeSession() })
+
+      await run(event)
+
+      expect(event.status).toBe(status)
+      const headers = (event as { __res?: Record<string, unknown> }).__res ?? {}
+      expect(headers['retry-after']).toBe(relayed)
+      expect('retry-after' in headers).toBe(relayed !== undefined)
+    }
+  })
+
+  it('adds Cookie to a Vary set earlier in the request, rather than replacing it', async () => {
+    mockFetch().fetch = vi.fn().mockResolvedValue(jsonRes({ passkeys: [] }))
+    const event = makeEvent({ path: '/api/_lukk/passkeys', method: 'GET', headers: sameOrigin, session: makeSession({ access: 'a' }) })
+    ;(event as { __res?: Record<string, string> }).__res = { vary: 'Origin, Accept-Language' }
+
+    await run(event)
+
+    expect((event as { __res?: Record<string, string> }).__res?.vary).toBe('Origin, Accept-Language, Cookie')
+  })
+
+  it('answers a logout that is not a POST with 405, and never calls lukk', async () => {
+    // A logout changes state (RFC 9110 §9.2.1). A GET reached `fetch` with the logout's body attached,
+    // which it refuses: answered 502 "lukk could not be reached", and logged as an outage.
+    for (const method of ['GET', 'HEAD', 'DELETE']) {
+      mockFetch().fetch = vi.fn()
+      const session = makeSession({ access: 'a', refresh: 'r' })
+      const event = makeEvent({ path: '/api/_lukk/logout', method, headers: sameOrigin, session })
+
+      await expect(run(event)).resolves.toEqual({ message: 'Method not allowed.' })
+
+      expect(event.status).toBe(405)
+      expect((event as { __res?: Record<string, string> }).__res?.allow).toBe('POST')
+      expect(mockFetch().fetch).not.toHaveBeenCalled()
+      expect(session.clear).not.toHaveBeenCalled()
+    }
+  })
+
+  it('revokes the pair the replaced session holds when the sign-in ANSWERS, not the one read before it', async () => {
+    // The sign-in call is an await. A refresh in another tab rotated R0 → R1 during it; presenting R0 to
+    // end the session handed lukk a token it had already consumed.
+    const sid = `signin-reread-${Math.random()}`
+    const logouts: Array<{ bearer: string | null, refresh: unknown }> = []
+    mockFetch().fetch = vi.fn(async (url: string, init?: RequestInit) => {
+      const path = String(url).replace('https://lukk/auth', '')
+      if (path === '/refresh') return jsonRes({ access_token: 'A1', refresh_token: 'R1', expires_in: 900 })
+      if (path === '/logout') {
+        logouts.push({ bearer: new Headers(init?.headers).get('authorization'), refresh: (JSON.parse(String(init?.body)) as { refresh_token?: string }).refresh_token })
+        return new Response(null, { status: 204 })
+      }
+      // The sign-in: while it is out, the other tab's refresh lands.
+      await refreshOnce({ id: 'h3', data: { access: 'A0', refresh: 'R0', sid } }, 'https://lukk/auth')
+      return jsonRes({ access_token: 'B', refresh_token: 'RB', expires_in: 900 })
+    })
+
+    await run(makeEvent({ path: '/api/_lukk/login', method: 'POST', body: '{}', headers: sameOrigin, session: makeSession({ access: 'A0', refresh: 'R0', sid } as TokenSession) }))
+    await new Promise(resolve => setTimeout(resolve, 0)) // the background revoke
+
+    expect(logouts).toEqual([{ bearer: 'Bearer A1', refresh: 'R1' }])
   })
 })

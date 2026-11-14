@@ -5,6 +5,7 @@ import { useLukkSecret } from '../utils/secrets'
 import { confirmationHeaderName, isAuthRejection, LUKK_BFF_PREFIX, underAppBase } from '../shared'
 import { acrossTabs, dropStepUp, restoreState, settle } from '../utils/restore-state'
 import { dropLukkReloadState } from '../utils/reload-state'
+import { FOLLOW_SESSION, type FollowSession } from '../utils/sign-in'
 import { tokenSubject } from '../utils/token-subject'
 
 /**
@@ -79,8 +80,12 @@ export default defineNuxtPlugin({
         // Sending now would rotate the OLD cookie and could set it back afterwards — so wait. A sign-in
         // that started a new session means never sending at all; after a logout, the refresh goes out
         // with the cleared cookie and is simply rejected.
-        if (state.handover) {
-          await settle(state.handover)
+        // Asked again after the wait: a sign-in QUEUED behind the one this waited for publishes itself as
+        // the handover in the same tick, and this refresh then went out beside it. Each handover is waited
+        // for once — a capped wait that ran out leaves it standing — so this ends.
+        for (let waited: Promise<unknown> | null = null; state.handover && state.handover !== waited;) {
+          waited = state.handover
+          await settle(waited)
           // Stryker disable next-line StringLiteral: never surfaced — every catcher maps a SupersededRefresh to null or `superseded`; the text is for a debugger.
           if (epoch !== state.epoch) throw new SupersededRefresh('lukk: a sign-in replaced the session before this refresh was sent')
         }
@@ -300,7 +305,7 @@ export default defineNuxtPlugin({
         }
       }
 
-      await auth.fetchUser()
+      await (auth as unknown as Record<typeof FOLLOW_SESSION, FollowSession>)[FOLLOW_SESSION]()
     }
 
     return { provide: { lukk: client, lukkRefresh: safeRefresh, lukkRestore: restore } }
