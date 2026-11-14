@@ -17,9 +17,7 @@ on:
 # retarget it actually is.
 env:
   LUKK_REPO: stsepelin/lukk
-  # The 2026-11 audit pins contract changes that are on lukk's `fix/audit-2026-11` (stsepelin/lukk#47):
-  # the JWKS content type, and sessions ending when a passkey is removed. BACK TO `main` once that merges.
-  LUKK_REF: fix/audit-2026-11
+  LUKK_REF: main
 
 # These jobs run code from the PR head (the runner scripts themselves) and install a large third-party
 # supply chain — composer, pnpm, apt, and Nuxt versions resolved outside the lockfile. So: a read-only
