@@ -180,6 +180,14 @@ describe(`lukk conformance (algo=${ALGORITHM}, cookie_mode=${COOKIE_MODE}, feat=
     const pair = await fresh.loginWithPasskey(loginOptions.ceremony_id, credentialToJSON(authenticator.get(loginOptions.options)))
 
     expect(typeof pair.access_token).toBe('string')
+
+    // Removing it ends the account's OTHER sessions — the one that passkey just signed in — and keeps the
+    // one that removed it (lukk after 0.7.0). A second device must come back as a clean 401, not an error.
+    const { passkeys } = await lukk.listPasskeys()
+    await lukk.deletePasskey(passkeys.find(passkey => passkey.name === 'Conformance Key')!.id)
+
+    await expect(fresh.refreshTokens(COOKIE_MODE ? undefined : pair.refresh_token)).rejects.toMatchObject({ status: 401 })
+    await expect(lukk.refreshTokens(COOKIE_MODE ? undefined : state.refresh)).resolves.toMatchObject({ access_token: expect.any(String) })
   })
 
   // NOTE: permanently verifies unverified@example.com — the matrix runner reseeds per combo,
@@ -290,8 +298,9 @@ describe(`lukk conformance (algo=${ALGORITHM}, cookie_mode=${COOKIE_MODE}, feat=
       ['DELETE', '/auth/sessions/others', 'lukk.sessions'],
       ['POST', '/auth/confirm-password', 'lukk.account'],
       ['POST', '/auth/password', 'lukk.account'],
-      ['GET', '/auth/passkeys', 'lukk.account'],
-      ['GET', '/auth/two-factor/recovery-codes', 'lukk.account'],
+      // Mounted only with their feature on: with it off lukk answers 404, which is not a refusal.
+      ...(FEAT_PASSKEYS ? [['GET', '/auth/passkeys', 'lukk.account']] as const : []),
+      ...(FEAT_2FA ? [['GET', '/auth/two-factor/recovery-codes', 'lukk.account']] as const : []),
       // The account routes need their OWN ability: `lukk.account` does not satisfy
       // `lukk.account.delete`. Safe in this loop because the derived leg only asserts "not 403" —
       // which the step-up gate satisfies with a 423, without erasing anything.
@@ -337,8 +346,9 @@ describe(`lukk conformance (algo=${ALGORITHM}, cookie_mode=${COOKIE_MODE}, feat=
       const token = await pinnedToken('ci.deploy,lukk.sessions')
 
       expect((await fetch(`${ROOT}/auth/sessions/others`, { method: 'DELETE', ...authed(token) })).status).toBe(204)
-      // ...but only the one it asked for.
-      expect((await fetch(`${ROOT}/auth/passkeys`, authed(token))).status).toBe(403)
+      // ...but only the one it asked for. (A route every leg mounts: `/auth/passkeys` is a 404 with the
+      // feature off.)
+      expect((await fetch(`${ROOT}/auth/confirm-password`, { method: 'POST', ...authed(token) })).status).toBe(403)
     })
 
     it('never gates a pinned token out of ending or renewing its own session', async () => {
@@ -484,7 +494,10 @@ describe(`lukk conformance (algo=${ALGORITHM}, cookie_mode=${COOKIE_MODE}, feat=
   it.skipIf(ALGORITHM === 'HS256')('publishes a JWKS that independently verifies an issued access token', async () => {
     // The "separate resource server verifies via JWKS" topology: a party that never
     // holds the signing key can validate tokens from the public JWK set alone.
-    const jwks = await (await fetch(`${ROOT}/auth/jwks`)).json() as { keys: Array<Record<string, string>> }
+    const published = await fetch(`${ROOT}/auth/jwks`)
+    // RFC 7517 §8.5.1 (lukk after 0.7.0; `application/json` before).
+    expect(published.headers.get('content-type')).toMatch(/^application\/jwk-set\+json\b/)
+    const jwks = await published.json() as { keys: Array<Record<string, string>> }
     expect(jwks.keys.length).toBeGreaterThan(0)
 
     const { lukk } = client()
