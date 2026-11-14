@@ -76,6 +76,12 @@ describe('pending logout note (direct mode)', () => {
     shared.setItem('lukk:signed-in-at:/', String(Date.now() + 4_000))
     expect(signedInSince(undefined, Date.now())).toBe(false)
 
+    // One dated exactly now is not the future: a sign-in and the logout check landing in the same
+    // millisecond is the ordinary case on a fast machine, and that sign-in must still count.
+    shared.setItem('lukk:signed-in-at:/', '5000')
+    expect(signedInSince(undefined, 5_000, 5_000)).toBe(true)
+    expect(signedInSince(undefined, 5_000, 4_999)).toBe(false)
+
     // Nor is one written: a send time cannot be in the future, and a value that got in must not be
     // preserved by the next write either.
     noteSignIn(undefined, Date.now() + 60 * 60_000)
