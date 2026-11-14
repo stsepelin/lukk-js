@@ -200,6 +200,23 @@ describe('restore-state leaves nothing running behind it', () => {
 })
 
 describe('signIn and beginSession', () => {
+  it('stops asking what is pending once nothing is — a wait that never ended would lock sign-in out', async () => {
+    // A loop that keeps going with nothing to wait for runs on microtasks alone, so no test timeout can
+    // fire: bounded here, so it fails on an assertion rather than by freezing the run.
+    const add = Set.prototype.add
+    let calls = 0
+    vi.spyOn(Set.prototype, 'add').mockImplementation(function (this: Set<unknown>, value: unknown) {
+      // Only what a loop with nothing left to wait for would add: `undefined`, over and over.
+      if (value === undefined && ++calls > 50) throw new Error('still waiting after 50 rounds')
+      return add.call(this, value)
+    })
+    const app = {}
+    restoreState(app).refreshing = Promise.resolve()
+
+    await expect(signIn(app, async () => 'answered', () => false)).resolves.toMatchObject({ result: 'answered' })
+    vi.restoreAllMocks()
+  })
+
   it('releases the handover once the sign-in answered, so later refreshes do not wait on it', async () => {
     const app = {}
 

@@ -2,6 +2,7 @@ import type { ComputedRef, Ref } from 'vue'
 import { computed, useNuxtApp, useState, watch } from '#imports'
 import { CONFIRM_REQUIRED_KEY, CONFIRMED_KEY } from '../keys'
 import type { LukkModeClient } from '../shared'
+import { stepUpSession } from '../utils/restore-state'
 import { useLukkSecret } from '../utils/secrets'
 
 /**
@@ -66,8 +67,13 @@ export function useLukkConfirmation(): LukkConfirmation {
    * passkey (`useLukkPasskeys().confirm()`) or a fresh multi-factor sign-in can.
    */
   async function confirmPassword(password: string): Promise<void> {
+    // The session it is earned FOR: a logout, a sign-in or another tab's account switch while the request
+    // is out drops the step-up, and the answer arriving afterwards put it back — the previous account's
+    // confirmation token on the new account's requests, `confirmed` true for a signed-out visitor.
+    const stillThisSession = stepUpSession(nuxtApp)
     try {
-      record(await $lukk.confirmPassword(password))
+      const result = await $lukk.confirmPassword(password)
+      if (stillThisSession()) record(result)
     }
     catch (error) {
       abandonIfUnearnable(error)

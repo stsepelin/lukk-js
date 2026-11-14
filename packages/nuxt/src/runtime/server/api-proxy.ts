@@ -2,7 +2,7 @@ import { defineEventHandler, getRequestHeader, proxyRequest, setResponseStatus, 
 import { useRuntimeConfig } from '#imports'
 import { LUKK_BFF_PREFIX, LUKK_SSR_HEADER, confirmationHeaderName, isResolvableBase, isSessionCookieName, sessionCookieName, signedOutCookieName } from '../shared'
 import { accessExpired } from './access-token'
-import { hopByHopHeaders, isForeignOrigin, isForeignSubresource, pathTooLong, reachesLukk, reportProxyFailure, rejectUnresolvedTarget, requestPath, resolveTarget, SPOOFABLE_FORWARDING, viaHeader, visitorIp } from './proxy-utils'
+import { hopByHopHeaders, isForeignOrigin, isForeignSubresource, pathTooLong, reachesLukk, reportProxyFailure, rejectUnresolvedTarget, requestPath, resolveTarget, SPOOFABLE_FORWARDING, varyWithCookie, viaHeader, visitorIp } from './proxy-utils'
 import { sessionEnded, sessionKey } from './ended-sessions'
 import { logoutNoted, withholdSignedOut } from './logout-note'
 import { revokeDroppedSession } from './revoke-dropped'
@@ -316,8 +316,7 @@ export default defineEventHandler(async (event) => {
       }
       // And per visitor: `no-store` keeps it out of a conforming cache, `Vary: Cookie` out of one that
       // keys on the URL alone regardless (RFC 9111 §4.1). Added to what the upstream varies on, not over it.
-      const vary = String(ev.node.res.getHeader('vary') ?? '')
-      if (!/(?:^|,)\s*(?:cookie|\*)\s*(?:,|$)/i.test(vary)) ev.node.res.setHeader('vary', vary ? `${vary}, Cookie` : 'Cookie')
+      ev.node.res.setHeader('vary', varyWithCookie(ev.node.res.getHeader('vary')))
 
       // A trusted JSON upstream shouldn't 3xx — reject it rather than stream an empty 200 (or a
       // Location) downstream. Last, so the header hygiene above has already run.
@@ -339,6 +338,10 @@ export default defineEventHandler(async (event) => {
       const keep = await ownCookies()
       if (keep.length) event.node.res.setHeader('set-cookie', keep)
       else event.node.res.removeHeader('set-cookie')
+      // The 502 that follows may carry a re-sealed session cookie, so it is per visitor like any other
+      // answer from here (RFC 9111): `onResponse`, which says so for a response, never ran.
+      event.node.res.setHeader('cache-control', 'private, no-store')
+      event.node.res.setHeader('vary', varyWithCookie(event.node.res.getHeader('vary')))
     }
     throw error
   })

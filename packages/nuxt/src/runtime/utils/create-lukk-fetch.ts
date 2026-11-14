@@ -142,6 +142,9 @@ export function createLukkFetch(deps: LukkFetchDeps): $Fetch {
   return deps.fetchImpl.create(lukkFetchOptions(deps))
 }
 
+/** What ufo's `hasProtocol` takes for a scheme, and ofetch therefore leaves unjoined (ufo 1.6: `PROTOCOL_REGEX`). */
+const UNJOINED = /^[\s\w\0+.-]{2,}:/
+
 /**
  * Is this request staying on the API — the only place a lukk credential may go?
  *
@@ -184,7 +187,12 @@ function targetIsOurs(deps: LukkFetchDeps, url: string, baseURL: unknown): boole
   // the API's, when the API base is absolute. Ours only if the API is this app (a relative base), or the
   // page is on the API's origin; and the page's origin is known only in the browser (on the server it is
   // the request's `Host`). `loadUser` passes exactly this for a relative `user.endpoint` in direct mode.
-  if (!baseURL && !carriesOrigin(url)) {
+  //
+  // The same goes for a path ofetch will not join although it carries no origin: ufo reads more as a
+  // scheme than the URL grammar does (`user_profiles:batchGet`, `.well-known:x`), leaves such a string as
+  // it is, and the browser resolves it against the page — while `isSameOrigin` had cleared it as a
+  // relative path on the API, and the bearer went to the app's origin instead.
+  if ((!baseURL || UNJOINED.test(url)) && !carriesOrigin(url)) {
     return apiIsRelative || (!deps.isServer && known(deps.origin, deps.baseURL))
   }
   const perCallOk = perCall === undefined

@@ -520,6 +520,79 @@ describe('a response still out keeps the session\'s head, however long it takes'
     ;(a as unknown as { __close: () => void }).__close()
   })
 
+  it.each([
+    ['a sign-in that replaced it', { replaced: true }],
+    ['a logout', {}],
+  ])('withholds a slow response\'s pair for a session %s ended, after the record of that has expired', async (_, how) => {
+    // The record that a session ended lasts ten minutes; this response has no deadline. Delivering after
+    // it, with the journal and head dropped when the session ended, it found a session "unknown here" and
+    // sealed its pair: the dead session's cookie over the new one's (a false logout at the next refresh),
+    // or over the cookie a logout had cleared.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    rotations('rt3')
+    const sid = `ended-while-out-${Math.random()}`
+    const { ENDED_HEAD, forgetRefreshJournal, refreshHeads } = await import('../src/runtime/server/refresh-journal')
+
+    let answer!: () => void
+    const answered = new Promise<void>((resolve) => { answer = resolve })
+    sealed = { access: expired(), refresh: 'rt2', sid }
+    const a = event()
+    rw = sessionOn(a, sealed)
+    proxyRequest.mockImplementationOnce(async (ev: unknown, _target: string, opts: { onResponse?: (e: unknown, x: unknown) => Promise<void> }) => {
+      await answered
+      await opts.onResponse!(ev, { status: 200, type: 'basic', headers: new Headers() })
+      return {}
+    })
+    const slow = (apiProxy as unknown as (e: H3Event) => Promise<unknown>)(a)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(refreshHeads.get(sid)?.token).toBe('rt3')
+
+    await endSession(sid, how)
+    expect(refreshHeads.get(sid)?.token).toBe(ENDED_HEAD)
+    // Nothing that forgets the journal later takes the tombstone with it while the response is out.
+    forgetRefreshJournal(sid)
+    expect(refreshHeads.get(sid)?.token).toBe(ENDED_HEAD)
+
+    await vi.advanceTimersByTimeAsync(11 * 60_000)
+    answer()
+    await slow
+
+    expect(a.node.res.getHeader('set-cookie') ?? []).toEqual([])
+    // No pair matches the tombstone — not one with no refresh token, nor an empty one.
+    expect(currentPair(sid, { access: 'a' })).toBeNull()
+    expect(currentPair(sid, { access: 'a', refresh: '' })).toBeNull()
+
+    // And it goes as any head does: a hold after the last response closes.
+    ;(a as unknown as { __close: () => void }).__close()
+    expect(refreshHeads.get(sid)?.token).toBe(ENDED_HEAD)
+    await vi.advanceTimersByTimeAsync(10 * 60_000 + 1)
+    expect(refreshHeads.has(sid)).toBe(false)
+  })
+
+  it('leaves no tombstone for a session that ended with no response out, and drops one once none is', async () => {
+    const { ENDED_HEAD, forgetRefreshJournal, refreshHeads, responsesOut } = await import('../src/runtime/server/refresh-journal')
+    const quiet = `ended-quiet-${Math.random()}`
+    await endSession(quiet)
+    expect(refreshHeads.has(quiet)).toBe(false)
+
+    // The response closed without the head's own timer having run: forgetting the journal clears it.
+    const closed = `ended-closed-${Math.random()}`
+    responsesOut.set(closed, 1)
+    await endSession(closed)
+    expect(refreshHeads.get(closed)?.token).toBe(ENDED_HEAD)
+    responsesOut.delete(closed)
+    forgetRefreshJournal(closed)
+    expect(refreshHeads.has(closed)).toBe(false)
+
+    // An ordinary head is forgotten as before, a response out or not.
+    const live = `live-${Math.random()}`
+    responsesOut.set(live, 1)
+    refreshHeads.set(live, { token: 'rt9' })
+    forgetRefreshJournal(live)
+    expect(refreshHeads.has(live)).toBe(false)
+    responsesOut.delete(live)
+  })
+
   it('lets the head go once no response is out — the hold after the last one', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
     rotations('rt3')

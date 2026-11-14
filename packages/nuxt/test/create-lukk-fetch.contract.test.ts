@@ -290,3 +290,43 @@ describe('the SSR instance\'s headers, as the browser\'s ofetch instance merges 
     expect(inherited.server['x-tenant']).toBe('a')
   })
 })
+
+describe('a path ofetch leaves unjoined although it names no origin (the 2026-11 audit)', () => {
+  // ufo reads more as a scheme than the URL grammar does. `user_profiles:batchGet` is a relative path to
+  // `isSameOrigin` — cleared for the bearer — and a "protocol" to ufo, so ofetch does not join the API base
+  // and the browser resolves it against the page: the bearer went to the app's origin, not the API's.
+  const unjoined = ['user_profiles:batchGet', '_x:y', '.well-known:x', 'a b:c', '9lives:x', '+plus:x', '-dash:x']
+
+  it('gets no credentials when the API is another origin (direct mode)', async () => {
+    for (const path of unjoined) {
+      const { api, seen } = drive()
+
+      await api(path)
+
+      expect(seen[0]!.url, path).toBe(path) // not joined: it goes wherever the page is
+      expect(seen[0]!.headers.get('authorization'), path).toBeNull()
+      expect(seen[0]!.credentials, path).not.toBe('include')
+    }
+  })
+
+  it('still gets them when the page IS the API\'s origin, or the API is this app\'s own mount', async () => {
+    const onApi = drive({ origin: 'https://api.example.com' })
+    await onApi.api('user_profiles:batchGet')
+    expect(onApi.seen[0]!.headers.get('authorization')).toBe('Bearer SECRET')
+
+    const mount = drive({ baseURL: '/api' })
+    await mount.api('user_profiles:batchGet')
+    expect(mount.seen[0]!.headers.get('authorization')).toBe('Bearer SECRET')
+  })
+
+  it('leaves an ordinary path alone — one character before a colon is no scheme to ufo either', async () => {
+    for (const [path, url] of [['users/1', 'https://api.example.com/users/1'], ['_:x', 'https://api.example.com/_:x'], ['/v1/items:batch', 'https://api.example.com/v1/items:batch']] as const) {
+      const { api, seen } = drive()
+
+      await api(path)
+
+      expect(seen[0]!.url).toBe(url)
+      expect(seen[0]!.headers.get('authorization')).toBe('Bearer SECRET')
+    }
+  })
+})

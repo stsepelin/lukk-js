@@ -363,6 +363,18 @@ describe('useLukkAuth', () => {
       expect(user.value).toEqual({ data: { id: 3 } })
     })
 
+    it('disables unwrapping with `false`, not with a key of its own', async () => {
+      // An empty `user.key` must reach `shapeUser` as `false`. Any other value is a key to unwrap by —
+      // `true` reads as the property named "true".
+      vi.spyOn(console, 'warn').mockImplementation(() => {})
+      withApp({})
+      __test.runtimeConfig.public.lukk.userKey = ''
+      api.mockResolvedValueOnce({ true: { id: 4 } })
+      const { user, fetchUser } = useLukkAuth()
+      await fetchUser()
+      expect(user.value).toEqual({ true: { id: 4 } })
+    })
+
     it('logs out on an explicit `{ data: null }` (no-user) response', async () => {
       withApp({})
       api.mockResolvedValueOnce({ data: null })

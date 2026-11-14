@@ -1592,3 +1592,217 @@ describe('a logout the session switched accounts under', () => {
     expect(access()).toBeNull()
   })
 })
+
+describe('the 2026-11 audit', () => {
+  const jwtFor = (sub: string) => `h.${Buffer.from(JSON.stringify({ sub })).toString('base64url')}.s`
+
+  class Channel {
+    static instances: Channel[] = []
+    onmessage: ((event: MessageEvent) => void) | null = null
+    constructor(public name: string) { Channel.instances.push(this) }
+    postMessage() {}
+    close() {}
+  }
+  const otherTabSays = async () => {
+    Channel.instances.at(-1)!.onmessage!({ data: 'changed' } as MessageEvent)
+    await macrotask()
+    await macrotask()
+  }
+  beforeEach(() => {
+    Channel.instances = []
+    vi.stubGlobal('window', { BroadcastChannel: Channel })
+  })
+
+  describe('another tab changed the session and the user cannot be reloaded', () => {
+    it.each(['bff', 'direct'] as const)('%s: does not go on showing the previous account — it is "couldn\'t tell", and a retry recovers', async (mode) => {
+      // Kept on screen, this tab showed A while the cookie (and in direct mode the token) was B's: every
+      // request ran as B under A's name, and nothing asked again until a reload.
+      wire.client.refreshTokens = vi.fn(async () => pairFor('B'))
+      boot(mode)
+      const auth = useLukkAuth()
+      auth.user.value = { id: 'A' }
+      api.mockRejectedValueOnce({ status: 503, message: 'down' })
+
+      await otherTabSays()
+
+      expect(auth.user.value).toBeNull()
+      expect(auth.loggedIn.value).toBe(false)
+      expect(auth.restoreFailed.value).toBe(true)
+      expect(restoreState(__test.nuxtApp).subject).toBeUndefined()
+      // Nothing that holds the session was dropped: the retry finds it.
+      if (mode === 'direct') expect(access()).toBe('B')
+      api.mockResolvedValue({ id: 'B' })
+      await auth.initSession()
+      expect(auth.user.value).toEqual({ id: 'B' })
+      expect(auth.restoreFailed.value).toBe(false)
+    })
+
+    it('shows the new account when it can be loaded, and signed out when the endpoint says so', async () => {
+      boot('bff')
+      const auth = useLukkAuth()
+      auth.user.value = { id: 'A' }
+
+      api.mockResolvedValueOnce({ id: 'B' })
+      await otherTabSays()
+      expect(auth.user.value).toEqual({ id: 'B' })
+      expect(auth.restoreFailed.value).toBe(false)
+
+      api.mockRejectedValueOnce({ status: 401, message: 'Unauthenticated.' })
+      await otherTabSays()
+      expect(auth.user.value).toBeNull()
+      expect(auth.restoreFailed.value).toBe(false)
+    })
+
+    it('leaves it to the newer change when the session moved again while the user was loading', async () => {
+      boot('bff')
+      const auth = useLukkAuth()
+      auth.user.value = { id: 'A' }
+      const first = deferred<never>()
+      api.mockReturnValueOnce(first.promise).mockResolvedValueOnce({ id: 'C' })
+
+      await otherTabSays() // its load is out
+      await otherTabSays() // a second change: loads C
+      first.reject({ status: 503, message: 'down' })
+      await macrotask()
+
+      expect(auth.user.value).toEqual({ id: 'C' })
+      expect(auth.restoreFailed.value).toBe(false)
+    })
+  })
+
+  describe('a step-up that answers after the session changed', () => {
+    const confirmed = () => useState<boolean>(CONFIRMED_KEY, () => false).value
+
+    it.each([
+      ['a logout', async () => { await useLukkAuth().logout() }],
+      ['a sign-in', async () => { await useLukkAuth().login({ email: 'b', password: 'p' }) }],
+      ['another tab changing the session', otherTabSays],
+    ])('is not recorded after %s', async (_, change) => {
+      // A's confirmation token on B's requests; `confirmed` true for a signed-out visitor.
+      const { useLukkConfirmation } = await import('../src/runtime/composables/useLukkConfirmation')
+      const answer = deferred<{ confirmation_token: string }>()
+      wire.client.confirmPassword = vi.fn(() => answer.promise)
+      userEndpoint()
+      boot()
+      wire.hooks!.onTokens(pairFor('A'))
+
+      const confirming = useLukkConfirmation().confirmPassword('secret')
+      await change()
+      answer.resolve({ confirmation_token: 'CONF-A' })
+      await confirming
+
+      expect(confirmed()).toBe(false)
+      expect(useLukkSecret('confirmation').value).toBeNull()
+    })
+
+    it('is not recorded after a renewal came back as another account — which moves no generation', async () => {
+      // Direct mode, no other tab to announce it: this tab's own refresh finds the cookie is B's now.
+      const { useLukkConfirmation } = await import('../src/runtime/composables/useLukkConfirmation')
+      const answer = deferred<{ confirmation_token: string }>()
+      wire.client.confirmPassword = vi.fn(() => answer.promise)
+      userEndpoint()
+      boot()
+      const auth = useLukkAuth()
+      wire.hooks!.onTokens(pairFor(jwtFor('A')))
+      auth.user.value = { id: 'A' }
+      restoreState(__test.nuxtApp).subject = 'A'
+      const before = restoreState(__test.nuxtApp).epoch
+
+      const confirming = useLukkConfirmation().confirmPassword('secret')
+      wire.client.refreshTokens = vi.fn(async () => pairFor(jwtFor('B')))
+      await (__test.nuxtApp as { $lukkRefresh: () => Promise<unknown> }).$lukkRefresh()
+      await macrotask()
+      expect(restoreState(__test.nuxtApp).epoch).toBe(before)
+      answer.resolve({ confirmation_token: 'CONF-A' })
+      await confirming
+
+      expect(confirmed()).toBe(false)
+      expect(useLukkSecret('confirmation').value).toBeNull()
+    })
+
+    it('is recorded when the session did not change, however slow', async () => {
+      const { useLukkConfirmation } = await import('../src/runtime/composables/useLukkConfirmation')
+      const answer = deferred<{ confirmation_token: string }>()
+      wire.client.confirmPassword = vi.fn(() => answer.promise)
+      boot()
+
+      const confirming = useLukkConfirmation().confirmPassword('secret')
+      await macrotask()
+      answer.resolve({ confirmation_token: 'CONF-A' })
+      await confirming
+
+      expect(confirmed()).toBe(true)
+      expect(useLukkSecret('confirmation').value).toBe('CONF-A')
+    })
+
+    it('a passkey step-up follows the same rule, both ways', async () => {
+      vi.stubGlobal('navigator', { credentials: { get: vi.fn(async () => ({ id: 'credential' })) } })
+      wire.client.passkeyConfirmationOptions = vi.fn(async () => ({ ceremony_id: 'cer', options: {} }))
+      userEndpoint()
+      boot()
+
+      const late = deferred<{ confirmation_token: string }>()
+      wire.client.confirmPasskey = vi.fn(() => late.promise)
+      const confirming = useLukkPasskeys().confirm()
+      await macrotask()
+      await useLukkAuth().logout()
+      late.resolve({ confirmation_token: 'CONF-A' })
+      await confirming
+      expect(confirmed()).toBe(false)
+      expect(useLukkSecret('confirmation').value).toBeNull()
+
+      wire.client.confirmPasskey = vi.fn(async () => ({ confirmation_token: 'CONF-B' }))
+      await useLukkPasskeys().confirm()
+      expect(confirmed()).toBe(true)
+      expect(useLukkSecret('confirmation').value).toBe('CONF-B')
+    })
+  })
+
+  describe('a refresh that waited on a failed sign-in, with another sign-in queued behind it', () => {
+    it('never goes out beside that sign-in', async () => {
+      // login#1 is out; login#2 queues behind it; a 401 starts a refresh, which waits on login#1. login#1
+      // fails, so the generation does not move — and both waiters resumed in the same tick: the refresh
+      // (carrying the old cookie) and login#2 went out together, and the refresh's cookie could land last.
+      const first = deferred<never>()
+      const second = deferred<{ access_token: string, expires_in: number }>()
+      let loginOut = false
+      let refreshOut = false
+      let together = false
+      wire.client.login = vi.fn()
+        .mockImplementationOnce(() => first.promise)
+        .mockImplementationOnce(async () => {
+          loginOut = true
+          together ||= refreshOut
+          try { return await second.promise }
+          finally { loginOut = false }
+        })
+      wire.client.refreshTokens = vi.fn(async () => {
+        refreshOut = true
+        together ||= loginOut
+        await macrotask()
+        refreshOut = false
+        return pairFor('A')
+      })
+      userEndpoint()
+      boot()
+      const auth = useLukkAuth()
+
+      const one = auth.login({ email: 'a', password: 'wrong' }).catch(() => 'failed')
+      await macrotask()
+      const two = auth.login({ email: 'b', password: 'p' })
+      await macrotask()
+      const refreshing = (__test.nuxtApp as { $lukkRefresh: () => Promise<unknown> }).$lukkRefresh()
+      await macrotask()
+
+      first.reject({ status: 422, message: 'These credentials do not match our records.' })
+      for (let i = 0; i < 6; i++) await macrotask()
+      wire.hooks!.onTokens(pairFor('B'))
+      second.resolve(pairFor('B'))
+      await Promise.all([one, two, refreshing])
+
+      expect(wire.client.login).toHaveBeenCalledTimes(2)
+      expect(together).toBe(false)
+      expect(access()).toBe('B')
+    })
+  })
+})

@@ -10,7 +10,7 @@ export interface LukkTwoFactor {
   enable: () => Promise<TwoFactorEnrollment>
   /** Activate 2FA by confirming the first TOTP code. Rejects `409` (on `code`) when two-factor is already on. */
   confirm: (code: string) => Promise<void>
-  /** Turn 2FA off. */
+  /** Turn 2FA off. Removing a confirmed factor also signs the account out everywhere else (lukk after 0.7.0). */
   disable: () => Promise<void>
   /** How many recovery codes remain — a safe count, never the codes. */
   recoveryCodeCount: () => Promise<RecoveryCodeCount>

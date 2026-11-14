@@ -38,7 +38,30 @@ export const refreshJournals: Map<string, Map<string, Link>> = ((globalThis as {
  * seal a pair; if the session has moved past it, the links that led on may be gone, and only this says so.
  * Kept `REFRESH_HOLD_MS` past the latest rotation, hand-out or response, and while any is out (`holdHead`).
  */
-export const refreshHeads: Map<string, { token: string, timer: ReturnType<typeof setTimeout> }> = ((globalThis as { __lukkRefreshHeads?: Map<string, { token: string, timer: ReturnType<typeof setTimeout> }> }).__lukkRefreshHeads ??= new Map())
+export const refreshHeads: Map<string, Head> = ((globalThis as { __lukkRefreshHeads?: Map<string, Head> }).__lukkRefreshHeads ??= new Map())
+
+/** A session's head. The timer is absent on a tombstone, which lasts while a response is out (`entombHead`). */
+interface Head { token: string, timer?: ReturnType<typeof setTimeout> }
+
+/**
+ * The head of a session that has ENDED — a logout, or a sign-in that replaced it — while a response that
+ * may still seal a pair for it was out. No refresh token lukk mints equals it (they are hex), so
+ * `currentPair` answers "the session has moved past this pair" and the cookie is withheld.
+ */
+export const ENDED_HEAD = '\u0000ended'
+
+/**
+ * Leave that tombstone, if a response is out for the session.
+ *
+ * The record that a session ended lasts ten minutes; an app-API response has no deadline. One that had
+ * rotated before the session ended and delivered after the record expired found neither a journal nor a
+ * head — which reads as "a session unknown here, seal the pair" — and wrote the ended session's dead
+ * cookie back: over the new session's after a sign-in (a false logout at the next refresh), or over the
+ * cleared one after a logout. It goes as any head does, a hold after the last response closes.
+ */
+export function entombHead(key: string): void {
+  if (responsesOut.has(key)) refreshHeads.set(key, { token: ENDED_HEAD })
+}
 
 /**
  * Per session id: how many responses are out that may still seal a pair for it (`holdHead`). While any is,
@@ -58,8 +81,11 @@ export const confirmationsHeld: Map<string, { token: string, timer: ReturnType<t
 
 /** Drop a session's journal, its head and its held confirmation, and every timer they hold. */
 export function forgetRefreshJournal(key: string): void {
-  clearTimeout(refreshHeads.get(key)?.timer)
-  refreshHeads.delete(key)
+  // Not an ended session's tombstone while a response is still out for it: it is all that says so.
+  if (refreshHeads.get(key)?.token !== ENDED_HEAD || !responsesOut.has(key)) {
+    clearTimeout(refreshHeads.get(key)?.timer)
+    refreshHeads.delete(key)
+  }
   clearTimeout(confirmationsHeld.get(key)?.timer)
   confirmationsHeld.delete(key)
   const journal = refreshJournals.get(key)

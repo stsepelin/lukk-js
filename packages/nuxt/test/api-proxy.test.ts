@@ -729,6 +729,19 @@ describe('app-API proxy', () => {
         expect(e.node.res.getHeader('set-cookie')).toEqual(['theme=dark; Path=/'])
       })
 
+      it('marks the error response per visitor: it may carry a re-sealed session cookie', async () => {
+        // `onResponse` never ran, so nothing had said `no-store` or `Vary: Cookie` for the 502 (RFC 9111).
+        vi.spyOn(console, 'error').mockImplementation(() => {})
+        const e = ev({ path: '/api/me' })
+        e.node.res.setHeader('vary', 'Origin')
+        unreachable(() => {})
+
+        await expect(run(e)).rejects.toThrow('fetch failed')
+
+        expect(e.node.res.getHeader('cache-control')).toBe('private, no-store')
+        expect(e.node.res.getHeader('vary')).toBe('Origin, Cookie')
+      })
+
       it('does not settle the cookies twice when the body fails after the headers went out', async () => {
         vi.spyOn(console, 'error').mockImplementation(() => {})
         sessionData = { access: expiredJwt(), refresh: 'r', sid: 'session-B' }

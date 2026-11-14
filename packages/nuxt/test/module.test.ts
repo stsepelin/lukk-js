@@ -679,10 +679,56 @@ describe('lukk-nuxt module — what it registers, and when it speaks up', () => 
   it.each([
     'http://localhost:8000', 'http://app.localhost', 'http://127.0.0.1:8000', 'http://127.9.9.9', 'http://[::1]:8000', 'http://0.0.0.0:8000',
   ])('warns that a production build points at this machine: %s', (base) => {
-    expect(says(warnings({ baseURL: base, mode: 'bff', session: { password } }), 'in a production build')).toBe(true)
+    expect(says(warnings({ baseURL: base, mode: 'bff', session: { password } }), 'a dev value may have leaked')).toBe(true)
   })
 
   it.each(['https://api.example.com', 'http://localhost.example.com', 'http://10.127.0.1', '/auth'])('does not call %s this machine', (base) => {
-    expect(says(warnings({ baseURL: base, mode: 'direct' }), 'in a production build')).toBe(false)
+    expect(says(warnings({ baseURL: base, mode: 'direct' }), 'a dev value may have leaked')).toBe(false)
+  })
+
+  it('refuses a mode that is neither bff nor direct, by name', () => {
+    // `'BFF'` matched neither branch anywhere: no proxy, no secret check, no error.
+    for (const mode of ['BFF', 'Direct', '', 'ssr', undefined]) {
+      expect(() => setup({ baseURL: 'https://api/auth', mode, session: { password } })).toThrow(`[lukk-nuxt] \`mode\` must be 'bff' or 'direct' (got ${JSON.stringify(mode)}).`)
+    }
+    expect(() => setup({ baseURL: 'https://api/auth', mode: 'bff', session: { password } })).not.toThrow()
+    expect(() => setup({ baseURL: 'https://api/auth', mode: 'direct' })).not.toThrow()
+  })
+
+  it('judges the session secret the app will actually run with — one set through runtimeConfig included', () => {
+    const short = { runtimeConfig: { public: {}, lukk: { sessionPassword: 'short' } } }
+    expect(() => setup({ baseURL: 'https://api/auth', mode: 'bff' }, short)).toThrow('the session secret is too short')
+    // The environment wins at runtime, so it is what is judged when both are set: a placeholder in the
+    // config beside a real secret in the environment is not a short secret.
+    vi.stubEnv('NUXT_LUKK_SESSION_PASSWORD', password)
+    expect(() => setup({ baseURL: 'https://api/auth', mode: 'bff' }, short)).not.toThrow()
+    vi.stubEnv('NUXT_LUKK_SESSION_PASSWORD', 'short-too')
+    expect(() => setup({ baseURL: 'https://api/auth', mode: 'bff' }, { runtimeConfig: { public: {}, lukk: { sessionPassword: password } } })).toThrow('the session secret is too short')
+    vi.unstubAllEnvs()
+    // …and a good one set there needs no warning that a secret is missing.
+    expect(says(warnings({ baseURL: 'https://api/auth', mode: 'bff' }, { runtimeConfig: { public: {}, lukk: { sessionPassword: password } } }), 'needs a session secret')).toBe(false)
+  })
+
+  it.each([
+    ['bff', { baseURL: 'http://lukk.internal/auth' }, '`baseURL` is plain http (http://lukk.internal)'],
+    ['direct', { baseURL: 'http://api.example.com/auth' }, '`baseURL` is plain http (http://api.example.com)'],
+    ['bff', { baseURL: 'https://lukk/auth', api: { path: '/api', target: 'http://api.internal' } }, '`api.target` is plain http (http://api.internal)'],
+    ['bff', { baseURL: 'HTTP://lukk.internal/auth' }, '`baseURL` is plain http'],
+  ])('warns that credentials travel in cleartext in a production %s build: %o', (mode, options, message) => {
+    expect(says(warnings({ ...options, mode, session: { password } }), `${message}`)).toBe(true)
+    expect(says(warnings({ ...options, mode, session: { password } }), 'credentials and tokens travel unencrypted')).toBe(true)
+  })
+
+  it('says nothing about cleartext for https, this machine, a relative base, a dev server or `nuxt prepare`', () => {
+    const cleartext = (options: Record<string, unknown>, nuxtOptions: Record<string, unknown> = {}) =>
+      says(warnings({ mode: 'bff', session: { password }, ...options }, nuxtOptions), 'is plain http')
+    expect(cleartext({ baseURL: 'https://lukk.internal/auth' })).toBe(false)
+    expect(cleartext({ baseURL: 'http://localhost:8000/auth' })).toBe(false)
+    expect(cleartext({ baseURL: 'https://lukk/auth', api: { path: '/api', target: 'https://api.internal' } })).toBe(false)
+    expect(cleartext({ baseURL: '/auth', mode: 'direct' })).toBe(false)
+    // The scheme, not the text: `http://` later in an https URL is a path.
+    expect(cleartext({ baseURL: 'https://lukk.internal/auth/http://x' })).toBe(false)
+    expect(cleartext({ baseURL: 'http://lukk.internal/auth' }, { dev: true })).toBe(false)
+    expect(cleartext({ baseURL: 'http://lukk.internal/auth' }, { _prepare: true })).toBe(false)
   })
 })

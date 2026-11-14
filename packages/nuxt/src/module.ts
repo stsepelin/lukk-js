@@ -349,7 +349,7 @@ export default defineNuxtModule<ModuleOptions>({
     // directly and defu gives that precedence, so checking only the module option would bless a
     // value the app never uses. (A runtime `NUXT_*` env override still lands after the build;
     // the proxies report that one honestly at request time.)
-    const serverLukk = nuxt.options.runtimeConfig.lukk as { baseURL: string, apiTarget: string, sessionMaxAge: unknown }
+    const serverLukk = nuxt.options.runtimeConfig.lukk as { baseURL: string, apiTarget: string, sessionMaxAge: unknown, sessionPassword?: string }
     const publicLukk = nuxt.options.runtimeConfig.public.lukk as { baseURL: string, apiBaseURL: string }
     // Direct mode's base is browser-resolved (the public copy); BFF's is server-fetched.
     const isDirect = options.mode === 'direct'
@@ -361,6 +361,21 @@ export default defineNuxtModule<ModuleOptions>({
     const fail = (message: string): void => {
       if (nuxt.options._prepare) return console.error(message)
       throw new Error(message)
+    }
+
+    // Plain http to a host that is not this machine, in a production build: passwords, refresh tokens and
+    // the bearer cross the network in cleartext — and in direct mode lukk's `__Host-` refresh cookie
+    // cannot be set at all. A warning, not an error: an internal mesh that encrypts below HTTP is real.
+    const warnIfCleartext = (url: string, option: string): void => {
+      if (nuxt.options.dev || nuxt.options._prepare || !/^http:\/\//i.test(url) || isLoopback(url)) return
+      console.warn(`[lukk-nuxt] ${option} is plain http (${originOf(url)}) in a production build — credentials and tokens travel unencrypted. Use https, or ignore this if the network between the two encrypts the traffic itself.`)
+    }
+
+    // Every check below, and every handler registered above, is gated on one of the two modes. Any other
+    // value — `'BFF'`, a typo — matched neither: no proxy, no secret check, no error, and an app whose
+    // sign-in simply did not work.
+    if (options.mode !== 'bff' && options.mode !== 'direct') {
+      fail(`[lukk-nuxt] \`mode\` must be 'bff' or 'direct' (got ${JSON.stringify(options.mode)}).`)
     }
 
     // An empty or non-token value becomes a computed header key that `Headers.set` rejects, 502ing
@@ -379,7 +394,10 @@ export default defineNuxtModule<ModuleOptions>({
 
     // BFF mode seals tokens with this secret; fail loudly at build, not per-request.
     if (options.mode === 'bff') {
-      const password = options.session.password || process.env.NUXT_LUKK_SESSION_PASSWORD || ''
+      // The EFFECTIVE secret, like every other check here. The environment first, as at runtime, where
+      // `NUXT_LUKK_SESSION_PASSWORD` overrides the config value; then the merged config, where a
+      // consumer's own `runtimeConfig.lukk.sessionPassword` wins — a short one set there was never judged.
+      const password = process.env.NUXT_LUKK_SESSION_PASSWORD || serverLukk.sessionPassword || ''
 
       if (!password) {
         console.warn('[lukk-nuxt] BFF mode needs a session secret (≥ 32 chars) — set `session.password` or NUXT_LUKK_SESSION_PASSWORD.')
@@ -414,6 +432,7 @@ export default defineNuxtModule<ModuleOptions>({
       if (!nuxt.options.dev && !nuxt.options._prepare && isLoopback(effectiveBase)) {
         console.warn(`[lukk-nuxt] \`baseURL\` points at ${originOf(effectiveBase)} in a production build — a dev value may have leaked into this deploy.`)
       }
+      warnIfCleartext(effectiveBase, '`baseURL`')
     }
 
     // BFF fetches `api.target` server-side through the same `resolveTarget` path as `baseURL`, so
@@ -423,6 +442,7 @@ export default defineNuxtModule<ModuleOptions>({
     if (effectiveTarget && (isDirect || apiPath)) {
       const error = baseError(effectiveTarget, '`api.target`', isDirect)
       if (error) fail(error)
+      warnIfCleartext(effectiveTarget, '`api.target`')
     }
 
     // `apiBaseURL` is what `useLukkFetch` scopes the bearer against (`isSameOrigin`), and it's

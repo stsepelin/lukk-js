@@ -75,13 +75,37 @@ export type LukkClient = ReturnType<typeof createLukkClient>
 export function createLukkClient(hooks: LukkClientHooks) {
   const doFetch = hooks.fetch ?? globalThis.fetch
   const confirmHeader = hooks.confirmationHeader ?? 'X-Lukk-Confirmation'
-  // Single-flight the refresh so a burst of 401s triggers exactly one refresh.
-  const refreshOnce = hooks.refresh ? singleFlight(hooks.refresh) : null
+  // Single-flight the refresh so a burst of 401s triggers exactly one refresh — and ONE call to the
+  // binding's hooks. They ran once per waiting request: five requests behind one failed refresh called
+  // `onUnauthenticated` five times, which for a binding that navigates or notifies is five of those.
+  async function renew(): Promise<RefreshOutcome> {
+    let pair: RefreshOutcome
+    // A throwing refresh hook means "not refreshable" — honor the documented contract.
+    try { pair = await hooks.refresh!() }
+    // Stryker disable next-line BlockStatement: emptying this catch leaves `pair` undefined instead
+    // of null, and `isTokenPair` rejects both identically — no input can distinguish the two.
+    catch { pair = null }
+    // Gated on the shape, like every other sink (`commit`). The refresh path checked only for
+    // truthiness, so any 2xx body from /refresh reached the binding's storage hook unvalidated —
+    // and a binding that persists the whole object would store attacker-shaped data.
+    if (isTokenPair(pair)) {
+      await hooks.onTokens?.(pair)
+      return pair
+    }
+    // Renewed where this client can't see — nothing to store.
+    if (pair === REFRESHED_WITHOUT_TOKEN) return pair
+    await hooks.onUnauthenticated?.()
+    return null
+  }
+  const refreshOnce = hooks.refresh ? singleFlight(renew) : null
 
-  async function request<T>(path: string, init: RequestInit = {}, allowRetry = true): Promise<T> {
+  async function request<T>(path: string, init: RequestInit = {}, allowRetry = true, late = false): Promise<T> {
     const headers = new Headers(init.headers)
     headers.set('Accept', 'application/json')
-    if (init.body != null && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
+    // Only for a string body, which is what every call here sends (`JSON.stringify`). A `FormData` or
+    // `URLSearchParams` body names its own type — and for multipart, the boundary — when none is set;
+    // forcing JSON over it sent a multipart body the server could not split.
+    if (typeof init.body === 'string' && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
 
     // Only attach credentials to a same-origin-as-baseURL target — never leak the
     // bearer / confirmation token (or cookies) to an absolute, cross-origin URL.
@@ -111,25 +135,27 @@ export function createLukkClient(hooks: LukkClientHooks) {
     // Only where credentials went: a foreign target's 401 says nothing about this session, and renewing for it
     // spent a rotation, re-sent the body to that host, and on a failed renewal cleared the live token.
     if (res.status === 401 && allowRetry && refreshOnce && sameOrigin) {
-      let pair: RefreshOutcome
-      // A throwing refresh hook means "not refreshable" — honor the documented contract.
-      try { pair = await refreshOnce() }
-      // Stryker disable next-line BlockStatement: emptying this catch leaves `pair` undefined instead
-      // of null, and `isTokenPair` rejects both identically — no input can distinguish the two.
-      catch { pair = null }
-      // Gated on the shape, like every other sink (`commit`). The refresh path checked only for
-      // truthiness, so any 2xx body from /refresh reached the binding's storage hook unvalidated —
-      // and a binding that persists the whole object would store attacker-shaped data.
+      // Already renewed while this request was out: an earlier request's 401 got there first. Spending a
+      // second rotation for a token that is already fresh bought nothing and cost a refresh-throttle slot
+      // per straggler on a slow network. Same rule as below if the new token is another account's.
+      //
+      // Once: if that token is refused as well (a request that outlived an access-token lifetime), the
+      // retry renews as any request would — `late` only stops it taking this shortcut a second time.
+      const current = late ? undefined : await hooks.getAccessToken?.()
+      if (current && current !== sentAs) {
+        if (switchedAccount(sentAs, current)) throw sessionChanged()
+        return request<T>(path, init, true, true)
+      }
+
+      const pair = await refreshOnce()
       if (isTokenPair(pair)) {
-        await hooks.onTokens?.(pair)
         // Renewed as ANOTHER account — another tab signed in, and the shared refresh cookie is theirs now:
         // a request composed for the previous one is not replayed as this one (a transfer, a delete).
         if (switchedAccount(sentAs, pair.access_token)) throw sessionChanged()
         return request<T>(path, init, false) // retry once with the new token
       }
-      // Renewed where this client can't see — nothing to store, and the retry carries what it always did.
+      // Renewed where this client can't see — the retry carries what it always did.
       if (pair === REFRESHED_WITHOUT_TOKEN) return request<T>(path, init, false)
-      await hooks.onUnauthenticated?.()
     }
 
     if (!res.ok) throw await toLukkError(res)
@@ -159,7 +185,8 @@ export function createLukkClient(hooks: LukkClientHooks) {
     /** Body mode passes the refresh token; cookie mode (including lukk-nuxt's direct mode) omits it and relies on lukk's cookie. */
     refreshTokens: (refresh_token?: string) => request<TokenPair>('/refresh', json(refresh_token ? { refresh_token } : {}), false),
     /** Silently restore a session on app load (returns null when there's no valid refresh). */
-    restore: () => request<TokenPair>('/refresh', json({}), false).then(commit).catch(() => null as TokenPair | null),
+    // Null for a 2xx that is not a pair, too: `{}` handed back as a `TokenPair` read as signed in.
+    restore: () => request<TokenPair>('/refresh', json({}), false).then(pair => isTokenPair(pair) ? commit(pair) : null).catch(() => null as TokenPair | null),
     /**
      * End the session. `retry: false` skips the refresh-and-retry on a 401, for a binding that renews
      * the token itself: one that holds refreshes back while a logout is on the wire would otherwise
@@ -244,6 +271,8 @@ export function createLukkClient(hooks: LukkClientHooks) {
     // --- 2FA management (behind step-up) ---
     enableTwoFactor: () => request<TwoFactorEnrollment>('/two-factor', { method: 'POST' }),
     confirmTwoFactor: (code: string) => request<void>('/two-factor/confirm', json({ code })),
+    /** Turn two-factor off. When a confirmed factor was removed, lukk (after 0.7.0) also ends the account's
+     *  OTHER sessions; this one survives. */
     disableTwoFactor: () => request<void>('/two-factor', { method: 'DELETE' }),
     recoveryCodeCount: () => request<RecoveryCodeCount>('/two-factor/recovery-codes'),
     regenerateRecoveryCodes: () => request<{ recovery_codes: string[] }>('/two-factor/recovery-codes', { method: 'POST' }),
@@ -258,6 +287,8 @@ export function createLukkClient(hooks: LukkClientHooks) {
      */
     loginWithPasskey: (ceremony_id: string, credential: unknown) => request<LoginResult>('/passkeys/login', json({ ceremony_id, credential }), false).then(commit),
     listPasskeys: () => request<{ passkeys: PasskeySummary[] }>('/passkeys'),
+    /** Remove a passkey. lukk (after 0.7.0) also ends the account's OTHER sessions when one was removed;
+     *  this one survives. */
     deletePasskey: (id: string) => request<void>(`/passkeys/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   }
 }
@@ -266,10 +297,18 @@ export function createLukkClient(hooks: LukkClientHooks) {
 function joinURL(base: string, path: string): string {
   if (/^https?:\/\//i.test(path)) return path
 
-  // Strip EVERY leading slash and backslash, not one. With an empty or `/` base, leaving a second
-  // one produced a protocol-relative URL — `//evil.com/x` — which resolves to a foreign origin
-  // while `isSameOrigin` had already classified it as relative and attached credentials.
-  return `${base.replace(/\/$/, '')}/${path.replace(/^[/\\]+/, '')}`
+  // Strip EVERY leading slash, not one. With an empty or `/` base, leaving a second one produced a
+  // protocol-relative URL — `//evil.com/x` — which resolves to a foreign origin while `isSameOrigin`
+  // had already classified it as relative and attached credentials.
+  //
+  // And strip them from the string the guard JUDGED (`canonical`), not the raw one: `\t/evil.com`
+  // starts with a tab, so nothing was stripped, the join made `/\t/evil.com`, and the URL parser then
+  // removed the tab — `//evil.com`, with the bearer and the confirmation token attached.
+  //
+  // Only the PATH's backslashes, though: the parser reads `\` as `/` there and nowhere else, and turning
+  // the ones in a query or fragment into slashes too changed a request (`?path=C:\dir`) that was fine.
+  const [, pathname, rest] = /([^?#]*)(.*)/s.exec(withoutControls(path))!
+  return `${base.replace(/\/$/, '')}/${pathname!.replace(/\\/g, '/').replace(/^\/+/, '')}${rest}`
 }
 
 /**
@@ -288,12 +327,16 @@ function joinURL(base: string, path: string): string {
  * it survives to the same-origin test.
  */
 function canonical(path: string): string {
+  return withoutControls(path).replace(/\\/g, '/')
+}
+
+/** Transformations 1 and 2 above: what the parser removes, wherever a `\` then ends up meaning. */
+function withoutControls(path: string): string {
   return path
     // eslint-disable-next-line no-control-regex -- removing exactly what the URL parser removes
     .replace(/[\u0009\u000A\u000D]/g, '')
     // eslint-disable-next-line no-control-regex -- C0 controls are exactly what the parser strips
     .replace(/^[\u0000-\u0020]+/, '')
-    .replace(/\\/g, '/')
 }
 
 /** Does this string carry its own origin — a scheme, or a protocol-relative `//host`? */
@@ -379,11 +422,21 @@ export function lukkError(status: number, statusText: string, body: { message?: 
   const b = body ?? {}
   return {
     status,
-    message: b.message ?? statusText,
-    ...(b.errors ? { errors: b.errors } : {}),
+    // A string, and never empty: the body is whatever a server sent (this shapes app-API errors too), and
+    // HTTP/2 has no reason phrase to fall back on.
+    message: typeof b.message === 'string' && b.message !== '' ? b.message : statusText || `HTTP ${status}`,
+    ...(isErrorBag(b.errors) ? { errors: b.errors } : {}),
     // lukk's machine-readable cause, where it names one (a 423 `confirmation_session_mismatch`).
     ...(typeof b.reason === 'string' ? { reason: b.reason } : {}),
   }
+}
+
+/**
+ * Laravel's validation bag — or any other object a server puts under `errors` (a JSON:API or GraphQL
+ * array), which is passed on as it came rather than lost. A string or a number is not one.
+ */
+function isErrorBag(errors: unknown): errors is Record<string, string[]> {
+  return typeof errors === 'object' && errors !== null
 }
 
 async function toLukkError(res: Response): Promise<LukkError> {
@@ -401,5 +454,6 @@ async function toLukkError(res: Response): Promise<LukkError> {
  * rather than guessed at. Exported so lukk-nuxt's app-API errors carry it the same way.
  */
 export function retryAfterSeconds(value: string | null): number | undefined {
-  return value && /^\d+$/.test(value) ? Number(value) : undefined
+  // At most nine digits: more is decades, and enough of them is `Infinity`.
+  return value && /^\d{1,9}$/.test(value) ? Number(value) : undefined
 }

@@ -21,7 +21,7 @@
  * Deliberately NOT under `server/utils`, so it is not auto-imported into the app.
  */
 
-import { forgetRefreshJournal } from './refresh-journal'
+import { entombHead, forgetRefreshJournal } from './refresh-journal'
 
 /** Longer than any request that could still be carrying a replaced session. */
 export const ENDED_SESSION_TTL_MS = 10 * 60_000
@@ -74,6 +74,8 @@ export function markSessionEnded(key: string | undefined, now = Date.now()): voi
   // Its rotation journal would otherwise outlive this record: the old cookie, coming back once the record
   // has expired, adopted and re-sealed a session that was logged out or replaced.
   forgetRefreshJournal(key)
+  // …and a response still out for it must not write it back either, however long it takes.
+  entombHead(key)
 }
 
 export function isSessionEnded(key: string | undefined, now = Date.now()): boolean {

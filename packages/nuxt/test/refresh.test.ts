@@ -464,6 +464,28 @@ describe('a rotation that lands after every caller gave up', () => {
     await expect(refreshOnce({ id: 'h3', data: { refresh: 'old-rt', sid } }, base)).resolves.toEqual({ pair: null, retryable: false })
   })
 
+  it('leaves a tombstone for a session another instance ended, when a response is out for it here', async () => {
+    // The shared store answers asynchronously, after the rotation was recorded and the head armed. Only
+    // forgotten, a response still out here found a session "unknown" once its record had expired, and
+    // sealed the dead session's pair.
+    const { ENDED_HEAD } = await import('../src/runtime/server/refresh-journal')
+    const out = `shared-out-${Math.random()}`
+    const quiet = `shared-quiet-${Math.random()}`
+    useSharedEndedSessions({ mark: async () => {}, has: async key => key === out || key === quiet })
+    responsesOut.set(out, 1)
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({ access_token: 'at', refresh_token: 'rt-new', expires_in: 900 }), { status: 200 }))
+
+    await refreshOnce({ id: 'h3', data: { refresh: 'rt-old', sid: out } }, base)
+    await refreshOnce({ id: 'h3', data: { refresh: 'rt-old', sid: quiet } }, base)
+    await new Promise(resolve => setTimeout(resolve, 0)) // the shared store's answer
+
+    expect(refreshHeads.get(out)?.token).toBe(ENDED_HEAD)
+    expect(refreshJournals.has(out)).toBe(false)
+    expect(refreshHeads.has(quiet)).toBe(false)
+    responsesOut.delete(out)
+    refreshHeads.delete(out)
+  })
+
   it('lets an older outcome\'s expiry leave a newer one for the same session alone', async () => {
     const sid = `twice-${Math.random()}`
     const fetchSpy = await lateRotation(sid) // held from 20 s, until 10 min 20 s
@@ -1416,5 +1438,19 @@ describe('holdHead — the head outlives every response that may still seal a pa
     holdHead(response().event, 'over-2')
     expect(responsesOut.has('over-2')).toBe(false)
     expect(warn).toHaveBeenCalledOnce()
+  })
+})
+
+describe('refreshOnce on a 2xx that is not a token pair', () => {
+  it('keeps the session and seals nothing, whatever the body — lukk does not answer like that', async () => {
+    // `{}` and an `access_token` that is not a string sealed a session with no access token and journalled a
+    // link to nothing; `null` threw out of every caller sharing the flight.
+    for (const body of ['{}', '[]', '"x"', 'null', '{"access_token":null,"refresh_token":"r2"}', '{"access_token":5}']) {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(body, { status: 200 }))
+      const sid = `not-a-pair-${Math.random()}`
+
+      await expect(refreshOnce({ id: 'h3', data: { refresh: 'rt', sid } }, 'https://lukk/auth')).resolves.toEqual({ pair: null, retryable: true })
+      expect(refreshJournals.has(sid)).toBe(false)
+    }
   })
 })

@@ -1,9 +1,9 @@
 import type { H3Event } from 'h3'
-import { isTokenPair } from 'lukk-core'
-import { defineEventHandler, deleteCookie, getCookie, getRequestHeader, readRawBody, setResponseHeader, setResponseStatus, useSession } from 'h3'
+import { isTokenPair, retryAfterSeconds } from 'lukk-core'
+import { defineEventHandler, deleteCookie, getCookie, getRequestHeader, getResponseHeader, readRawBody, setResponseHeader, setResponseStatus, useSession } from 'h3'
 import { useRuntimeConfig } from '#imports'
 import { LUKK_BFF_PREFIX, LUKK_SSR_HEADER, confirmationHeaderName, logoutCookieName, sessionCookieName, signedOutCookieName } from '../shared'
-import { fetchUpstream, isForeignOrigin, isForeignSubresource, pathTooLong, rejectUnresolvedTarget, reportProxyFailure, requestPath, resolveTarget, routeWithin, unroutable, viaHeader, visitorIp } from './proxy-utils'
+import { fetchUpstream, isForeignOrigin, isForeignSubresource, pathTooLong, rejectUnresolvedTarget, reportProxyFailure, requestPath, resolveTarget, routeWithin, unroutable, varyWithCookie, viaHeader, visitorIp } from './proxy-utils'
 import { endSession, newSessionId, sessionEnded, sessionKey, sessionReplaced, withholdSessionCookie } from './ended-sessions'
 import { revokeDroppedSession } from './revoke-dropped'
 import { readSealedSessionWithId, sessionCookie, sessionSeal } from './sealed-session'
@@ -120,7 +120,7 @@ export default defineEventHandler(async (event) => {
   // shared cache assign heuristic freshness (RFC 9111 §4.2.2) and key on the path alone. Set once,
   // for every path through this handler, matching what the app-API proxy already does.
   setResponseHeader(event, 'cache-control', 'private, no-store')
-  setResponseHeader(event, 'vary', 'cookie')
+  setResponseHeader(event, 'vary', varyWithCookie(getResponseHeader(event, 'vary')))
 
   const clientIp = visitorIp(event, clientIpHeader)
   // The option mirrors lukk's own `confirm.header`, so a rename has to reach lukk too — hardcoding
@@ -140,6 +140,14 @@ export default defineEventHandler(async (event) => {
   // with it even when the access token has expired and a refresh is throttled or failing — and without
   // spending a rotation first. Older releases ignore the field and use the bearer, as before.
   const endsSession = route === '/logout'
+  // POST only, like `/refresh`: a logout changes state (RFC 9110 §9.2.1). A GET reached lukk with the
+  // logout's body attached, which `fetch` refuses for that method — answered 502 "lukk could not be
+  // reached", and logged as an outage.
+  if (endsSession && method !== 'POST') {
+    setResponseStatus(event, 405)
+    setResponseHeader(event, 'allow', 'POST')
+    return { message: 'Method not allowed.' }
+  }
   // The session's current tokens, should a rotation the browser never received have spent the cookie's (see
   // `headPair`): what a logout presents, and what a replacing sign-in revokes.
   const current = headPair(key, sealed)
@@ -342,8 +350,11 @@ export default defineEventHandler(async (event) => {
     // again — but it stayed live on lukk until it expired, and if this response never reaches the
     // browser (a dropped connection, an aborted fetch), the browser kept using it for as long.
     if (sealed.access || sealed.refresh) {
+      // Read again, here: the sign-in call was an await, and a refresh in another tab may have rotated the
+      // session meanwhile. Revoking the pair read before it presented a token lukk had already consumed.
+      const replaced = headPair(key, sealed)
       await endSession(sessionKey(s), { replaced: true })
-      revokeDroppedSession(event, current, baseURL, clientIp)
+      revokeDroppedSession(event, replaced, baseURL, clientIp)
     }
     // `confirmation: undefined` too: a fresh token pair means a new SESSION, and a step-up earned by
     // the previous one must not carry over. Before confirmations were bound to the earning session
@@ -415,6 +426,11 @@ export default defineEventHandler(async (event) => {
   }
 
   setResponseStatus(event, res.status)
+  // The one upstream header relayed: how long a throttle (429) or a timed lockout (423) asks the client
+  // to wait (RFC 9110 §10.2.3). Dropped, `LukkError.retryAfter` was never set in BFF mode while direct
+  // mode had it. Delay-seconds only, and only as the number it parses to.
+  const retryAfter = retryAfterSeconds(res.headers.get('retry-after'))
+  if (retryAfter !== undefined) setResponseHeader(event, 'retry-after', retryAfter)
 
   // Fail CLOSED on the sensitive keys. The captures above are allow-list gated (`isTokenPair`
   // needs a string `access_token`), so a body that ALMOST matches — `{"access_token": null,

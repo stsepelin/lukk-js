@@ -9,6 +9,7 @@ vi.mock('h3', () => ({
   setCookie: (event: { cookiesSet: { name: string, value: string, options: unknown }[] }, name: string, value: string, options: unknown) => { event.cookiesSet.push({ name, value, options }) },
   appendResponseHeader: (event: { appended: [string, string][] }, name: string, value: string) => { event.appended.push([name, value]) },
   setResponseHeader: (event: { set: Record<string, string> }, name: string, value: string) => { event.set[name] = value },
+  getResponseHeader: (event: { set: Record<string, string> }, name: string) => event.set[name],
   // A seal named `sid:<x>` unseals to that sid; anything else doesn't unseal.
   unsealSession: async (_event: unknown, _config: unknown, sealed: string) => {
     if (!sealed.startsWith('sid:')) throw new Error('bad seal')
@@ -58,7 +59,7 @@ function cleared(status: number, over = status < 300): Response {
 }
 
 const run = (event: ReturnType<typeof makeEvent>) => (handler as unknown as (e: unknown) => Promise<void>)(event)
-const perUser = { 'cache-control': 'no-store', 'vary': 'cookie' }
+const perUser = { 'cache-control': 'no-store', 'vary': 'Cookie' }
 
 beforeEach(() => {
   __test.runtimeConfig.lukk = { sessionPassword: 'p'.repeat(32) } as unknown as Record<string, unknown>
@@ -74,6 +75,13 @@ describe('finish-logout middleware (BFF)', () => {
     expect(event.fetch).not.toHaveBeenCalled()
     expect(event.set).toEqual({})
     expect(event.deleted).toEqual([])
+  })
+
+  it('adds Cookie to a Vary set earlier in the request, rather than replacing it', async () => {
+    const event = makeEvent({ cookies: { '__Host-lukk-logout': '1' } })
+    event.set.vary = 'Accept-Language'
+    await run(event)
+    expect(event.set.vary).toBe('Accept-Language, Cookie')
   })
 
   it('leaves the proxy\'s own calls alone — the browser finishing the logout, or signing in', async () => {

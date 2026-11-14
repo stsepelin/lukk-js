@@ -6,7 +6,7 @@ vi.mock('h3', () => ({
 }))
 
 // eslint-disable-next-line import/first
-import { fetchUpstream, hopByHopHeaders, isForeignOrigin, isForeignSubresource, MAX_PATH_LENGTH, pathTooLong, reachesLukk, rejectUnresolvedTarget, reportProxyFailure, requestPath, resolveTarget, routeWithin, SPOOFABLE_FORWARDING, unroutable, viaHeader, visitorIp } from '../src/runtime/server/proxy-utils'
+import { fetchUpstream, hopByHopHeaders, isForeignOrigin, isForeignSubresource, MAX_PATH_LENGTH, pathTooLong, reachesLukk, rejectUnresolvedTarget, reportProxyFailure, requestPath, resolveTarget, routeWithin, SPOOFABLE_FORWARDING, unroutable, varyWithCookie, viaHeader, visitorIp } from '../src/runtime/server/proxy-utils'
 
 const ev = () => ({ status: 200 } as { status: number })
 
@@ -935,5 +935,29 @@ describe('fetchUpstream', () => {
     await expect(fetchUpstream('https://lukk.test/auth/logout', { method: 'POST' }, res => res.text())).resolves.toBe('{"ok":true}')
 
     expect(vi.getTimerCount()).toBe(0)
+  })
+})
+
+describe('the 2026-11 audit: Connection options and Vary', () => {
+  it('ignores a Connection option that cannot be a header name, and keeps the ones that can', () => {
+    // `Connection: a b` names no field. Handed on as one it made the forwarding `Headers` throw: an
+    // unhandled 500 with a stack in the log, for a request anyone can send.
+    const blanked = hopByHopHeaders({ headers: { connection: 'a b, (, x-ok, , X_Fine.1~, é' } } as never)
+
+    expect(Object.keys(blanked)).toContain('x-ok')
+    expect(Object.keys(blanked)).toContain('x_fine.1~')
+    for (const name of ['a b', '(', '', 'é']) expect(Object.keys(blanked)).not.toContain(name)
+    expect(() => new Headers(blanked)).not.toThrow()
+  })
+
+  it('adds Cookie to what a response already varies on, never over it', () => {
+    expect(varyWithCookie(undefined)).toBe('Cookie')
+    expect(varyWithCookie('')).toBe('Cookie')
+    expect(varyWithCookie('Origin, Accept-Language')).toBe('Origin, Accept-Language, Cookie')
+    expect(varyWithCookie('Origin, cookie')).toBe('Origin, cookie')
+    expect(varyWithCookie('Cookie , Origin')).toBe('Cookie , Origin')
+    expect(varyWithCookie('*')).toBe('*')
+    expect(varyWithCookie('Cookie2')).toBe('Cookie2, Cookie')
+    expect(varyWithCookie(['Origin', 'Accept'])).toBe('Origin,Accept, Cookie')
   })
 })
