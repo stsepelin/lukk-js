@@ -1071,3 +1071,61 @@ describe('the 2026-11 audit: a late 401 retried with the renewed token', () => {
     ])
   })
 })
+
+describe('the 2026-11 audit: hooks that make requests of their own', () => {
+  it('does not hang when onTokens loads the user and that request needs a renewal too', async () => {
+    // Awaited inside the refresh single-flight, `onTokens` waited on a request whose 401 joined that same
+    // flight — which was waiting for `onTokens` to return. Neither ever settled.
+    let token = 'old'
+    let renewals = 0
+    const fetch = vi.fn(async (url: string, init?: RequestInit) => {
+      const bearer = (init!.headers as Headers).get('Authorization')
+      // The profile is refused once with the first renewed token, then served.
+      if (String(url).endsWith('/profile')) return bearer === 'Bearer t2' ? json({ name: 'Ada' }) : json({ message: 'Unauthenticated.' }, 401)
+      return bearer === 'Bearer old' ? json({ message: 'Unauthenticated.' }, 401) : json({ ok: true })
+    })
+    const profiles: unknown[] = []
+    const client = createLukkClient({
+      baseURL: 'https://x/auth',
+      fetch,
+      getAccessToken: () => token,
+      refresh: async () => ({ access_token: `t${++renewals}`, expires_in: 900 }),
+      onTokens: async (pair) => {
+        token = pair.access_token
+        if (pair.access_token === 't1') profiles.push(await client.request('/profile'))
+      },
+    })
+
+    const outcome = await Promise.race([
+      client.request('/me'),
+      new Promise(resolve => setTimeout(() => resolve('hung'), 500)),
+    ])
+
+    expect(outcome).toEqual({ ok: true })
+    expect(profiles).toEqual([{ name: 'Ada' }])
+    expect(renewals).toBe(2)
+  })
+
+  it('still tells the binding once per renewal, and every waiter after it was told', async () => {
+    let token = 'old'
+    const order: string[] = []
+    const fetch = vi.fn(async (_url: string, init?: RequestInit) =>
+      (init!.headers as Headers).get('Authorization') === 'Bearer new' ? json({ ok: true }) : json({ message: 'Unauthenticated.' }, 401))
+    const client = createLukkClient({
+      baseURL: 'https://x/auth',
+      fetch,
+      getAccessToken: () => token,
+      refresh: async () => ({ access_token: 'new', expires_in: 900 }),
+      onTokens: async (pair) => {
+        await new Promise(resolve => setTimeout(resolve, 5))
+        token = pair.access_token
+        order.push('told')
+      },
+    })
+
+    await Promise.all([1, 2, 3].map(n => client.request(`/r${n}`).then(() => order.push(`done ${n}`))))
+
+    expect(order.filter(entry => entry === 'told')).toHaveLength(1)
+    expect(order[0]).toBe('told')
+  })
+})

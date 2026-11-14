@@ -70,6 +70,9 @@ export function isTokenPair(value: unknown): value is TokenPair {
     && typeof (value as TokenPair).access_token === 'string'
 }
 
+/** One renewal's outcome, and the call that told the binding about it (`told`). */
+interface Renewal { pair: RefreshOutcome, told?: Promise<void> }
+
 export type LukkClient = ReturnType<typeof createLukkClient>
 
 export function createLukkClient(hooks: LukkClientHooks) {
@@ -78,26 +81,35 @@ export function createLukkClient(hooks: LukkClientHooks) {
   // Single-flight the refresh so a burst of 401s triggers exactly one refresh — and ONE call to the
   // binding's hooks. They ran once per waiting request: five requests behind one failed refresh called
   // `onUnauthenticated` five times, which for a binding that navigates or notifies is five of those.
-  async function renew(): Promise<RefreshOutcome> {
+  async function renew(): Promise<Renewal> {
     let pair: RefreshOutcome
     // A throwing refresh hook means "not refreshable" — honor the documented contract.
     try { pair = await hooks.refresh!() }
     // Stryker disable next-line BlockStatement: emptying this catch leaves `pair` undefined instead
     // of null, and `isTokenPair` rejects both identically — no input can distinguish the two.
     catch { pair = null }
-    // Gated on the shape, like every other sink (`commit`). The refresh path checked only for
-    // truthiness, so any 2xx body from /refresh reached the binding's storage hook unvalidated —
-    // and a binding that persists the whole object would store attacker-shaped data.
-    if (isTokenPair(pair)) {
-      await hooks.onTokens?.(pair)
-      return pair
-    }
-    // Renewed where this client can't see — nothing to store.
-    if (pair === REFRESHED_WITHOUT_TOKEN) return pair
-    await hooks.onUnauthenticated?.()
-    return null
+    return { pair }
   }
   const refreshOnce = hooks.refresh ? singleFlight(renew) : null
+
+  /**
+   * Tell the binding what a renewal came to — once per renewal, whoever asks first; the others wait on
+   * the same call.
+   *
+   * AFTER the flight has settled, never inside it. An `onTokens` that stores the token and then loads
+   * the user makes a request of its own, and a 401 on that one would join a flight still waiting for
+   * `onTokens` to return: each waiting on the other, for good.
+   */
+  function told(renewal: Renewal): Promise<void> {
+    return renewal.told ??= (async () => {
+      // Gated on the shape, like every other sink (`commit`). The refresh path checked only for
+      // truthiness, so any 2xx body from /refresh reached the binding's storage hook unvalidated —
+      // and a binding that persists the whole object would store attacker-shaped data.
+      if (isTokenPair(renewal.pair)) await hooks.onTokens?.(renewal.pair)
+      // Renewed where this client can't see — nothing to store, and nothing ended.
+      else if (renewal.pair !== REFRESHED_WITHOUT_TOKEN) await hooks.onUnauthenticated?.()
+    })()
+  }
 
   async function request<T>(path: string, init: RequestInit = {}, allowRetry = true, late = false): Promise<T> {
     const headers = new Headers(init.headers)
@@ -147,7 +159,9 @@ export function createLukkClient(hooks: LukkClientHooks) {
         return request<T>(path, init, true, true)
       }
 
-      const pair = await refreshOnce()
+      const renewal = await refreshOnce()
+      await told(renewal)
+      const { pair } = renewal
       if (isTokenPair(pair)) {
         // Renewed as ANOTHER account — another tab signed in, and the shared refresh cookie is theirs now:
         // a request composed for the previous one is not replayed as this one (a transfer, a delete).

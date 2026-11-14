@@ -48,6 +48,7 @@ interface Head { token: string, timer?: ReturnType<typeof setTimeout> }
  * may still seal a pair for it was out. No refresh token lukk mints equals it (they are hex), so
  * `currentPair` answers "the session has moved past this pair" and the cookie is withheld.
  */
+// Stryker disable next-line StringLiteral: equivalent — the value is only ever compared with itself (`entombed`), so any string that is no refresh token does; the empty one Stryker tries is none either (lukk never issues an empty refresh token, and `armHead` is only called with one it issued).
 export const ENDED_HEAD = '\u0000ended'
 
 /**
@@ -59,6 +60,11 @@ export const ENDED_HEAD = '\u0000ended'
  * cookie back: over the new session's after a sign-in (a false logout at the next refresh), or over the
  * cleared one after a logout. It goes as any head does, a hold after the last response closes.
  */
+/** Did session `key` end while a response was out for it — is its head the tombstone? */
+export function entombed(key: string | undefined): boolean {
+  return refreshHeads.get(key!)?.token === ENDED_HEAD
+}
+
 export function entombHead(key: string): void {
   if (responsesOut.has(key)) refreshHeads.set(key, { token: ENDED_HEAD })
 }
@@ -82,7 +88,7 @@ export const confirmationsHeld: Map<string, { token: string, timer: ReturnType<t
 /** Drop a session's journal, its head and its held confirmation, and every timer they hold. */
 export function forgetRefreshJournal(key: string): void {
   // Not an ended session's tombstone while a response is still out for it: it is all that says so.
-  if (refreshHeads.get(key)?.token !== ENDED_HEAD || !responsesOut.has(key)) {
+  if (!entombed(key) || !responsesOut.has(key)) {
     clearTimeout(refreshHeads.get(key)?.timer)
     refreshHeads.delete(key)
   }

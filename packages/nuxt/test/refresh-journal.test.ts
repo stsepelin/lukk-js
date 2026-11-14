@@ -64,6 +64,16 @@ async function lateRotation(sid: string) {
   return fetchSpy
 }
 
+/**
+ * Fake the clock as well as the timers. Real timers first: `beforeEach` has already faked the timers
+ * alone, and a second `useFakeTimers` on top of that left `Date` real — so every "ten minutes later" in
+ * this file moved the timers and not the time.
+ */
+function fakeClock(): void {
+  vi.useRealTimers()
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+}
+
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
   __test.runtimeConfig.lukk = { apiPath: '/api', apiTarget: 'https://app.test', apiForceJson: true, baseURL: 'https://lukk.test/auth', sessionPassword: 'p'.repeat(32) } as unknown as Record<string, unknown>
@@ -331,7 +341,7 @@ describe('a rotation nobody received, adopted by the next request', () => {
     // t0 R (an app-API long-poll, a slow upload) rotates T0 → T1 and waits on its upstream; the browser still
     // holds T0. Counted from the landing, the link was gone at 30 s, and the browser's next T0 refresh at 40 s
     // replayed it past lukk's grace window: revoked. It lasts until R's cookie leaves, then thirty seconds.
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    fakeClock()
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({ access_token: 'a1', refresh_token: 't1', expires_in: 900 }), { status: 200 }))
     const sid = `slow-upstream-${Math.random()}`
     sealed = { access: expired(), refresh: 't0', sid }
@@ -360,7 +370,7 @@ describe('a rotation nobody received, adopted by the next request', () => {
     // The re-seal's cookie is queued before the proxy fetch; an unreachable upstream rejects before
     // `onResponse`, and the 502 carries that cookie anyway. Left held, an old T0 cookie adopted the live
     // pair for ten minutes.
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    fakeClock()
     vi.spyOn(console, 'error').mockImplementation(() => {})
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({ access_token: 'a1', refresh_token: 't1', expires_in: 900 }), { status: 200 }))
     const sid = `unreachable-${Math.random()}`
@@ -410,7 +420,7 @@ describe('a rotation nobody received, adopted by the next request', () => {
     ['the socket destroyed', (r: H3Event) => { (r.node.req as { socket?: unknown }).socket = { destroyed: true } }, true],
     ['delivered (the control)', () => {}, false],
   ])('leaves the link held only when the browser went away before the upstream answered (%s)', async (_, goAway, held) => {
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    fakeClock()
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({ access_token: 'a1', refresh_token: 't1', expires_in: 900 }), { status: 200 }))
     const sid = `aborted-${Math.random()}`
     sealed = { access: expired(), refresh: 't0', sid }
@@ -439,7 +449,7 @@ describe('a rotation nobody received, adopted by the next request', () => {
   ])('leaves a render\'s rotation held when the page never reaches the browser (%s)', async (_, goAway, held) => {
     // A navigation away while the page renders: its cookie never arrives, so its link must not start the
     // 30 s window that a delivered one does.
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    fakeClock()
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({ access_token: 'a1', refresh_token: 't1', expires_in: 900 }), { status: 200 }))
     const sid = `ssr-gone-${Math.random()}`
     sealed = { access: expired(), refresh: 't0', sid }
@@ -488,7 +498,7 @@ describe('a response still out keeps the session\'s head, however long it takes'
     ['six minutes', 6 * 60_000],
     ['two hours', 2 * 60 * 60_000],
   ])('withholds a slow response\'s pair the session moved past %s ago — the exact timeline', async (_, after) => {
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    fakeClock()
     rotations('rt3', 'rt4')
     const sid = `slow-head-${Math.random()}`
 
@@ -528,7 +538,7 @@ describe('a response still out keeps the session\'s head, however long it takes'
     // it, with the journal and head dropped when the session ended, it found a session "unknown here" and
     // sealed its pair: the dead session's cookie over the new one's (a false logout at the next refresh),
     // or over the cookie a logout had cleared.
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    fakeClock()
     rotations('rt3')
     const sid = `ended-while-out-${Math.random()}`
     const { ENDED_HEAD, forgetRefreshJournal, refreshHeads } = await import('../src/runtime/server/refresh-journal')
@@ -569,6 +579,54 @@ describe('a response still out keeps the session\'s head, however long it takes'
     expect(refreshHeads.has(sid)).toBe(false)
   })
 
+  it('keeps the tombstone when a refresh for the ended session lands after the record of its end expired', async () => {
+    // A slow app-API response and a refresh are both out when the session ends. The refresh's answer
+    // arrives after the ten-minute record has gone: recorded then, it armed a live head over the tombstone,
+    // and the slow response sealed the ended session's pair after all.
+    fakeClock()
+    const { ENDED_HEAD, refreshHeads, refreshJournals } = await import('../src/runtime/server/refresh-journal')
+    const sid = `ended-late-refresh-${Math.random()}`
+    let land!: (response: Response) => void
+    vi.spyOn(globalThis, 'fetch')
+      .mockImplementationOnce(async () => new Response(JSON.stringify({ access_token: 'a-rt3', refresh_token: 'rt3', expires_in: 900 }), { status: 200 }))
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => { land = resolve }))
+
+    let answer!: () => void
+    const answered = new Promise<void>((resolve) => { answer = resolve })
+    sealed = { access: expired(), refresh: 'rt2', sid }
+    const a = event()
+    rw = sessionOn(a, sealed)
+    proxyRequest.mockImplementationOnce(async (ev: unknown, _target: string, opts: { onResponse?: (e: unknown, x: unknown) => Promise<void> }) => {
+      await answered
+      await opts.onResponse!(ev, { status: 200, type: 'basic', headers: new Headers() })
+      return {}
+    })
+    const slow = (apiProxy as unknown as (e: H3Event) => Promise<unknown>)(a)
+    await vi.advanceTimersByTimeAsync(0)
+
+    // Another request renews rt3; lukk is slow to answer it.
+    const late = refreshOnce({ id: 'h3', data: { refresh: 'rt3', sid } }, 'https://lukk.test/auth')
+    await vi.advanceTimersByTimeAsync(0)
+    await endSession(sid, { replaced: true })
+    await vi.advanceTimersByTimeAsync(11 * 60_000)
+
+    land(new Response(JSON.stringify({ access_token: 'a-rt4', refresh_token: 'rt4', expires_in: 900 }), { status: 200 }))
+    await late
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(refreshHeads.get(sid)?.token).toBe(ENDED_HEAD)
+    expect(refreshJournals.has(sid)).toBe(false)
+
+    answer()
+    await slow
+    expect(a.node.res.getHeader('set-cookie') ?? []).toEqual([])
+    // And nothing is current for it, even should a journal exist beside the tombstone.
+    refreshJournals.set(sid, new Map([['rt3', { pair: { access: 'x', refresh: 'rt4' }, mintedAt: 0, taken: false, expiresAt: 0, timer: setTimeout(() => {}, 0) }]]))
+    expect(currentPair(sid, { access: 'a-rt3', refresh: 'rt3' })).toBeNull()
+    refreshJournals.delete(sid)
+    ;(a as unknown as { __close: () => void }).__close()
+  })
+
   it('leaves no tombstone for a session that ended with no response out, and drops one once none is', async () => {
     const { ENDED_HEAD, forgetRefreshJournal, refreshHeads, responsesOut } = await import('../src/runtime/server/refresh-journal')
     const quiet = `ended-quiet-${Math.random()}`
@@ -594,7 +652,7 @@ describe('a response still out keeps the session\'s head, however long it takes'
   })
 
   it('lets the head go once no response is out — the hold after the last one', async () => {
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    fakeClock()
     rotations('rt3')
     const sid = `head-released-${Math.random()}`
     expect(await quick(sid, 'rt2')).toEqual(['__Host-lukk-session=rt3'])
@@ -605,7 +663,7 @@ describe('a response still out keeps the session\'s head, however long it takes'
   })
 
   it('holds the head for a render that renews, until its page has left', async () => {
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    fakeClock()
     rotations('rt1')
     const sid = `render-held-${Math.random()}`
     sealed = { access: expired(), refresh: 'rt0', sid }

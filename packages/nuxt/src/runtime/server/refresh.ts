@@ -1,7 +1,7 @@
 import type { H3Event } from 'h3'
 import { isTokenPair } from 'lukk-core'
 import { isSessionEnded, sessionEnded, sessionKey } from './ended-sessions'
-import { confirmationsHeld, entombHead, forgetRefreshJournal, type Link, refreshHeads, refreshJournals, responsesOut } from './refresh-journal'
+import { confirmationsHeld, entombed, entombHead, forgetRefreshJournal, type Link, refreshHeads, refreshJournals, responsesOut } from './refresh-journal'
 import { jwtExpiry } from './access-token'
 import { reportUnusableBase, resolveTarget, UPSTREAM_TIMEOUT_MS } from './proxy-utils'
 
@@ -241,6 +241,8 @@ function chainFrom(journal: Map<string, Link>, token: string): [string, Link][] 
  * window close while the browser still held the consumed token, and its next refresh was revoked.
  */
 export function currentPair(id: string | undefined, pair: TokenSession): TokenSession | null {
+  // The session ended while this response was out: nothing is current, whatever a journal might say.
+  if (entombed(id)) return null
   const journal = refreshJournals.get(id!)
   const head = refreshHeads.get(id!)
   const newest = journal?.has(pair.refresh!)
@@ -504,7 +506,10 @@ function fly(id: string, token: string, baseURL: string, clientIp: string): Flig
   // Registered after the countdown above, so it runs before any caller is handed the result.
   settled.then((result) => {
     if (result.pair) {
-      if (!isSessionEnded(id)) record(id, token, result, flight)
+      // Nor for one whose tombstone still stands: the record that it ended lasts ten minutes, and a
+      // rotation that lands after that would otherwise arm a live head over it — and the response the
+      // tombstone is there for would seal the ended session's pair after all.
+      if (!isSessionEnded(id) && !entombed(id)) record(id, token, result, flight)
     }
     else if (!result.retryable) {
       forgetRefreshJournal(id)
