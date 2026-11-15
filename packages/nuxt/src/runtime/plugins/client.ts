@@ -30,6 +30,15 @@ function isReplacedSession(error: unknown): boolean {
 }
 
 /**
+ * For work this plugin starts and does not wait on (a resync, another tab's announcement). Each of those
+ * handles its own failures — a 401, an outage, a superseded answer — so a rejection reaching here is a
+ * defect elsewhere, and the one thing it must not become is an unhandled rejection in the visitor's page.
+ * Nothing the suite can make reject, hence the hint: v8 counts a function that is never called.
+ */
+/* v8 ignore next -- @preserve */
+const unreported = (): void => {}
+
+/**
  * Provides `$lukk` — the core client, wired for the configured transport.
  *  - direct: hits lukk directly (refresh via the `__Host-refresh` cookie).
  *  - bff:    hits our same-origin Nitro proxy (which holds the tokens).
@@ -196,14 +205,14 @@ export default defineNuxtPlugin({
     const safeRefresh = () => refresh()
       .then((pair) => {
         // Stryker disable next-line ConditionalExpression: the mutation run compiles the client, where this is `true` already; the server half is pinned in test/server-env/client-plugin.test.ts.
-        if (import.meta.client) void resyncUser(pair).catch(() => {})
+        if (import.meta.client) void resyncUser(pair).catch(unreported)
         return pair
       })
       .catch((error: unknown) => {
         // The BFF refused to renew a session another tab has since replaced or ended. This tab is
         // still showing that session; reload the user so it shows what the browser now holds instead
         // of the previous account.
-        if (import.meta.client && isReplacedSession(error)) void useLukkAuth().fetchUser().catch(() => {})
+        if (import.meta.client && isReplacedSession(error)) void useLukkAuth().fetchUser().catch(unreported)
         return null
       })
 
@@ -269,7 +278,7 @@ export default defineNuxtPlugin({
       if (typeof window.BroadcastChannel === 'function') {
         const channel = new window.BroadcastChannel(`lukk:session:${scope}`)
         state.announce = () => channel.postMessage('changed')
-        channel.onmessage = () => { void followOtherTab().catch(() => {}) }
+        channel.onmessage = () => { void followOtherTab().catch(unreported) }
         // Closed with the app (HMR, a micro-frontend): left open it kept answering other tabs for the life
         // of the page, and announcing on it after `close()` would throw. `onUnmount` is Vue 3.5+.
         const vueApp = (nuxtApp as { vueApp?: { onUnmount?: (fn: () => void) => void } }).vueApp

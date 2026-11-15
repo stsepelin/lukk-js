@@ -171,6 +171,7 @@ export function useLukkConfirmation(): LukkConfirmation {
           return
         }
         // Stryker disable next-line ConditionalExpression: equivalent — `confirmed` is cleared before this watcher starts and it stops the moment `confirmed` turns true, so while it is alive the only change it can see with `ok` false is `required` going false.
+        /* v8 ignore else -- @preserve */
         if (!req) { stop(); reject(stepUp.unearnable ?? new Error('lukk: confirmation cancelled')) }
       })
     })

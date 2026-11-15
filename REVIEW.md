@@ -122,7 +122,7 @@ Also run conformance against a real lukk (see `conformance/README.md`) whenever 
 | `.php` paths naming lukk's last base segment are refused, and so is any path naming more than four scripts. | — | That is the price of a linear front-controller check. `/api/oauth/callback.php` with base `/auth` is a known false refusal. |
 | A rewrite into a front controller **without** `.php` in the URL is not caught. | — | No path check can see it. It is documented as a limitation. |
 | The 2FA challenge token is not held server-side in BFF mode. | — | A recorded trade-off. |
-| h3 2 and `@nuxt/module-builder` 1 are held, as are the vitest and TypeScript majors. | — | Nuxt runs on h3 v1. module-builder 1 changes the published types. vitest 5 breaks the Stryker gate. TS 7 has no compiler API. |
+| h3 2, `@nuxt/module-builder` 1 and the TypeScript major are held. | — | Nuxt runs on h3 v1. module-builder 1 changes the published types. TS 7 has no compiler API. |
 
 ## 7. Recurring defect classes (2026-08 → 2026-10 audits)
 

@@ -574,6 +574,7 @@ export function useLukkAuth(): LukkAuth {
     const isServer = import.meta.server === true
 
     // Stryker disable next-line ConditionalExpression: every test build defines `import.meta.dev` as true, and none compiles the production half — a development-only warning, whose regression would be console noise. Deliberately unpinned.
+    /* v8 ignore else -- @preserve */
     if (import.meta.dev) {
       if (isPrematureWait(ready.value, isServer, state.started)) {
         console.warn('[lukk-nuxt] whenReady() was called before the session-restore plugin started. Awaiting it in a plugin\'s setup can deadlock app startup — move that plugin to a `.client.ts` file with `dependsOn: [\'lukk:session-restore\']`. Depending on `lukk:client` is not enough.')

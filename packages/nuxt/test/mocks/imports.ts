@@ -29,8 +29,8 @@ export function ssrPayload(): Record<string, unknown> {
   return Object.fromEntries([...states].map(([key, value]) => [key, toRaw(value.value)]))
 }
 
-export function useState<T>(key: string, init: () => T): Ref<T> {
-  if (!states.has(key)) states.set(key, ref(init()) as Ref<unknown>)
+export function useState<T>(key: string, init?: () => T): Ref<T> {
+  if (!states.has(key)) states.set(key, ref(init?.()) as Ref<unknown>)
   return states.get(key) as Ref<T>
 }
 export const useNuxtApp = () => __test.nuxtApp

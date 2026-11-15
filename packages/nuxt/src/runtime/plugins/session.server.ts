@@ -57,8 +57,7 @@ export default defineNuxtPlugin({
     // Ended by a sign-in or logout while the user loaded: render signed out and unresolved, so the client
     // restores with the cookie the browser now holds instead of showing the account that just left.
     if (await hydratedSessionEnded(event)) {
-      // Stryker disable next-line ArrowFunction: equivalent — the initial value is overwritten on the next line.
-      const user = useState(USER_KEY, () => null)
+      const user = useState<null>(USER_KEY)
       user.value = null
       // Now, not only in the render hooks: with streaming the headers are already out by then.
       await withholdIfReplaced(event)
