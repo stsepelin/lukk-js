@@ -13,6 +13,10 @@ const PASSWORD = 'password'
 const API_ROOT = process.env.LUKK_API_ROOT ?? 'http://127.0.0.1:8000'
 // Another origin entirely, to leave for and come back from (the API's health page).
 const AWAY = `${API_ROOT}/up`
+// The browser's note of a logout it asked for (`logoutCookieName`); the server clears it once that logout is done.
+const NOTE = '__Host-lukk-logout'
+// The server's answer that it finished one (`signedOutCookieName`): set only when it ended the session itself.
+const SIGNED_OUT = '__Host-lukk-signed-out'
 
 type Page = import('@playwright/test').Page
 type Context = import('@playwright/test').BrowserContext
@@ -94,6 +98,7 @@ test('the other tabs follow that logout even when the BFF answers before lukk do
 test('a tab that was away when the server finished the logout still hears about it', async ({ page, context }) => {
   // The other half of "other tabs follow": not the announcing tab's own logout, but a tab whose page
   // load is the one that finished it — it reads the server's signed-out answer and tells the rest.
+  test.setTimeout(60_000)
   const user = await freshUser(page)
   await login(page, user.email, user.password)
   const other = await context.newPage()
@@ -103,18 +108,39 @@ test('a tab that was away when the server finished the logout still hears about 
   // The logout leaves a note but never reaches lukk from this page…
   lukk('fail-logout')
   await visit(page, `/dashboard?away=${encodeURIComponent(AWAY)}`)
+  // The other tab hears the logout announced and asks who it is now. That request carries the note, so
+  // the server tries to finish the logout on it — and fails, as everything does while lukk is down.
+  const asked = other.waitForResponse(r => new URL(r.url()).pathname === '/api/user')
   await page.getByTestId('logout-leave').click()
   await page.waitForURL(AWAY)
+  await asked
   // The fault really took: a note is standing and the session is still live. Without this the test
   // passes just as well when `fail-logout` does nothing, and then it proves only the ordinary path.
-  expect((await context.cookies()).some(c => c.name === '__Host-lukk-logout')).toBe(true)
+  expect((await context.cookies()).some(c => c.name === NOTE)).toBe(true)
   expect(await liveSessions(page, user.email)).toBe(1)
   lukk('ok')
 
-  // …so the next page load is what ends it, and that page is what the other tab hears from.
-  await visit(page, '/')
-  await expect(other.getByTestId('auth-state')).toHaveText('guest', { timeout: 10_000 })
+  // A failed attempt makes the server leave that session's logout alone for ten seconds
+  // (`RETRY_AFTER_FAILURE_MS`): a page loaded inside them is served signed out and the BROWSER finishes
+  // the logout. That is a different path, and the one this test used to take without saying so — the
+  // other tab's request above always armed it — so its last line raced the browser's own request and
+  // lost now and then. Waited out, the page load below is the first attempt lukk can answer.
+  await page.waitForTimeout(10_500)
+
+  // …so the next page load is what ends it, and that page is what the other tab hears from. Listened
+  // for before the load: the other tab already reads "guest" (its question above was answered signed
+  // out, as any request carrying the note is), so its text cannot show that THIS page told it anything.
+  // Asking again can.
+  const heard = other.waitForRequest(r => new URL(r.url()).pathname === '/api/user', { timeout: 10_000 })
+  const landing = await page.goto('/')
+  // The server's own answer says it finished the logout: the signed-out marker is set on no other path
+  // (the note alone is also dropped for a session that was already over).
+  const set = (await landing!.headersArray()).filter(h => h.name.toLowerCase() === 'set-cookie').map(h => h.value)
+  expect(set.some(cookie => cookie.startsWith(`${SIGNED_OUT}=1`))).toBe(true)
+  expect(set.some(cookie => cookie.startsWith(`${NOTE}=;`))).toBe(true)
   expect(await liveSessions(page, user.email)).toBe(0)
+  await heard
+  await expect(other.getByTestId('auth-state')).toHaveText('guest')
 })
 
 test('a sign-in in another tab survives the logout of the session it replaced', async ({ page, context }) => {
