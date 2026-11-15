@@ -12,6 +12,9 @@
 # literal version. Each gets a prepared copy under `conformance/.matrix/` (see lib/nuxt-matrix.sh);
 # the default is the app's own pin, i.e. what a plain `pnpm build` uses.
 #
+# E2E_PLAYWRIGHT_ARGS is passed to `playwright test` as extra arguments — to chase a flake, e.g.
+#   E2E_PLAYWRIGHT_ARGS="e2e/session.spec.ts --repeat-each 20" conformance/browser.sh
+#
 # Ports (override E2E_PORT / E2E_UPSTREAM_PORT to avoid a clash with your own apps).
 # Needs: php >= 8.3, composer, node/pnpm, and Chromium (installed here on demand).
 set -uo pipefail
@@ -135,7 +138,8 @@ run_suite() {
   echo "▶ building the E2E app ($label) ..."
   pnpm -C "$dir" build || { SUMMARY="$SUMMARY\n  ✗ $label (build failed)"; RC=1; return; }
   echo "▶ running Playwright (BFF + SSR, same-origin, HTTPS) — $label ..."
-  if pnpm -C "$dir" exec playwright test; then
+  # shellcheck disable=SC2086  # deliberately word-split: these are extra arguments
+  if pnpm -C "$dir" exec playwright test ${E2E_PLAYWRIGHT_ARGS:-}; then
     SUMMARY="$SUMMARY\n  ✓ $label"
   else
     SUMMARY="$SUMMARY\n  ✗ $label"; RC=1
