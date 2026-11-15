@@ -239,7 +239,8 @@ export default defineEventHandler(async (event) => {
       if (!retryable) await clearSession(event, s, sessionName, cookieOptions)
       // The rotation is still out: come back shortly, and the retry joins it (see `REFRESH_WAIT_MS`). Or
       // lukk throttled the refresh, and this is how long it said to wait.
-      if (retryAfter) setResponseHeader(event, 'retry-after', retryAfter)
+      // Zero included: lukk saying "now" is an answer too, and direct mode's error carries it.
+      if (retryAfter !== undefined) setResponseHeader(event, 'retry-after', retryAfter)
       // A throttle is told as one, with lukk's own wait (RFC 6585 §4). It was a bare 503: in direct mode
       // the same refresh rejects with a 429 and `retryAfter`, and here the app could tell the visitor
       // neither why nor for how long. Not a 503 with that wait either — the client retries one of those

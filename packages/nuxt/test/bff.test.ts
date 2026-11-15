@@ -1056,16 +1056,17 @@ describe('the /refresh subpath is served, not proxied', () => {
     expect(Object.keys((ev1 as { __res?: Record<string, unknown> }).__res ?? {})).not.toContain('retry-after')
   })
 
-  it('passes on how long lukk said a throttled refresh must wait', async () => {
-    // RFC 6585 §4. Dropped, `LukkError.retryAfter` was set for every throttled call in BFF mode but this one.
+  it.each(['37', '0'])('passes on how long lukk said a throttled refresh must wait (%s s)', async (seconds) => {
+    // RFC 6585 §4. Dropped, `LukkError.retryAfter` was set for every throttled call in BFF mode but this
+    // one. Zero is a wait too — "now" — and direct mode's error carries it.
     const throttled = makeSession({ refresh: 'rt' })
-    mockFetch().fetch = vi.fn().mockResolvedValue(new Response('{}', { status: 429, headers: { 'retry-after': '37' } }))
+    mockFetch().fetch = vi.fn().mockResolvedValue(new Response('{}', { status: 429, headers: { 'retry-after': seconds } }))
     const event = makeEvent({ path: '/api/_lukk/refresh', method: 'POST', headers: { ...sameOrigin }, body: '{}', session: throttled })
 
     await run(event)
 
     expect(event.status).toBe(429)
-    expect(String((event as { __res?: Record<string, unknown> }).__res?.['retry-after'])).toBe('37')
+    expect(String((event as { __res?: Record<string, unknown> }).__res?.['retry-after'])).toBe(seconds)
     expect(throttled.clear).not.toHaveBeenCalled()
   })
 
