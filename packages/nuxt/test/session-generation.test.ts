@@ -836,6 +836,183 @@ describe('a sign-in or logout in another tab', () => {
   })
 })
 
+describe('a page brought back from the back/forward cache', () => {
+  // A frozen page is delivered no channel message, so what happened while it was away reached it only if
+  // it asks. A stand-in for the window's events: what was listened for, and what was let go of.
+  function eventedWindow() {
+    const listeners = new Map<string, (event: { persisted?: boolean }) => void>()
+    vi.stubGlobal('window', {
+      addEventListener: (type: string, fn: (event: { persisted?: boolean }) => void) => { listeners.set(type, fn) },
+      removeEventListener: (type: string, fn: unknown) => { if (listeners.get(type) === fn) listeners.delete(type) },
+    })
+    return listeners
+  }
+  const pageShown = async (listeners: ReturnType<typeof eventedWindow>, persisted: boolean) => {
+    listeners.get('pageshow')!({ persisted })
+    await macrotask()
+  }
+
+  it('shows the visitor signed out when they logged out since: Back does not bring the account back', async () => {
+    const listeners = eventedWindow()
+    api.mockRejectedValue({ status: 401 })
+    boot('bff')
+    const auth = useLukkAuth()
+    auth.user.value = { id: 'A' } // as it was frozen
+    useState<boolean>(CONFIRMED_KEY, () => false).value = true
+
+    await pageShown(listeners, true)
+
+    expect(auth.user.value).toBeNull()
+    expect(useState<boolean>(CONFIRMED_KEY, () => false).value).toBe(false)
+  })
+
+  it('shows the account the browser holds now, where another signed in since', async () => {
+    const listeners = eventedWindow()
+    api.mockResolvedValue({ id: 'B' })
+    boot('bff')
+    const auth = useLukkAuth()
+    auth.user.value = { id: 'A' }
+    useLukkSecret('challenge').value = 'pending-as-A'
+    useState<boolean>(CONFIRMED_KEY, () => false).value = true
+
+    await pageShown(listeners, true)
+
+    expect(auth.user.value).toEqual({ id: 'B' })
+    // What the frozen page held for the account it was showing is not the new one's: a 2FA challenge
+    // redeemed now would replace B's session, and the step-up was earned by A.
+    expect(useLukkSecret('challenge').value).toBeNull()
+    expect(useState<boolean>(CONFIRMED_KEY, () => false).value).toBe(false)
+  })
+
+  it('shows a sign-in made since on a page that was frozen signed out, and drops the challenge it held', async () => {
+    // Back onto a login page left mid-2FA, after signing in from another tab: redeemed now, the pending
+    // challenge would replace that session.
+    const listeners = eventedWindow()
+    api.mockResolvedValue({ id: 'B' })
+    boot('bff')
+    const auth = useLukkAuth()
+    expect(auth.user.value).toBeNull()
+    useLukkSecret('challenge').value = 'pending-here'
+
+    await pageShown(listeners, true)
+
+    expect(auth.user.value).toEqual({ id: 'B' })
+    expect(useLukkSecret('challenge').value).toBeNull()
+  })
+
+  it('throws nothing away when the page comes back to the session it left', async () => {
+    // Nobody said the session changed, and usually it has not: Back onto a 2FA prompt keeps the prompt,
+    // and a step-up earned a minute ago is still this visitor's.
+    const listeners = eventedWindow()
+    api.mockResolvedValue({ id: 'A' })
+    boot('bff')
+    const auth = useLukkAuth()
+    auth.user.value = { id: 'A' }
+    useLukkSecret('challenge').value = 'pending-as-A'
+    useState<boolean>(CONFIRMED_KEY, () => false).value = true
+    const before = restoreState(__test.nuxtApp).epoch
+
+    await pageShown(listeners, true)
+
+    expect(auth.user.value).toEqual({ id: 'A' })
+    expect(useLukkSecret('challenge').value).toBe('pending-as-A')
+    expect(useState<boolean>(CONFIRMED_KEY, () => false).value).toBe(true)
+    expect(restoreState(__test.nuxtApp).epoch).toBe(before)
+  })
+
+  it('keeps the page as it was when the answer could not be had — Back while offline is not a logout', async () => {
+    const listeners = eventedWindow()
+    api.mockRejectedValue({ status: 503 })
+    boot('bff')
+    const auth = useLukkAuth()
+    auth.user.value = { id: 'A' }
+    useLukkSecret('challenge').value = 'pending-as-A'
+    useState<boolean>(CONFIRMED_KEY, () => false).value = true
+
+    await pageShown(listeners, true)
+
+    expect(auth.user.value).toEqual({ id: 'A' })
+    expect(rawRestoreFailed()).toBe(false)
+    expect(useLukkSecret('challenge').value).toBe('pending-as-A')
+    expect(useState<boolean>(CONFIRMED_KEY, () => false).value).toBe(true)
+  })
+
+  it('direct: renews from the cookie the browser holds now, then loads its user', async () => {
+    // The token in memory is the frozen session's; the cookie may be another's by now.
+    const listeners = eventedWindow()
+    wire.client.refreshTokens!.mockResolvedValueOnce(pairFor('B'))
+    userEndpoint()
+    boot()
+    const auth = useLukkAuth()
+    auth.user.value = { id: 'A' }
+    useLukkSecret('access').value = 'A'
+
+    await pageShown(listeners, true)
+
+    expect(access()).toBe('B')
+    expect(auth.user.value).toEqual({ id: 'B' })
+  })
+
+  it('direct: signs out when there is no session any more, and keeps the page when it could not tell', async () => {
+    const listeners = eventedWindow()
+    boot()
+    const auth = useLukkAuth()
+    useLukkSecret('access').value = 'A'
+    auth.user.value = { id: 'A' }
+    useState<boolean>(CONFIRMED_KEY, () => false).value = true
+
+    wire.client.refreshTokens!.mockRejectedValueOnce({ status: 503 })
+    await pageShown(listeners, true)
+    expect(auth.user.value).toEqual({ id: 'A' })
+    expect(access()).toBe('A')
+    expect(useState<boolean>(CONFIRMED_KEY, () => false).value).toBe(true)
+    expect(api).not.toHaveBeenCalled() // no session renewed: no user to ask for
+
+    wire.client.refreshTokens!.mockRejectedValueOnce({ status: 401 })
+    await pageShown(listeners, true)
+    expect(auth.user.value).toBeNull()
+    expect(access()).toBeNull()
+    expect(useState<boolean>(CONFIRMED_KEY, () => false).value).toBe(false)
+  })
+
+  it('leaves an ordinary page load alone — the session plugin restores that one', async () => {
+    const listeners = eventedWindow()
+    api.mockResolvedValue({ id: 'B' })
+    boot('bff')
+    const auth = useLukkAuth()
+    auth.user.value = { id: 'A' }
+    const before = restoreState(__test.nuxtApp).epoch
+
+    await pageShown(listeners, false)
+
+    expect(auth.user.value).toEqual({ id: 'A' })
+    expect(api).not.toHaveBeenCalled()
+    expect(restoreState(__test.nuxtApp).epoch).toBe(before)
+  })
+
+  it('stops listening when the app is torn down', () => {
+    const listeners = eventedWindow()
+    const unmount: (() => void)[] = []
+    __test.nuxtApp = { vueApp: { onUnmount: (fn: () => void) => { unmount.push(fn) } } }
+    boot()
+    expect(listeners.has('pageshow')).toBe(true)
+
+    for (const fn of unmount) fn()
+
+    expect(listeners.has('pageshow')).toBe(false)
+  })
+
+  it('listens on a Vue without app.onUnmount too, and not at all on a window without events', () => {
+    const listeners = eventedWindow()
+    __test.nuxtApp = { vueApp: {} }
+    boot()
+    expect(listeners.get('pageshow')).toBeTypeOf('function')
+
+    vi.stubGlobal('window', {})
+    expect(() => boot()).not.toThrow()
+  })
+})
+
 describe('queued across tabs with a Web Lock', () => {
   function recordingLocks() {
     const names: string[] = []

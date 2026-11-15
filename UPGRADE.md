@@ -28,6 +28,21 @@ default is safe.
 
 Fixes from the 2026-11 audit. Nothing was renamed or removed; these are the ones an app can notice.
 
+### A throttled refresh answers `429` in BFF mode, not `503` (`lukk-nuxt`)
+
+**Low impact.** When lukk throttles a refresh, `/api/_lukk/refresh` used to answer a bare `503`. It now
+answers `429` with lukk's `Retry-After`. Only code that calls the refresh itself sees the difference
+(`useNuxtApp().$lukk.refreshTokens()`, or a request to that route of your own): the error has
+`status: 429` and `retryAfter` set, as direct mode's already did. The composables behave as before —
+the session is kept, and a restore that could not renew still reports `restoreFailed`.
+
+### A page restored from the back/forward cache re-checks the session (`lukk-nuxt`)
+
+**Low impact.** Pressing Back to a page the browser had frozen now reloads the user (and, in direct
+mode, renews from the cookie first — one rotation per restore). A page that was showing a signed-in
+user after a logout elsewhere now shows them signed out; one whose user could not be loaded just then
+is left as it was.
+
 ### `mode` must be `'bff'` or `'direct'` — the build fails otherwise
 
 **Low impact.** Any other value (`'BFF'`, a typo) used to register no proxy and report nothing, so

@@ -274,20 +274,54 @@ export default defineNuxtPlugin({
       // Tabs also queue their sign-ins, logouts and refreshes behind one Web Lock — see `acrossTabs`.
       state.lockName = `lukk:session:${scope}`
       state.scope = scope
+      // `onUnmount` is Vue 3.5+.
+      const vueApp = (nuxtApp as { vueApp?: { onUnmount?: (fn: () => void) => void } }).vueApp
+
+      // A page the browser brings back from its back/forward cache resumes exactly as it was frozen. It
+      // heard nothing while it was away — a frozen page is delivered no channel message — so a logout or a
+      // sign-in since then left it showing the account it was frozen with: sign out, press Back, and the
+      // signed-in page is on screen again. `persisted` is that case alone; an ordinary load restores
+      // through the session plugin, as ever. Not behind the channel: the page was away either way. And
+      // not `followOtherTab` itself, which was told the session changed (see `resumeFromCache`).
+      if (typeof window.addEventListener === 'function') {
+        const resumed = (event: { persisted?: boolean }) => {
+          if (event.persisted) void resumeFromCache().catch(unreported)
+        }
+        window.addEventListener('pageshow', resumed)
+        vueApp?.onUnmount?.(() => window.removeEventListener('pageshow', resumed))
+      }
 
       if (typeof window.BroadcastChannel === 'function') {
         const channel = new window.BroadcastChannel(`lukk:session:${scope}`)
         state.announce = () => channel.postMessage('changed')
         channel.onmessage = () => { void followOtherTab().catch(unreported) }
         // Closed with the app (HMR, a micro-frontend): left open it kept answering other tabs for the life
-        // of the page, and announcing on it after `close()` would throw. `onUnmount` is Vue 3.5+.
-        const vueApp = (nuxtApp as { vueApp?: { onUnmount?: (fn: () => void) => void } }).vueApp
+        // of the page, and announcing on it after `close()` would throw.
         vueApp?.onUnmount?.(() => {
           state.announce = undefined
           channel.onmessage = null
           channel.close()
         })
       }
+    }
+
+    /**
+     * Direct mode: the in-memory token may be an earlier session's while the cookie is the one the browser
+     * holds now. Renew from the cookie, and read "no session" as signed out. A restore that joined a
+     * refresh started before a change is superseded — ask again once that refresh has settled, with the
+     * cookie it left. Answers whether there is a session to load a user for; always, in BFF mode, where the
+     * tab holds no token and the user endpoint is what knows.
+     */
+    async function renewedFromCookie(auth: ReturnType<typeof useLukkAuth>): Promise<boolean> {
+      if (cfg.mode !== 'direct') return true
+      let outcome = await restore()
+      if (outcome.superseded) outcome = await restore()
+      if (outcome.pair) return true
+      if (!outcome.unavailable && !outcome.superseded) {
+        accessToken.value = null
+        auth.user.value = null
+      }
+      return false
     }
 
     async function followOtherTab(): Promise<void> {
@@ -299,22 +333,24 @@ export default defineNuxtPlugin({
       // And a step-up earned by the session that changed (see `dropStepUp`).
       dropStepUp(nuxtApp)
 
-      if (cfg.mode === 'direct') {
-        // The in-memory token is the old session's; the cookie is the new one's. Renew from the cookie,
-        // and read "no session" as signed out. A restore that joined a refresh started before the change
-        // is superseded — ask again once that refresh has settled, with the cookie it left.
-        let outcome = await restore()
-        if (outcome.superseded) outcome = await restore()
-        if (!outcome.pair) {
-          if (!outcome.unavailable && !outcome.superseded) {
-            accessToken.value = null
-            auth.user.value = null
-          }
-          return
-        }
-      }
+      if (await renewedFromCookie(auth)) await (auth as unknown as Record<typeof FOLLOW_SESSION, FollowSession>)[FOLLOW_SESSION]()
+    }
 
-      await (auth as unknown as Record<typeof FOLLOW_SESSION, FollowSession>)[FOLLOW_SESSION]()
+    /**
+     * The same question as `followOtherTab`, asked by a page the browser brought back from its
+     * back/forward cache — but nobody has said the session changed, and usually it has not. So nothing is
+     * thrown away on the way in, and an answer that could not be had changes nothing: pressing Back while
+     * offline must not sign the visitor out of the page they were on, nor cost them the 2FA prompt or the
+     * step-up they had. Only an answer that names someone else, or no one, drops what the frozen page
+     * held for the account it was showing.
+     */
+    async function resumeFromCache(): Promise<void> {
+      const auth = useLukkAuth()
+      const shown = auth.user.value?.id
+      if (await renewedFromCookie(auth)) await auth.fetchUser()
+      if (auth.user.value?.id === shown) return
+      useLukkSecret('challenge').value = null
+      dropStepUp(nuxtApp)
     }
 
     return { provide: { lukk: client, lukkRefresh: safeRefresh, lukkRestore: restore } }

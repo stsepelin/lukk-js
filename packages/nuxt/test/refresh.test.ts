@@ -1099,7 +1099,7 @@ describe('refreshOnce on an answer it does not read', () => {
 
     const result = await refreshOnce({ id: `s-${Math.random()}`, data: { refresh: 'rt' } }, 'https://lukk/auth')
 
-    expect(result).toEqual({ pair: null, retryable: true })
+    expect(result).toEqual({ pair: null, retryable: true, throttled: true })
     expect(cancel).toHaveBeenCalled()
   })
 
@@ -1243,8 +1243,28 @@ describe('refreshOnce outcome', () => {
       .toEqual({ pair: null, retryable: false })
   })
 
-  it.each([429, 503])('keeps the session on a %i — the token was never consumed', async (status) => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(answer(status))
+  it('keeps the session on a 503 — the token was never consumed', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(answer(503))
+
+    expect(await refreshOnce({ id: `s-${Math.random()}`, data: { refresh: 'rt' } }, 'https://lukk/auth'))
+      .toEqual({ pair: null, retryable: true })
+  })
+
+  it.each([
+    ['with the wait lukk gave', { 'retry-after': '42' }, { retryAfter: 42 }],
+    // Only as the number it parses to: an HTTP-date, or nothing at all, is no wait we can pass on.
+    ['with no wait where lukk gave none', {}, {}],
+    ['with no wait where it is not delay-seconds', { 'retry-after': 'Wed, 21 Oct 2026 07:28:00 GMT' }, {}],
+  ])('keeps the session on a 429 and says it was a throttle, %s', async (_label, headers, wait) => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 429, headers }))
+
+    // Strictly: no `retryAfter` member at all where lukk gave no wait, not one holding `undefined`.
+    expect(await refreshOnce({ id: `s-${Math.random()}`, data: { refresh: 'rt' } }, 'https://lukk/auth'))
+      .toStrictEqual({ pair: null, retryable: true, throttled: true, ...wait })
+  })
+
+  it('does not call an outage a throttle because it says how long to wait', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 503, headers: { 'retry-after': '42' } }))
 
     expect(await refreshOnce({ id: `s-${Math.random()}`, data: { refresh: 'rt' } }, 'https://lukk/auth'))
       .toEqual({ pair: null, retryable: true })
