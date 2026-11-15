@@ -100,7 +100,10 @@ export function createAuthenticator(rpId = 'localhost', origin = 'http://localho
     id: credentialId.toString('base64url'),
     type: 'public-key',
     rawId: credentialId,
-    getClientExtensionResults: () => ({}),
+    // As a platform authenticator reports itself, with the two kinds of extension result a browser
+    // gives — plain data and bytes — so the real server is shown everything `credentialToJSON` sends.
+    authenticatorAttachment: 'platform',
+    getClientExtensionResults: () => ({ credProps: { rk: true }, prf: { enabled: true, results: { first: new Uint8Array(32).buffer } } }),
     response,
   } as unknown as PublicKeyCredential)
 

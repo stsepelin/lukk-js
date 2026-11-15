@@ -59,7 +59,11 @@ export function credentialToJSON(credential: PublicKeyCredential): Record<string
     id: credential.id,
     type: credential.type,
     rawId: bufferToBase64url(credential.rawId),
-    clientExtensionResults: credential.getClientExtensionResults(),
+    clientExtensionResults: buffersToBase64url(withoutSecrets(credential.getClientExtensionResults())),
+    // Which kind of authenticator answered ("platform" or "cross-platform"), where the browser says —
+    // as `PublicKeyCredential.toJSON()` reports it (WebAuthn L3 §5.1). Left out, not `null`, where it
+    // does not: a server that validates the member's type would refuse `null`.
+    ...(typeof credential.authenticatorAttachment === 'string' ? { authenticatorAttachment: credential.authenticatorAttachment } : {}),
   }
 
   if (isAttestation(response)) {
@@ -79,6 +83,51 @@ export function credentialToJSON(credential: PublicKeyCredential): Record<string
     }
   }
   return base
+}
+
+/**
+ * Extension results without the two members that are secrets meant for the PAGE, not for a server.
+ *
+ * `prf.results` is key material the authenticator derives for this site — what an app encrypts the
+ * visitor's data with — and `largeBlob.blob` is whatever the app stored on the authenticator. lukk reads
+ * neither (it reads no extension result at all), so posting them would only put them where a request
+ * body goes: a proxy hop, an access log, an APM trace. That they used to leave as `{}` was an accident
+ * of `JSON.stringify`; that they stay behind is now on purpose. Everything else about both extensions
+ * is kept (`prf.enabled`, `largeBlob.supported`, `largeBlob.written`). An app that does want either on
+ * its own server reads it from the credential and sends it itself.
+ */
+function withoutSecrets(results: AuthenticationExtensionsClientOutputs): Record<string, unknown> {
+  const { prf, largeBlob, ...rest } = results as Record<string, unknown> & { prf?: Record<string, unknown>, largeBlob?: Record<string, unknown> }
+  return {
+    ...rest,
+    ...(prf === undefined ? {} : { prf: without(prf, 'results') }),
+    ...(largeBlob === undefined ? {} : { largeBlob: without(largeBlob, 'blob') }),
+  }
+}
+
+/** `value` without `member`, where it is an object that could have one; anything else as it is. */
+function without(value: unknown, member: string): unknown {
+  if (value === null || typeof value !== 'object') return value
+  const { [member]: _dropped, ...kept } = value as Record<string, unknown>
+  return kept
+}
+
+/**
+ * Extension results as JSON: every buffer, at any depth, as base64url — what `toJSON()` does for them.
+ *
+ * Most results are plain data (`credProps.rk`), but some carry `ArrayBuffer`s, and `JSON.stringify`
+ * writes one of those as `{}`: the bytes were silently dropped on the way to the server. By tag, not
+ * `instanceof`: a buffer from another realm (an iframe, a browser extension's polyfill) is not an
+ * instance of this realm's `ArrayBuffer`.
+ */
+function buffersToBase64url(value: unknown): unknown {
+  if (Object.prototype.toString.call(value) === '[object ArrayBuffer]') return bufferToBase64url(value as ArrayBuffer)
+  if (ArrayBuffer.isView(value)) return bufferToBase64url(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength) as ArrayBuffer)
+  if (Array.isArray(value)) return value.map(buffersToBase64url)
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, member]) => [key, buffersToBase64url(member)]))
+  }
+  return value
 }
 
 function descriptorFromJSON(d: { type: 'public-key', id: string, transports?: string[] }): PublicKeyCredentialDescriptor {

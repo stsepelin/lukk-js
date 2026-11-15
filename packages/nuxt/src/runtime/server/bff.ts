@@ -229,7 +229,7 @@ export default defineEventHandler(async (event) => {
     }
     if (await sessionEnded(sessionKey(s))) return replaced()
 
-    const { pair, expiresIn, retryable, retryAfter } = await refreshOnce(s, baseURL, clientIp)
+    const { pair, expiresIn, retryable, retryAfter, throttled } = await refreshOnce(s, baseURL, clientIp)
     if (await sessionEnded(sessionKey(s))) {
       revokeDroppedSession(event, { access: pair?.access, refresh: pair?.refresh }, baseURL, clientIp)
       return replaced()
@@ -237,8 +237,18 @@ export default defineEventHandler(async (event) => {
 
     if (!pair) {
       if (!retryable) await clearSession(event, s, sessionName, cookieOptions)
-      // The rotation is still out: come back shortly, and the retry joins it (see `REFRESH_WAIT_MS`).
-      if (retryAfter) setResponseHeader(event, 'retry-after', retryAfter)
+      // The rotation is still out: come back shortly, and the retry joins it (see `REFRESH_WAIT_MS`). Or
+      // lukk throttled the refresh, and this is how long it said to wait.
+      // Zero included: lukk saying "now" is an answer too, and direct mode's error carries it.
+      if (retryAfter !== undefined) setResponseHeader(event, 'retry-after', retryAfter)
+      // A throttle is told as one, with lukk's own wait (RFC 6585 §4). It was a bare 503: in direct mode
+      // the same refresh rejects with a 429 and `retryAfter`, and here the app could tell the visitor
+      // neither why nor for how long. Not a 503 with that wait either — the client retries one of those
+      // by itself, into the limit it was just told about.
+      if (throttled) {
+        setResponseStatus(event, 429)
+        return { message: 'Too Many Attempts.' }
+      }
       setResponseStatus(event, retryable ? 503 : 401)
       return { message: 'Unauthenticated.' }
     }

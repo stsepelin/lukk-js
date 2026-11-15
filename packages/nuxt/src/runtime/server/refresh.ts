@@ -1,5 +1,5 @@
 import type { H3Event } from 'h3'
-import { isTokenPair } from 'lukk-core'
+import { isTokenPair, retryAfterSeconds } from 'lukk-core'
 import { isSessionEnded, sessionEnded, sessionKey } from './ended-sessions'
 import { confirmationsHeld, entombed, entombHead, forgetRefreshJournal, type Link, refreshHeads, refreshJournals, responsesOut } from './refresh-journal'
 import { jwtExpiry } from './access-token'
@@ -43,8 +43,17 @@ export type RefreshResult = {
   pair: TokenSession | null
   expiresIn?: number
   retryable: boolean
-  /** Seconds after which to try again — set only when this caller stopped WAITING on a refresh still out. */
+  /**
+   * Seconds after which to try again. Set when this caller stopped WAITING on a refresh still out, and
+   * when lukk throttled the refresh and said for how long (`throttled`).
+   */
   retryAfter?: number
+  /**
+   * lukk answered 429: the refresh was never attempted, and the token is as valid as it was. Apart from
+   * an outage because the two are told to the browser differently — a throttle is not "come back in a
+   * moment and join the rotation", and its wait is lukk's to give, not ours.
+   */
+  throttled?: true
 }
 
 /**
@@ -589,7 +598,11 @@ async function rawRefresh(refreshToken: string, baseURL: string, clientIp: strin
   if (!res.ok) {
     // Unread, so cancelled: left alone it holds the connection until the runtime collects it.
     void res.body?.cancel().catch(() => {})
-    return { pair: null, retryable: res.status !== 401 && res.status !== 403 }
+    if (res.status !== 429) return { pair: null, retryable: res.status !== 401 && res.status !== 403 }
+    // A throttle carries its own timing (RFC 6585 §4), which nothing downstream can make up: kept, as
+    // the number it parses to, for the caller that answers the browser.
+    const retryAfter = retryAfterSeconds(res.headers.get('retry-after'))
+    return { pair: null, retryable: true, throttled: true, ...(retryAfter === undefined ? {} : { retryAfter }) }
   }
 
   let pair: unknown

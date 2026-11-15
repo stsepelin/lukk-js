@@ -126,6 +126,80 @@ describe('credentialToJSON', () => {
     expect(j.response.transports).toEqual(['internal'])
   })
 
+  it('says which kind of authenticator answered, where the browser does', () => {
+    const make = (authenticatorAttachment?: string | null) => ({
+      id: 'c',
+      type: 'public-key',
+      rawId: buf('r'),
+      ...(authenticatorAttachment === undefined ? {} : { authenticatorAttachment }),
+      getClientExtensionResults: () => ({}),
+      response: { clientDataJSON: buf('c'), attestationObject: buf('a') },
+    } as unknown as PublicKeyCredential)
+
+    expect(credentialToJSON(make('platform')).authenticatorAttachment).toBe('platform')
+    // Absent, not `null`: both where the browser reports null and where it has no such member at all.
+    expect('authenticatorAttachment' in credentialToJSON(make(null))).toBe(false)
+    expect('authenticatorAttachment' in credentialToJSON(make())).toBe(false)
+  })
+
+  it('writes the buffers in extension results as base64url, at any depth, and leaves the rest alone', () => {
+    // JSON.stringify writes an ArrayBuffer as `{}`.
+    const bytes = new Uint8Array([1, 2, 3, 250, 251, 252])
+    // A view onto the middle of a larger buffer: only its own bytes, not the whole buffer's.
+    const view = new Uint8Array(new Uint8Array([9, 9, 1, 2, 3, 9]).buffer, 2, 3)
+    const credential = {
+      id: 'c',
+      type: 'public-key',
+      rawId: buf('r'),
+      getClientExtensionResults: () => ({
+        credProps: { rk: true },
+        some: { nested: { bytes: bytes.buffer, view } },
+        list: [bytes.buffer, 'text', 7, null],
+        nothing: null,
+      }),
+      response: { clientDataJSON: buf('c'), attestationObject: buf('a') },
+    } as unknown as PublicKeyCredential
+
+    const json = credentialToJSON(credential)
+
+    expect(json.clientExtensionResults).toEqual({
+      credProps: { rk: true },
+      some: { nested: { bytes: 'AQID-vv8', view: 'AQID' } },
+      list: ['AQID-vv8', 'text', 7, null],
+      nothing: null,
+    })
+    // What reaches the server is what was read here: nothing left for JSON.stringify to flatten.
+    expect(JSON.parse(JSON.stringify(json)).clientExtensionResults).toEqual(json.clientExtensionResults)
+  })
+
+  it('keeps the page\'s secrets on the page: PRF output and the large blob are not posted', () => {
+    // `prf.results` is key material derived for this site, and `largeBlob.blob` what the app stored on
+    // the authenticator. lukk reads neither; sent, they would sit in a request body.
+    const secret = new Uint8Array([7, 7, 7]).buffer
+    const make = (results: unknown) => ({
+      id: 'c',
+      type: 'public-key',
+      rawId: buf('r'),
+      getClientExtensionResults: () => results,
+      response: { clientDataJSON: buf('c'), attestationObject: buf('a') },
+    } as unknown as PublicKeyCredential)
+
+    const sent = credentialToJSON(make({
+      credProps: { rk: true },
+      prf: { enabled: true, results: { first: secret, second: secret } },
+      largeBlob: { supported: true, written: false, blob: secret },
+    })).clientExtensionResults
+
+    // Everything else about both extensions is kept.
+    expect(sent).toEqual({ credProps: { rk: true }, prf: { enabled: true }, largeBlob: { supported: true, written: false } })
+    expect(JSON.stringify(sent)).not.toContain('BwcH') // the three bytes, as base64url
+
+    // Neither member is made up where the extension was not used, nor where a browser reports it oddly.
+    // Strictly: not even as a member holding `undefined`.
+    expect(credentialToJSON(make({ credProps: { rk: true } })).clientExtensionResults).toStrictEqual({ credProps: { rk: true } })
+    expect(credentialToJSON(make({ prf: null, largeBlob: true })).clientExtensionResults).toEqual({ prf: null, largeBlob: true })
+  })
+
   it('defaults transports to [] when getTransports is missing', () => {
     const credential = {
       id: 'c',

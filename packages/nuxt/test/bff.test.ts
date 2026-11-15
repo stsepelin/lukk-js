@@ -1040,8 +1040,10 @@ describe('the /refresh subpath is served, not proxied', () => {
     const throttled = makeSession({ refresh: 'rt' })
     mockFetch().fetch = vi.fn().mockResolvedValue(new Response('{}', { status: 429 }))
     const ev1 = makeEvent({ path: '/api/_lukk/refresh', method: 'POST', headers: { ...sameOrigin }, body: '{}', session: throttled })
-    await run(ev1)
-    expect(ev1.status).toBe(503)
+    expect(await run(ev1)).toEqual({ message: 'Too Many Attempts.' })
+    // Told as the throttle it is: a bare 503 here left the app unable to say why, where direct mode's
+    // refresh rejects with a 429.
+    expect(ev1.status).toBe(429)
     expect(throttled.data.refresh).toBe('rt') // a 429 must not turn into a logout
 
     const rejected = makeSession({ refresh: 'rt' })
@@ -1050,8 +1052,32 @@ describe('the /refresh subpath is served, not proxied', () => {
     await run(ev2)
     expect(ev2.status).toBe(401)
     expect(rejected.data).toEqual({})
-    // Only a wait that ran out says when to come back; a throttle's own timing is lukk's to give.
-    expect(Object.keys((ev1 as { __res?: Record<string, unknown> }).__res ?? {})).not.toContain('retry-after') // not even blank: Node refuses an undefined header value
+    // lukk gave no wait, so none is passed on — not even blank: Node refuses an undefined header value.
+    expect(Object.keys((ev1 as { __res?: Record<string, unknown> }).__res ?? {})).not.toContain('retry-after')
+  })
+
+  it.each(['37', '0'])('passes on how long lukk said a throttled refresh must wait (%s s)', async (seconds) => {
+    // RFC 6585 §4. Dropped, `LukkError.retryAfter` was set for every throttled call in BFF mode but this
+    // one. Zero is a wait too — "now" — and direct mode's error carries it.
+    const throttled = makeSession({ refresh: 'rt' })
+    mockFetch().fetch = vi.fn().mockResolvedValue(new Response('{}', { status: 429, headers: { 'retry-after': seconds } }))
+    const event = makeEvent({ path: '/api/_lukk/refresh', method: 'POST', headers: { ...sameOrigin }, body: '{}', session: throttled })
+
+    await run(event)
+
+    expect(event.status).toBe(429)
+    expect(String((event as { __res?: Record<string, unknown> }).__res?.['retry-after'])).toBe(seconds)
+    expect(throttled.clear).not.toHaveBeenCalled()
+  })
+
+  it('still answers an outage 503, with no wait of its own', async () => {
+    const down = makeSession({ refresh: 'rt' })
+    mockFetch().fetch = vi.fn().mockResolvedValue(new Response('{}', { status: 502 }))
+    const event = makeEvent({ path: '/api/_lukk/refresh', method: 'POST', headers: { ...sameOrigin }, body: '{}', session: down })
+
+    expect(await run(event)).toEqual({ message: 'Unauthenticated.' })
+    expect(event.status).toBe(503)
+    expect(Object.keys((event as { __res?: Record<string, unknown> }).__res ?? {})).not.toContain('retry-after')
   })
 
   it('answers a refresh lukk is slow to rotate with a retryable 503 and Retry-After, keeping the session', async () => {
